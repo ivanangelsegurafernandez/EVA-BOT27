@@ -3886,6 +3886,13 @@ def leer_ultima_fila_con_resultado(bot: str) -> tuple[dict | None, int | None]:
 # ==========================================================
 
 IA_SIGNALS_LOG = "ia_signals_log.csv"
+IA_SIGNALS_COLUMNS = [
+    "ts", "bot", "epoch", "decision_id", "phase",
+    "prob", "prob_live", "thr", "modo", "authorized",
+    "shadow_mode", "board_ready", "board_prob", "board_mine_risk",
+    "board_regime", "board_reason", "fusion_preview", "block_reason",
+    "result", "y"
+]
 CANARY_STATE_CACHE = {"ts": 0.0, "meta": None}
 
 # Blindaje: evita crash si threading aún no estaba importado (aunque tú sí lo tienes)
@@ -5098,17 +5105,111 @@ def _cap_prob_por_madurez(prob: float | None, bot: str | None = None) -> float |
 
 
 def _ensure_ia_signals_log():
-    """Crea el archivo con header si no existe."""
-    if os.path.exists(IA_SIGNALS_LOG):
-        return
+    """Crea/normaliza el archivo de señales con esquema estable."""
     try:
-        with open(IA_SIGNALS_LOG, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["ts", "bot", "epoch", "prob", "thr", "modo", "y"])
-            f.flush()
-            os.fsync(f.fileno())
+        if not os.path.exists(IA_SIGNALS_LOG):
+            with open(IA_SIGNALS_LOG, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(list(IA_SIGNALS_COLUMNS))
+                f.flush()
+                os.fsync(f.fileno())
+            return
+
+        df = _safe_read_csv_any_encoding(IA_SIGNALS_LOG)
+        if df is None:
+            return
+
+        changed = False
+        for c in IA_SIGNALS_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+                changed = True
+
+        extra = [c for c in list(df.columns) if c not in IA_SIGNALS_COLUMNS]
+        if extra:
+            changed = True
+
+        if changed:
+            df = df.reindex(columns=IA_SIGNALS_COLUMNS, fill_value="")
+            _atomic_write_text(IA_SIGNALS_LOG, df.to_csv(index=False, lineterminator="\n"))
     except Exception:
         pass
+
+def _append_ia_signal_event(row: dict) -> bool:
+    try:
+        _ensure_ia_signals_log()
+        payload = {c: row.get(c, "") for c in IA_SIGNALS_COLUMNS}
+        with IA_SIGNALS_LOCK:
+            with open(IA_SIGNALS_LOG, "a", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=IA_SIGNALS_COLUMNS)
+                w.writerow(payload)
+                f.flush()
+                os.fsync(f.fileno())
+        return True
+    except Exception:
+        return False
+
+def log_ia_signal_snapshot(bot: str, epoch: int | None, st: dict | None, reason: str = "") -> bool:
+    """Log liviano PRE_TRADE/ACK para que el shadow log tenga evidencia real."""
+    try:
+        if not isinstance(st, dict):
+            return False
+        ep = _to_int_epoch(epoch)
+        if ep is None:
+            return False
+
+        prob = st.get("prob_ia", None)
+        prob_live = st.get("prob_ia_oper", prob)
+        thr = float(get_umbral_operativo())
+        modo = str(st.get("modo_ia", "") or "")
+
+        p_live = float(prob_live) if isinstance(prob_live, (int, float)) else None
+        authorized = bool(
+            isinstance(p_live, float)
+            and np.isfinite(p_live)
+            and (modo.upper() not in ("", "OFF", "LOW_DATA"))
+            and (p_live >= thr)
+        )
+
+        row = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "bot": str(bot),
+            "epoch": str(int(ep)),
+            "decision_id": str(st.get("ia_decision_id", "") or ""),
+            "phase": str(reason or "pretrade"),
+            "prob": "" if prob is None else float(prob),
+            "prob_live": "" if p_live is None else float(p_live),
+            "thr": float(thr),
+            "modo": modo,
+            "authorized": int(authorized),
+            "shadow_mode": int(bool(BOARDGATE_SHADOW_MODE or (not BOARDGATE_FUSION_ENABLE))),
+            "board_ready": int(bool(st.get("boardgate_ready", False))),
+            "board_prob": "" if st.get("boardgate_prob", None) is None else float(st.get("boardgate_prob", 0.0) or 0.0),
+            "board_mine_risk": "" if st.get("boardgate_mine_risk", None) is None else float(st.get("boardgate_mine_risk", 0.0) or 0.0),
+            "board_regime": str(st.get("boardgate_regime", "UNKNOWN") or "UNKNOWN"),
+            "board_reason": str(st.get("boardgate_reason", "") or ""),
+            "fusion_preview": "" if st.get("boardgate_prob_final_preview", None) is None else float(st.get("boardgate_prob_final_preview", 0.0) or 0.0),
+            "block_reason": str(st.get("boardgate_block_preview", "") or ""),
+            "result": "",
+            "y": "",
+        }
+
+        with IA_SIGNALS_LOCK:
+            df = _safe_read_csv_any_encoding(IA_SIGNALS_LOG)
+            if df is not None and not df.empty:
+                for c in IA_SIGNALS_COLUMNS:
+                    if c not in df.columns:
+                        df[c] = ""
+                bot_s = _col_as_str_series(df, "bot").str.strip()
+                ep_s = pd.to_numeric(_col_as_str_series(df, "epoch"), errors="coerce")
+                ph_s = _col_as_str_series(df, "phase").str.strip().str.lower()
+                m = (bot_s == str(bot)) & (ep_s == float(int(ep))) & (ph_s == str(reason or "pretrade").strip().lower())
+                if m.any():
+                    return False
+
+        return _append_ia_signal_event(row)
+    except Exception:
+        return False
 
 def _leer_stats_canary_desde_log(ts_inicio: str | None) -> tuple[int, int]:
     """
@@ -5392,10 +5493,10 @@ def log_ia_open(bot: str, epoch: int, prob: float, thr: float, modo: str):
         with IA_SIGNALS_LOCK:
             df = _safe_read_csv_any_encoding(IA_SIGNALS_LOG)
             if df is None or df.empty:
-                df = pd.DataFrame(columns=["ts", "bot", "epoch", "prob", "thr", "modo", "y"])
+                df = pd.DataFrame(columns=list(IA_SIGNALS_COLUMNS))
 
             # Asegurar columnas base
-            for c in ["ts", "bot", "epoch", "prob", "thr", "modo", "y"]:
+            for c in IA_SIGNALS_COLUMNS:
                 if c not in df.columns:
                     df[c] = ""
 
@@ -5433,12 +5534,25 @@ def log_ia_open(bot: str, epoch: int, prob: float, thr: float, modo: str):
                     return False
 
             row = {
-                "ts": f"{time.time():.6f}",
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "bot": str(bot),
                 "epoch": str(int(epoch)),
+                "decision_id": "",
+                "phase": "open",
                 "prob": float(prob),
+                "prob_live": float(prob),
                 "thr": float(thr),
                 "modo": str(modo or ""),
+                "authorized": 1 if float(prob) >= float(thr) else 0,
+                "shadow_mode": "",
+                "board_ready": "",
+                "board_prob": "",
+                "board_mine_risk": "",
+                "board_regime": "",
+                "board_reason": "",
+                "fusion_preview": "",
+                "block_reason": "",
+                "result": "",
                 "y": ""
             }
 
@@ -5468,7 +5582,7 @@ def log_ia_close(
             if df is None or df.empty:
                 return False
 
-            for c in ["ts", "bot", "epoch", "prob", "thr", "modo", "y"]:
+            for c in IA_SIGNALS_COLUMNS:
                 if c not in df.columns:
                     df[c] = ""
 
@@ -5503,6 +5617,7 @@ def log_ia_close(
             if m_exact_open.any():
                 for idx in df.index[m_exact_open]:
                     df.at[idx, "y"] = str(yv)
+                    df.at[idx, "result"] = "GANANCIA" if int(yv) == 1 else "PÉRDIDA"
                     if prob_override is not None:
                         df.at[idx, "prob"] = float(prob_override)
                     if thr_override is not None:
@@ -5528,6 +5643,7 @@ def log_ia_close(
 
             pick_idx = cand["epoch_num"].idxmax()
             df.at[pick_idx, "y"] = str(yv)
+            df.at[pick_idx, "result"] = "GANANCIA" if int(yv) == 1 else "PÉRDIDA"
             if prob_override is not None:
                 df.at[pick_idx, "prob"] = float(prob_override)
             if thr_override is not None:
@@ -8110,22 +8226,40 @@ def build_xy_from_incremental(df: pd.DataFrame, feature_names: list | None = Non
     # y final
     y = y01.loc[mask].astype(int)
 
-    # Anti-duplicados exactos (features+label) para reducir sobreconfianza artificial
-    # keep='last' favorece estado más reciente cuando hay repeticiones.
+    # Anti-duplicados exactos (features+label) con guardia anti-colapso de muestra.
     before_n = int(len(X))
+    duplicates_removed = 0
+    dedup_applied = False
+    dedup_skipped = ""
     try:
         sig = X.round(6).astype(str).agg("|".join, axis=1) + "|" + y.astype(int).astype(str)
         keep = ~sig.duplicated(keep="last")
-        X = X.loc[keep].copy()
-        y = y.loc[keep].copy()
+        rows_after_dedup = int(keep.sum())
+        min_after = int(max(60, round(before_n * 0.55)))
+        if rows_after_dedup >= min_after:
+            X = X.loc[keep].copy()
+            y = y.loc[keep].copy()
+            duplicates_removed = max(0, before_n - int(len(X)))
+            dedup_applied = True
+        else:
+            dedup_skipped = f"dedup_guard:{before_n}->{rows_after_dedup}"
     except Exception:
-        pass
+        dedup_skipped = "dedup_err"
 
     try:
+        valid_label_rows = int(y01.isin([0.0, 1.0]).sum())
+        valid_quality_rows = int((y01.isin([0.0, 1.0]) & quality_mask).sum())
         globals()["_LAST_XY_QUALITY"] = {
+            "rows_df": int(len(df)),
+            "rows_label_valid": valid_label_rows,
+            "rows_label_drop": max(0, int(len(df)) - valid_label_rows),
+            "rows_quality_valid": valid_quality_rows,
+            "rows_quality_drop": max(0, valid_label_rows - valid_quality_rows),
             "rows_before": before_n,
             "rows_after": int(len(X)),
-            "duplicates_removed": max(0, before_n - int(len(X))),
+            "duplicates_removed": int(duplicates_removed),
+            "dedup_applied": bool(dedup_applied),
+            "dedup_skipped_reason": str(dedup_skipped),
             "used_quality_mask": bool(int((quality_mask & y01.isin([0.0, 1.0])).sum()) >= int(max(60, 0.50 * int(y01.isin([0.0, 1.0]).sum())))),
         }
     except Exception:
@@ -9575,39 +9709,11 @@ def _maybe_retrain_fallback_sklearn(force: bool = False):
             agregar_evento("⚠️ IA fallback: dataset incremental vacío.")
             return False
 
-        if "result_bin" not in df.columns:
-            agregar_evento("⚠️ IA fallback: falta result_bin en incremental.")
+        feats = list(INCREMENTAL_FEATURES_V2)
+        X, yb, feats, _ = _build_Xy_incremental(df, feature_names=feats)
+        if X is None or yb is None or len(X) < int(MIN_FIT_ROWS_LOW):
+            agregar_evento(f"⚠️ IA fallback: poca data útil ({0 if X is None else len(X)}).")
             return False
-
-        y = pd.to_numeric(df["result_bin"], errors="coerce")
-        mask = y.isin([0, 1])
-        if int(mask.sum()) < int(MIN_FIT_ROWS_LOW):
-            agregar_evento(f"⚠️ IA fallback: poca data útil ({int(mask.sum())}).")
-            return False
-
-        feats = [f for f in FEATURE_NAMES_DEFAULT if f in df.columns]
-        if not feats:
-            feats = [f for f in INCREMENTAL_FEATURES_V2 if f in df.columns]
-        if not feats:
-            reserved = {"result_bin", "resultado", "resultado_norm", "trade_status", "trade_status_norm"}
-            cand = []
-            for c in df.columns:
-                if c in reserved:
-                    continue
-                try:
-                    sc = pd.to_numeric(df[c], errors="coerce")
-                    if int(sc.notna().sum()) >= max(6, int(len(df) * 0.20)):
-                        cand.append(c)
-                except Exception:
-                    continue
-            feats = cand[:20]
-        if not feats:
-            agregar_evento("⚠️ IA fallback: no hay features numéricas utilizables en incremental.")
-            return False
-
-        X = df.loc[mask, feats].copy()
-        yb = y.loc[mask].astype(int).values
-        X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
         # Si solo hay una clase, no se puede entrenar
         if len(set(list(yb))) < 2:
@@ -9640,6 +9746,8 @@ def _maybe_retrain_fallback_sklearn(force: bool = False):
             "warmup_mode": bool(len(X) < int(TRAIN_WARMUP_MIN_ROWS)),
             "feature_names": list(feats),
             "model_family": "sklearn_logreg_fallback",
+            "model_artifact_path": str(globals().get("_MODEL_PATH", "modelo_xgb_v2.pkl")),
+            "model_artifact_kind": "sklearn_logreg_fallback",
         }
 
         ok_save = False
@@ -10395,9 +10503,11 @@ def maybe_retrain(force: bool = False):
             return False
 
         # 17) Guardado atómico (compatible con tu función si existe)
+        q = globals().get("_LAST_XY_QUALITY", {}) or {}
         meta = {
             "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "rows_total": int(n_total),
+            "n_samples": int(n_total),
             "rows_train": int(n_train),
             "rows_calib": int(n_cal),
             "rows_test": int(n_test),
@@ -10421,6 +10531,20 @@ def maybe_retrain(force: bool = False):
             "test_n_at_thr": int(test_n_at_thr),
             "feature_names": list(feats_used),
             "label_col": str(label_col),
+            "model_family": "xgboost_calibrated",
+            "model_artifact_path": str(globals().get("_MODEL_PATH", "modelo_xgb_v2.pkl")),
+            "model_artifact_kind": "xgb_or_calibrated_wrapper",
+            "warmup_mode": bool(int(n_total) < int(TRAIN_WARMUP_MIN_ROWS)),
+            "train_data_quality": {
+                "rows_df": int(q.get("rows_df", 0) or 0),
+                "rows_label_valid": int(q.get("rows_label_valid", 0) or 0),
+                "rows_label_drop": int(q.get("rows_label_drop", 0) or 0),
+                "rows_quality_valid": int(q.get("rows_quality_valid", 0) or 0),
+                "rows_quality_drop": int(q.get("rows_quality_drop", 0) or 0),
+                "duplicates_removed": int(q.get("duplicates_removed", 0) or 0),
+                "dedup_applied": bool(q.get("dedup_applied", False)),
+                "dedup_skipped_reason": str(q.get("dedup_skipped_reason", "") or ""),
+            },
             "schema_version": str(SCHEMA_VERSION_ACTIVE),
             "trained_on_incremental": str(DATASET_SCHEMA_TAG),
             "feature_health": health_before,
@@ -13728,6 +13852,11 @@ async def cargar_datos_bot(bot, token_actual):
                     _boardgate_shadow_eval(bot, _boardgate_prob_live(bot))
                 except Exception:
                     _apply_boardgate_defaults(estado_bots.get(bot, {}), reason="err:shadow_eval")
+
+                try:
+                    log_ia_signal_snapshot(bot, fila_dict.get("epoch"), estado_bots.get(bot, {}), reason="pretrade")
+                except Exception:
+                    pass
 
                 estado_bots[bot]["token"] = "REAL" if effective_owner == bot else "DEMO"
                 last_update_time[bot] = time.time()
