@@ -46,9 +46,9 @@ class BoardGateModel:
                     self.meta = json.load(f) or {}
             self._ready = True
             self._reason = "ok"
-        except Exception:
+        except Exception as e:
             self._ready = False
-            self._reason = "load_error"
+            self._reason = f"load_err:{type(e).__name__}"
 
     def _regime_from_features(self, feats: dict) -> str:
         if feats.get("mine_risk_red_wall", 0) > 0.65:
@@ -66,6 +66,7 @@ class BoardGateModel:
         return "UNKNOWN"
 
     def predict(self, features: dict) -> dict:
+        features = features if isinstance(features, dict) else {}
         try:
             risks = [
                 float(features.get("mine_risk_red_wall", 0.0) or 0.0),
@@ -105,12 +106,12 @@ class BoardGateModel:
                 "model_ready": True,
                 "reason": "ok",
             }
-        except Exception:
+        except Exception as e:
             return {
                 "p_pattern_win": 0.5,
                 "mine_risk": float(max(0.0, min(1.0, risk))),
                 "regime_tag": "UNKNOWN",
                 "confidence_pattern": 0.0,
                 "model_ready": False,
-                "reason": "predict_error",
+                "reason": f"predict_err:{type(e).__name__}",
             }

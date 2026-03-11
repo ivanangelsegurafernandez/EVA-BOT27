@@ -78,7 +78,7 @@ def _age_last(seq, target):
     return len(seq)
 
 
-def extract_board_features(board_matrix, candidate_row, right_edge_cols=4, right_edge_cols_wide=6):
+def extract_board_features(board_matrix, candidate_row, right_edge_cols=4, right_edge_cols_wide=6, candidate_idx=None):
     mat = [list(r or []) for r in (board_matrix or [])]
     if not mat:
         return {"board_valid": 0.0}
@@ -119,13 +119,24 @@ def extract_board_features(board_matrix, candidate_row, right_edge_cols=4, right
     row_coh = [_coherence_ratio(r) for r in mat]
 
     # sincronía candidato vs resto (signo columna)
+    cand_idx = int(candidate_idx) if isinstance(candidate_idx, int) else None
+    if cand_idx is None or cand_idx < 0 or cand_idx >= len(mat):
+        try:
+            cand_idx = next(i for i, r in enumerate(mat) if list(r) == cand)
+        except Exception:
+            cand_idx = None
+
     sync_hits = 0
     sync_den = 0
     for c in range(cols):
         v = cand[c]
         if v == 0:
             continue
-        others = [mat[r][c] for r in range(len(mat)) if mat[r] is not cand and mat[r][c] != 0]
+        others = [
+            mat[r][c]
+            for r in range(len(mat))
+            if (cand_idx is None or r != cand_idx) and mat[r][c] != 0
+        ]
         if not others:
             continue
         maj = 1 if sum(1 for x in others if x > 0) >= sum(1 for x in others if x < 0) else -1

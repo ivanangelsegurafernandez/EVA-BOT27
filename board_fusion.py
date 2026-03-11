@@ -19,7 +19,10 @@ def fuse_technical_with_board(
     model_ready = bool(board_pred.get("model_ready", False))
 
     if p_ia is None:
-        p_base = 0.0
+        if isinstance(p_board, (int, float)):
+            p_base = max(0.0, min(1.0, float(p_board)))
+        else:
+            p_base = 0.5
     else:
         p_base = max(0.0, min(1.0, float(p_ia)))
 
