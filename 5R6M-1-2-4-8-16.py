@@ -218,6 +218,7 @@ BOARDGATE_RIGHT_EDGE_COLS = 4
 BOARDGATE_RIGHT_EDGE_COLS_WIDE = 6
 BOARDGATE_MIN_READY_BOTS = 6
 BOARDGATE_LOG_COOLDOWN_S = 20.0
+BOARDGATE_EVAL_MIN_INTERVAL_S = 1.0
 BOARDGATE_MODEL_PATH = "boardgate_model.pkl"
 BOARDGATE_SCALER_PATH = "boardgate_scaler.pkl"
 BOARDGATE_FEATURES_PATH = "boardgate_features.pkl"
@@ -6326,6 +6327,7 @@ _BOARDGATE_MODEL = None
 _BOARDGATE_LAST_LOG_TS = 0.0
 _BOARDGATE_LAST_LOG_REASON = ""
 _BOARDGATE_LOG_TS_BY_KEY = {}
+_BOARDGATE_LAST_EVAL_TS_BY_BOT = {}
 
 
 def _boardgate_get_model():
@@ -6372,8 +6374,19 @@ def _boardgate_log_reason(bot: str, reason: str):
 
 def _boardgate_shadow_eval(bot: str, prob_ia_live: float | None):
     """Evalúa BoardGate-V1 en paralelo; en shadow no altera la decisión operativa actual."""
-    global _BOARDGATE_LAST_LOG_TS
+    global _BOARDGATE_LAST_LOG_TS, _BOARDGATE_LAST_EVAL_TS_BY_BOT
     st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+
+    # Anti-costo: evita reconstrucciones de tablero excesivas por ráfaga de filas PRE_TRADE.
+    try:
+        now_bg = time.time()
+        last_bg = float((_BOARDGATE_LAST_EVAL_TS_BY_BOT or {}).get(str(bot), 0.0) or 0.0)
+        if (now_bg - last_bg) < float(BOARDGATE_EVAL_MIN_INTERVAL_S):
+            return st
+        _BOARDGATE_LAST_EVAL_TS_BY_BOT[str(bot)] = now_bg
+    except Exception:
+        pass
+
     if not bool(BOARDGATE_ENABLE):
         _apply_boardgate_defaults(st, reason="disabled", prob_preview=prob_ia_live)
         return st

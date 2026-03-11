@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import os
+from collections import deque
 from typing import Callable
 
 
@@ -51,19 +52,36 @@ def _load_recent_closes(path: str, lookback_cols: int, status_normalizer=None, r
     if not os.path.exists(path):
         return out, meta
 
-    rows = []
-    try:
-        with open(path, "r", encoding="utf-8", newline="") as f:
-            rows = list(csv.DictReader(f))
-    except Exception:
-        try:
-            with open(path, "r", encoding="latin-1", newline="") as f:
-                rows = list(csv.DictReader(f))
-        except Exception:
-            return out, meta
+    def _iter_rows(enc: str):
+        with open(path, "r", encoding=enc, newline="") as f:
+            for row in csv.DictReader(f):
+                yield row
 
-    meta["rows"] = len(rows)
-    for row in reversed(rows):
+    rows_iter = None
+    for enc in ("utf-8", "latin-1"):
+        try:
+            rows_iter = _iter_rows(enc)
+            first = next(rows_iter, None)
+            if first is None:
+                return out, meta
+            # reconstruir iterador incluyendo primera fila
+            def _chain_first(fr, it):
+                yield fr
+                for r in it:
+                    yield r
+            rows_iter = _chain_first(first, rows_iter)
+            break
+        except Exception:
+            rows_iter = None
+            continue
+
+    if rows_iter is None:
+        return out, meta
+
+    # Mantener buffer chico de cierres válidos; evita cargar CSV completo en memoria.
+    recent = deque(maxlen=max(8, int(lookback_cols)))
+    for row in rows_iter:
+        meta["rows"] += 1
         res = _norm_result(row.get("resultado", ""), result_normalizer)
         if res not in {"GANANCIA", "PÉRDIDA"}:
             continue
@@ -71,18 +89,16 @@ def _load_recent_closes(path: str, lookback_cols: int, status_normalizer=None, r
         ts = _norm_status(row.get("trade_status", ""), status_normalizer)
         if ts == "CERRADO":
             meta["status_prioritized"] += 1
-            out.append(1 if res == "GANANCIA" else -1)
+            recent.append(1 if res == "GANANCIA" else -1)
         elif ts in {"", "NONE", "NULL"}:
             # fallback legacy: resultado válido pero status vacío
-            out.append(1 if res == "GANANCIA" else -1)
+            recent.append(1 if res == "GANANCIA" else -1)
         else:
             continue
-
         meta["closed_rows"] += 1
-        if len(out) >= int(lookback_cols):
-            break
 
-    out.reverse()
+    if recent:
+        out = list(recent)[-int(lookback_cols):]
     return out, meta
 
 
