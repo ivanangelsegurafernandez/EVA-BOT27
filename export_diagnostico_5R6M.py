@@ -12,7 +12,6 @@ import csv
 import hashlib
 import json
 import locale
-import os
 import platform
 import re
 import shutil
@@ -70,15 +69,42 @@ KEY_GROUPS = {
 }
 
 TEXT_EXTENSIONS = {".py", ".txt", ".md", ".log", ".json", ".yaml", ".yml", ".ini", ".cfg", ".env"}
+HEURISTIC_EXTENSIONS = {".py", ".csv", ".json", ".pkl", ".txt", ".md", ".log"}
+EXCLUDED_DIR_NAMES = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "env",
+    ".mypy_cache",
+    ".pytest_cache",
+    "node_modules",
+}
+EXPORT_DIR_PREFIX = "diagnostico_5R6M_export_"
+MAX_HEURISTIC_FILE_SIZE_MB = 50
 
 SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r'(?P<prefix>\b(?:DERIV_)?(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASS|AUTH)[A-Z0-9_\-]*\b\s*[=:]\s*)'
+    r'(?P<prefix>\b(?:DERIV_)?(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASS|AUTH)[A-Z0-9_\-]*\b\s*(?P<sep>[:=])\s*)'
     r'(?P<value>"[^"]*"|\'[^\']*\'|[^\s#]+)',
     flags=re.IGNORECASE,
 )
 
 BEARER_RE = re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9\-._~+/]+=*)")
-GENERIC_KEY_RE = re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*([\"\']?)([^\"\'\s,;]{8,})\2")
+GENERIC_KEY_RE = re.compile(
+    r"(?i)(?P<key>\b(?:api[_-]?key|token|secret|password)\b)(?P<ws1>\s*)(?P<sep>[:=])(?P<ws2>\s*)(?P<q>[\"\']?)(?P<value>[^\"\'\s,;]{8,})(?P=q)"
+)
+
+
+def is_excluded_path(path: Path) -> bool:
+    parts = path.parts
+    for part in parts:
+        if part in EXCLUDED_DIR_NAMES:
+            return True
+        if part.startswith(EXPORT_DIR_PREFIX):
+            return True
+    if path.is_file() and path.suffix.lower() == ".zip" and path.name.startswith(EXPORT_DIR_PREFIX):
+        return True
+    return False
 
 
 def sha256_file(path: Path) -> Optional[str]:
@@ -97,35 +123,60 @@ def is_text_candidate(path: Path) -> bool:
 
 
 def redact_text(content: str) -> str:
-    content = SENSITIVE_ASSIGNMENT_RE.sub(lambda m: f"{m.group('prefix')}\"***REDACTED***\"", content)
+    def _replace_sensitive_assignment(match: re.Match[str]) -> str:
+        prefix = match.group("prefix")
+        value = match.group("value")
+        if value.startswith('"') and value.endswith('"'):
+            return f'{prefix}"***REDACTED***"'
+        if value.startswith("'") and value.endswith("'"):
+            return f"{prefix}'***REDACTED***'"
+        return f"{prefix}***REDACTED***"
+
+    content = SENSITIVE_ASSIGNMENT_RE.sub(_replace_sensitive_assignment, content)
     content = BEARER_RE.sub(r"\1***REDACTED***", content)
 
     def _generic_sub(match: re.Match[str]) -> str:
-        key = match.group(1)
-        quote = match.group(2) or '"'
-        return f"{key}={quote}***REDACTED***{quote}"
+        key = match.group("key")
+        ws1 = match.group("ws1")
+        sep = match.group("sep")
+        ws2 = match.group("ws2")
+        quote = match.group("q")
+        return f"{key}{ws1}{sep}{ws2}{quote}***REDACTED***{quote}"
 
     return GENERIC_KEY_RE.sub(_generic_sub, content)
 
 
-def find_candidate_files(root: Path) -> Dict[str, List[Path]]:
+def find_candidate_files(root: Path) -> Tuple[Dict[str, List[Path]], List[str]]:
     found: Dict[str, List[Path]] = {name: [] for name in IMPORTANT_EXACT}
     found["_pattern"] = []
+    warnings: List[str] = []
 
     for p in root.rglob("*"):
+        if is_excluded_path(p):
+            continue
         if not p.is_file():
             continue
         name = p.name
         lower_name = name.lower()
+        ext = p.suffix.lower()
         if name in IMPORTANT_EXACT:
             found[name].append(p)
         if (
             name.startswith("boardgate_")
-            or p.suffix.lower() == ".log"
-            or (p.suffix.lower() == ".json" and any(k in lower_name for k in ["meta", "calibration", "signals", "report"]))
+            or ext == ".log"
+            or (ext == ".json" and any(k in lower_name for k in ["meta", "calibration", "signals", "report"]))
             or any(k in lower_name for k in ["meta", "signals", "incremental", "features", "scaler", "model"])
         ):
-            found["_pattern"].append(p)
+            if ext in HEURISTIC_EXTENSIONS:
+                found["_pattern"].append(p)
+                try:
+                    file_size = p.stat().st_size
+                    if name not in IMPORTANT_EXACT and file_size > (MAX_HEURISTIC_FILE_SIZE_MB * 1024 * 1024):
+                        warnings.append(
+                            f"Archivo heurístico grande incluido ({file_size} bytes): {p}"
+                        )
+                except Exception:
+                    pass
 
     # Unificar y quitar duplicados de patrones ya capturados por exactos
     exact_set = {q.resolve() for k, v in found.items() if k != "_pattern" for q in v}
@@ -138,7 +189,7 @@ def find_candidate_files(root: Path) -> Dict[str, List[Path]]:
         seen.add(rp)
         uniq_pattern.append(p)
     found["_pattern"] = uniq_pattern
-    return found
+    return found, warnings
 
 
 def safe_relative(path: Path, root: Path) -> Path:
@@ -220,6 +271,7 @@ def summarize_dataset(dataset_path: Optional[Path], feature_names_path: Optional
 
     if not dataset_path or not dataset_path.exists():
         warnings.append("dataset_incremental.csv no encontrado")
+        summary["valid_rows"] = 0
         if feature_names:
             consistency = {
                 "feature_names_count": len(feature_names),
@@ -233,6 +285,7 @@ def summarize_dataset(dataset_path: Optional[Path], feature_names_path: Optional
         if pd is not None:
             df = pd.read_csv(dataset_path)
             summary["rows"] = int(df.shape[0])
+            summary["valid_rows"] = int(df.dropna(how="all").shape[0])
             summary["columns_count"] = int(df.shape[1])
             summary["columns"] = [str(c) for c in df.columns.tolist()]
             summary["nan_per_column"] = {str(k): int(v) for k, v in df.isna().sum().to_dict().items()}
@@ -255,18 +308,24 @@ def summarize_dataset(dataset_path: Optional[Path], feature_names_path: Optional
                 cols = set(summary["columns"])
                 fset = set(feature_names)
                 consistency = {
+                    "status": "ok" if len(fset - cols) == 0 else "warning",
+                    "message": "Todas las features esperadas están presentes" if len(fset - cols) == 0 else "Hay features esperadas faltantes en el dataset",
                     "feature_names_count": len(feature_names),
                     "dataset_columns_count": len(cols),
                     "present_in_dataset": sorted(fset & cols),
                     "missing_in_dataset": sorted(fset - cols),
                     "extra_in_dataset": sorted(cols - fset),
                 }
+                summary["feature_names_expected_count"] = len(feature_names)
+                summary["feature_names_present_count"] = len(fset & cols)
+                summary["feature_names_missing_count"] = len(fset - cols)
         else:
             with dataset_path.open("r", encoding="utf-8", errors="replace", newline="") as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
                 cols = reader.fieldnames or []
             summary["rows"] = len(rows)
+            summary["valid_rows"] = sum(1 for r in rows if any((v or "").strip() for v in r.values()))
             summary["columns_count"] = len(cols)
             summary["columns"] = cols
             nan_per_col = {c: 0 for c in cols}
@@ -279,12 +338,17 @@ def summarize_dataset(dataset_path: Optional[Path], feature_names_path: Optional
                 cset = set(cols)
                 fset = set(feature_names)
                 consistency = {
+                    "status": "ok" if len(fset - cset) == 0 else "warning",
+                    "message": "Todas las features esperadas están presentes" if len(fset - cset) == 0 else "Hay features esperadas faltantes en el dataset",
                     "feature_names_count": len(feature_names),
                     "dataset_columns_count": len(cset),
                     "present_in_dataset": sorted(fset & cset),
                     "missing_in_dataset": sorted(fset - cset),
                     "extra_in_dataset": sorted(cset - fset),
                 }
+                summary["feature_names_expected_count"] = len(feature_names)
+                summary["feature_names_present_count"] = len(fset & cset)
+                summary["feature_names_missing_count"] = len(fset - cset)
             warnings.append("pandas no disponible; resumen CSV generado en modo básico")
     except Exception as exc:
         warnings.append(f"Error resumiendo dataset_incremental.csv: {exc}")
@@ -426,6 +490,109 @@ def check_meta_vs_dataset(model_summary: Dict[str, Any], dataset_summary: Dict[s
     return warnings
 
 
+def check_feature_consistency(
+    dataset_path: Optional[Path],
+    feature_names_path: Optional[Path],
+    dataset_summary: Dict[str, Any],
+    consistency: Dict[str, Any],
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "dataset_exists": bool(dataset_path and dataset_path.exists()),
+        "feature_names_exists": bool(feature_names_path and feature_names_path.exists()),
+        "dataset_path": str(dataset_path) if dataset_path else None,
+        "feature_names_path": str(feature_names_path) if feature_names_path else None,
+        "status": "warning",
+        "message": "No se pudo evaluar consistencia por archivos faltantes",
+    }
+
+    if not result["dataset_exists"] and not result["feature_names_exists"]:
+        result["message"] = "Faltan dataset_incremental.csv y feature_names_v2.pkl"
+        return result
+    if not result["dataset_exists"]:
+        result["message"] = "Falta dataset_incremental.csv"
+        return result
+    if not result["feature_names_exists"]:
+        result["message"] = "Falta feature_names_v2.pkl"
+        return result
+    if not consistency:
+        result["message"] = "No se pudo construir consistencia de features"
+        return result
+
+    expected = consistency.get("feature_names_count", 0)
+    present = consistency.get("present_in_dataset", [])
+    missing = consistency.get("missing_in_dataset", [])
+    extra = consistency.get("extra_in_dataset", [])
+
+    result.update(
+        {
+            "expected_features_count": int(expected),
+            "present_features_count": len(present),
+            "missing_features_count": len(missing),
+            "extra_features_count": len(extra),
+            "expected_features": sorted(set(present) | set(missing)),
+            "present_features": present,
+            "missing_features": missing,
+            "extra_features": extra,
+            "dataset_columns_count": dataset_summary.get("columns_count"),
+        }
+    )
+    if missing:
+        result["status"] = "warning"
+        result["message"] = f"Hay {len(missing)} features esperadas ausentes"
+    else:
+        result["status"] = "ok"
+        result["message"] = "Features esperadas presentes en dataset"
+    return result
+
+
+def summarize_model_artifacts(model_path: Optional[Path], scaler_path: Optional[Path]) -> Tuple[Dict[str, Any], List[str]]:
+    summary: Dict[str, Any] = {
+        "model_exists": bool(model_path and model_path.exists()),
+        "scaler_exists": bool(scaler_path and scaler_path.exists()),
+        "model_path": str(model_path) if model_path else None,
+        "scaler_path": str(scaler_path) if scaler_path else None,
+    }
+    warnings: List[str] = []
+
+    def _family(module_name: str, class_name: str) -> str:
+        name = f"{module_name}.{class_name}".lower()
+        if "xgboost" in name or "xgb" in name:
+            return "xgboost"
+        if "logisticregression" in name:
+            return "logistic_regression"
+        if "randomforest" in name:
+            return "random_forest"
+        if "sklearn" in name:
+            return "sklearn_other"
+        return "unknown"
+
+    def _inspect(path: Optional[Path], key: str) -> None:
+        if not path or not path.exists():
+            summary[f"{key}_load_status"] = "missing"
+            return
+        if joblib is None:
+            summary[f"{key}_load_status"] = "not_loaded"
+            summary[f"{key}_reason"] = "joblib no disponible"
+            warnings.append(f"No se pudo inspeccionar {path.name}: joblib no disponible")
+            return
+        try:
+            obj = joblib.load(path)
+            class_name = obj.__class__.__name__
+            module_name = obj.__class__.__module__
+            summary[f"{key}_load_status"] = "loaded"
+            summary[f"{key}_class"] = class_name
+            summary[f"{key}_module"] = module_name
+            summary[f"{key}_family"] = _family(module_name, class_name)
+        except Exception as exc:
+            summary[f"{key}_load_status"] = "failed"
+            summary[f"{key}_reason"] = str(exc)
+            warnings.append(f"No se pudo inspeccionar {path.name}: {exc}")
+
+    _inspect(model_path, "model")
+    _inspect(scaler_path, "scaler")
+    return summary, warnings
+
+
 def build_manifest(
     root: Path,
     copied_records: List[Dict[str, Any]],
@@ -455,6 +622,8 @@ def write_markdown_summary(
     signals_summary: Dict[str, Any],
     model_summary: Dict[str, Any],
     feature_consistency: Dict[str, Any],
+    feature_consistency_report: Dict[str, Any],
+    model_artifacts_summary: Dict[str, Any],
     warnings: List[str],
 ) -> None:
     principales = [r for r in copied_records if Path(r["src"]).name in KEY_GROUPS["principal"] + KEY_GROUPS["boardgate_modulos"]]
@@ -504,6 +673,17 @@ def write_markdown_summary(
         f"- presentes en dataset: `{len(feature_consistency.get('present_in_dataset', [])) if feature_consistency else 'N/A'}`",
         f"- faltantes en dataset: `{len(feature_consistency.get('missing_in_dataset', [])) if feature_consistency else 'N/A'}`",
         f"- extras en dataset: `{len(feature_consistency.get('extra_in_dataset', [])) if feature_consistency else 'N/A'}`",
+        f"- estado: `{feature_consistency_report.get('status', 'N/A')}`",
+        f"- mensaje: `{feature_consistency_report.get('message', 'N/A')}`",
+    ])
+
+    lines.extend([
+        "",
+        "## Resumen de artefactos de modelo (PKL)",
+        f"- model load status: `{model_artifacts_summary.get('model_load_status', 'N/A')}`",
+        f"- model class/family: `{model_artifacts_summary.get('model_class', 'N/A')} / {model_artifacts_summary.get('model_family', 'N/A')}`",
+        f"- scaler load status: `{model_artifacts_summary.get('scaler_load_status', 'N/A')}`",
+        f"- scaler class/family: `{model_artifacts_summary.get('scaler_class', 'N/A')} / {model_artifacts_summary.get('scaler_family', 'N/A')}`",
     ])
 
     lines.append("")
@@ -559,7 +739,8 @@ def main() -> int:
     warnings: List[str] = []
     copied_records: List[Dict[str, Any]] = []
 
-    found = find_candidate_files(root)
+    found, find_warnings = find_candidate_files(root)
+    warnings.extend(find_warnings)
 
     all_selected: List[Path] = []
     for k, vals in found.items():
@@ -609,15 +790,25 @@ def main() -> int:
     signals_path = pick("ia_signals_log.csv")
     meta_path = pick("model_meta_v2.json")
     feature_names_path = pick("feature_names_v2.pkl")
+    model_artifact_path = pick("modelo_xgb_v2.pkl")
+    scaler_artifact_path = pick("scaler_v2.pkl")
 
     dataset_summary, feature_consistency, w1 = summarize_dataset(dataset_path, feature_names_path)
     signals_summary, w2 = summarize_signals_log(signals_path)
     model_summary, w3 = summarize_model_meta(meta_path)
+    feature_consistency_report = check_feature_consistency(
+        dataset_path,
+        feature_names_path,
+        dataset_summary,
+        feature_consistency,
+    )
+    model_artifacts_summary, w4 = summarize_model_artifacts(model_artifact_path, scaler_artifact_path)
     env_summary = summarize_environment(root)
 
     warnings.extend(w1)
     warnings.extend(w2)
     warnings.extend(w3)
+    warnings.extend(w4)
     warnings.extend(check_meta_vs_dataset(model_summary, dataset_summary))
 
     missing_expected: List[str] = []
@@ -639,6 +830,8 @@ def main() -> int:
     write_json(reports_dir / "dataset_summary.json", dataset_summary)
     write_json(reports_dir / "signals_summary.json", signals_summary)
     write_json(reports_dir / "model_summary.json", model_summary)
+    write_json(reports_dir / "feature_consistency.json", feature_consistency_report)
+    write_json(reports_dir / "model_artifacts_summary.json", model_artifacts_summary)
     write_json(reports_dir / "environment_summary.json", env_summary)
 
     write_markdown_summary(
@@ -649,6 +842,8 @@ def main() -> int:
         signals_summary,
         model_summary,
         feature_consistency,
+        feature_consistency_report,
+        model_artifacts_summary,
         warnings,
     )
 
