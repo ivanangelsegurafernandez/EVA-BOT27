@@ -6325,6 +6325,7 @@ _IA_TIEBREAK_LOG_TS = 0.0
 _BOARDGATE_MODEL = None
 _BOARDGATE_LAST_LOG_TS = 0.0
 _BOARDGATE_LAST_LOG_REASON = ""
+_BOARDGATE_LOG_TS_BY_KEY = {}
 
 
 def _boardgate_get_model():
@@ -6343,18 +6344,28 @@ def _boardgate_get_model():
 
 
 def _boardgate_log_reason(bot: str, reason: str):
-    global _BOARDGATE_LAST_LOG_TS, _BOARDGATE_LAST_LOG_REASON
+    global _BOARDGATE_LAST_LOG_TS, _BOARDGATE_LAST_LOG_REASON, _BOARDGATE_LOG_TS_BY_KEY
     try:
         now = time.time()
+        bot_s = str(bot or "")
         rs = str(reason or "")
         if not (rs in ("no_model", "low_data") or rs.startswith("err:") or rs.startswith("load_err:") or rs.startswith("predict_err:")):
             return
-        if rs == _BOARDGATE_LAST_LOG_REASON and (now - float(_BOARDGATE_LAST_LOG_TS or 0.0)) < float(BOARDGATE_LOG_COOLDOWN_S):
+
+        key = f"{bot_s}|{rs}"
+        last_key_ts = float((_BOARDGATE_LOG_TS_BY_KEY or {}).get(key, 0.0) or 0.0)
+        if (now - last_key_ts) < float(BOARDGATE_LOG_COOLDOWN_S):
             return
-        if (now - float(_BOARDGATE_LAST_LOG_TS or 0.0)) >= float(BOARDGATE_LOG_COOLDOWN_S):
-            _BOARDGATE_LAST_LOG_TS = now
-            _BOARDGATE_LAST_LOG_REASON = rs
-            agregar_evento(f"🧩 BoardGate {bot}: {rs}")
+
+        _BOARDGATE_LOG_TS_BY_KEY[key] = now
+        # Higiene simple para no crecer indefinidamente
+        if len(_BOARDGATE_LOG_TS_BY_KEY) > 200:
+            cutoff = now - max(float(BOARDGATE_LOG_COOLDOWN_S) * 3.0, 60.0)
+            _BOARDGATE_LOG_TS_BY_KEY = {k: v for k, v in _BOARDGATE_LOG_TS_BY_KEY.items() if float(v) >= cutoff}
+
+        _BOARDGATE_LAST_LOG_TS = now
+        _BOARDGATE_LAST_LOG_REASON = rs
+        agregar_evento(f"🧩 BoardGate {bot_s}: {rs}")
     except Exception:
         pass
 
@@ -6363,7 +6374,6 @@ def _boardgate_shadow_eval(bot: str, prob_ia_live: float | None):
     """Evalúa BoardGate-V1 en paralelo; en shadow no altera la decisión operativa actual."""
     global _BOARDGATE_LAST_LOG_TS
     st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
-    default_out = _boardgate_defaults(reason="disabled", prob_preview=prob_ia_live)
     if not bool(BOARDGATE_ENABLE):
         _apply_boardgate_defaults(st, reason="disabled", prob_preview=prob_ia_live)
         return st
@@ -10769,6 +10779,8 @@ def mostrar_panel():
                 bg_txt = "Board: warmup"
             elif bg_reason in ("no_model", "low_data"):
                 bg_txt = f"Board: {bg_reason}"
+            elif bg_reason.startswith("err:") or bg_reason.startswith("load_err:") or bg_reason.startswith("predict_err:"):
+                bg_txt = "Board: err"
             else:
                 p_txt = "--" if not isinstance(bg_p, (int, float)) else f"{float(bg_p)*100:.1f}%"
                 r_txt = "--" if not isinstance(bg_risk, (int, float)) else f"{float(bg_risk):.2f}"
