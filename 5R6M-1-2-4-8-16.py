@@ -46,6 +46,11 @@ import pandas as pd
 import importlib
 import traceback
 
+from board_state import build_board_state
+from board_features import extract_board_features
+from board_model import BoardGateModel
+from board_fusion import fuse_technical_with_board
+
 import math
 import hashlib
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
@@ -204,6 +209,21 @@ HUD_SHOW_TOP3_GATES = False
 HUD_SHOW_RACHA_BLOQUES = False
 HUD_EVENTS_MAX = 4
 HUD_EVENT_MAX_CHARS = 150
+
+# === BoardGate-V1 (contexto de tablero) ===
+BOARDGATE_ENABLE = True
+BOARDGATE_SHADOW_MODE = True
+BOARDGATE_LOOKBACK_COLS = 16
+BOARDGATE_RIGHT_EDGE_COLS = 4
+BOARDGATE_RIGHT_EDGE_COLS_WIDE = 6
+BOARDGATE_MIN_READY_BOTS = 6
+BOARDGATE_LOG_COOLDOWN_S = 20.0
+BOARDGATE_EVAL_MIN_INTERVAL_S = 1.0
+BOARDGATE_MODEL_PATH = "boardgate_model.pkl"
+BOARDGATE_SCALER_PATH = "boardgate_scaler.pkl"
+BOARDGATE_FEATURES_PATH = "boardgate_features.pkl"
+BOARDGATE_META_PATH = "boardgate_meta.json"
+BOARDGATE_FUSION_ENABLE = False
 
 # --- Objetivos / umbrales globales de IA ---
 IA_OBJETIVO_REAL_THR = 0.70   # objetivo de calidad REAL (meta: 70% aprox)
@@ -1119,6 +1139,27 @@ try:
 except NameError:
     last_sig_por_bot = {b: None for b in BOT_NAMES}
 
+
+def _boardgate_defaults(reason: str = "init", prob_preview: float | None = None) -> dict:
+    return {
+        "boardgate_ready": False,
+        "boardgate_prob": None,
+        "boardgate_mine_risk": None,
+        "boardgate_regime": "UNKNOWN",
+        "boardgate_confidence": None,
+        "boardgate_reason": str(reason or "init"),
+        "boardgate_prob_final_preview": float(prob_preview) if isinstance(prob_preview, (int, float)) and np.isfinite(float(prob_preview)) else None,
+        "boardgate_block_preview": "",
+    }
+
+
+def _apply_boardgate_defaults(st: dict, reason: str = "init", prob_preview: float | None = None) -> dict:
+    if not isinstance(st, dict):
+        return _boardgate_defaults(reason=reason, prob_preview=prob_preview)
+    st.update(_boardgate_defaults(reason=reason, prob_preview=prob_preview))
+    return st
+
+
 estado_bots = {
     bot: {
         "resultados": [], 
@@ -1151,7 +1192,9 @@ estado_bots = {
         "ia_prob_senal": None,        # prob IA en el momento de la señal
         "ia_regime_score": 0.0,       # capa A (régimen)
         "ia_evidence_n": 0,           # soporte histórico en umbral objetivo
-        "ia_evidence_wr": 0.0         # win-rate real en umbral objetivo
+        "ia_evidence_wr": 0.0,        # win-rate real en umbral objetivo
+        # BoardGate-V1 (shadow mode por defecto; no rompe flujo actual)
+        **_boardgate_defaults("init")
     }
     for bot in BOT_NAMES
 }
@@ -2520,6 +2563,9 @@ def cerrar_por_win(bot: str, reason: str):
         estado_bots[bot]["remate_active"] = False
         estado_bots[bot]["remate_start"] = None
         estado_bots[bot]["remate_reason"] = ""
+
+        # BoardGate limpio para evitar estados fantasma post-cierre.
+        _apply_boardgate_defaults(estado_bots[bot], reason="init")
 
     except Exception:
         pass
@@ -4810,6 +4856,24 @@ def _prob_ia_operativa_bot(bot: str, default: float | None = None) -> float | No
         return default
 
 
+def _boardgate_prob_live(bot: str) -> float | None:
+    """Probabilidad viva robusta para BoardGate (p_oper válida -> p_diag válida -> None)."""
+    try:
+        p = _prob_ia_operativa_bot(bot, default=None)
+        if isinstance(p, (int, float)) and np.isfinite(float(p)):
+            return float(p)
+    except Exception:
+        pass
+    try:
+        st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+        p2 = st.get("prob_ia", None)
+        if isinstance(p2, (int, float)) and np.isfinite(float(p2)):
+            return float(p2)
+    except Exception:
+        pass
+    return None
+
+
 def _maybe_emit_calibration_checkpoint(force: bool = False) -> None:
     """Emitir checkpoint compacto cada +IA_CHECKPOINT_CLOSED_STEP cierres reales."""
     global _IA_CHECKPOINT_CACHE
@@ -6259,6 +6323,139 @@ _IA_TRAIN_CLEAN_LOG = {"ts": 0.0, "sig": ""}
 _IA_NO_MODEL_LOG_TS = 0.0
 _IA_TIEBREAK_LOG_TS = 0.0
 
+_BOARDGATE_MODEL = None
+_BOARDGATE_LAST_LOG_TS = 0.0
+_BOARDGATE_LAST_LOG_REASON = ""
+_BOARDGATE_LOG_TS_BY_KEY = {}
+_BOARDGATE_LAST_EVAL_TS_BY_BOT = {}
+
+
+def _boardgate_get_model():
+    global _BOARDGATE_MODEL
+    try:
+        if _BOARDGATE_MODEL is None:
+            _BOARDGATE_MODEL = BoardGateModel(
+                model_path=BOARDGATE_MODEL_PATH,
+                scaler_path=BOARDGATE_SCALER_PATH,
+                features_path=BOARDGATE_FEATURES_PATH,
+                meta_path=BOARDGATE_META_PATH,
+            )
+    except Exception:
+        _BOARDGATE_MODEL = None
+    return _BOARDGATE_MODEL
+
+
+def _boardgate_log_reason(bot: str, reason: str):
+    global _BOARDGATE_LAST_LOG_TS, _BOARDGATE_LAST_LOG_REASON, _BOARDGATE_LOG_TS_BY_KEY
+    try:
+        now = time.time()
+        bot_s = str(bot or "")
+        rs = str(reason or "")
+        if not (rs in ("no_model", "low_data") or rs.startswith("err:") or rs.startswith("load_err:") or rs.startswith("predict_err:")):
+            return
+
+        key = f"{bot_s}|{rs}"
+        last_key_ts = float((_BOARDGATE_LOG_TS_BY_KEY or {}).get(key, 0.0) or 0.0)
+        if (now - last_key_ts) < float(BOARDGATE_LOG_COOLDOWN_S):
+            return
+
+        _BOARDGATE_LOG_TS_BY_KEY[key] = now
+        # Higiene simple para no crecer indefinidamente
+        if len(_BOARDGATE_LOG_TS_BY_KEY) > 200:
+            cutoff = now - max(float(BOARDGATE_LOG_COOLDOWN_S) * 3.0, 60.0)
+            _BOARDGATE_LOG_TS_BY_KEY = {k: v for k, v in _BOARDGATE_LOG_TS_BY_KEY.items() if float(v) >= cutoff}
+
+        _BOARDGATE_LAST_LOG_TS = now
+        _BOARDGATE_LAST_LOG_REASON = rs
+        agregar_evento(f"🧩 BoardGate {bot_s}: {rs}")
+    except Exception:
+        pass
+
+
+def _boardgate_shadow_eval(bot: str, prob_ia_live: float | None):
+    """Evalúa BoardGate-V1 en paralelo; en shadow no altera la decisión operativa actual."""
+    global _BOARDGATE_LAST_LOG_TS, _BOARDGATE_LAST_EVAL_TS_BY_BOT
+    st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+
+    # Anti-costo: evita reconstrucciones de tablero excesivas por ráfaga de filas PRE_TRADE.
+    try:
+        now_bg = time.time()
+        last_bg = float((_BOARDGATE_LAST_EVAL_TS_BY_BOT or {}).get(str(bot), 0.0) or 0.0)
+        if (now_bg - last_bg) < float(BOARDGATE_EVAL_MIN_INTERVAL_S):
+            return st
+        _BOARDGATE_LAST_EVAL_TS_BY_BOT[str(bot)] = now_bg
+    except Exception:
+        pass
+
+    if not bool(BOARDGATE_ENABLE):
+        _apply_boardgate_defaults(st, reason="disabled", prob_preview=prob_ia_live)
+        return st
+
+    try:
+        board = build_board_state(
+            bot_names=BOT_NAMES,
+            candidate_bot=bot,
+            lookback_cols=int(BOARDGATE_LOOKBACK_COLS),
+            csv_dir=".",
+            status_normalizer=normalizar_trade_status,
+            result_normalizer=normalizar_resultado,
+        )
+        board_meta = board.get("board_meta", {}) if isinstance(board, dict) else {}
+        ready_bots = int(board_meta.get("ready_bots", 0) or 0)
+
+        if ready_bots < int(BOARDGATE_MIN_READY_BOTS):
+            pred = {
+                "p_pattern_win": None,
+                "mine_risk": None,
+                "regime_tag": "UNKNOWN",
+                "confidence_pattern": None,
+                "model_ready": False,
+                "reason": "low_data",
+            }
+        else:
+            feats = extract_board_features(
+                board_matrix=board.get("board_matrix", []),
+                candidate_row=board.get("candidate_row", []),
+                right_edge_cols=int(BOARDGATE_RIGHT_EDGE_COLS),
+                right_edge_cols_wide=int(BOARDGATE_RIGHT_EDGE_COLS_WIDE),
+                candidate_idx=int(board_meta.get("candidate_idx", -1) or -1),
+            )
+            model = _boardgate_get_model()
+            if model is None:
+                pred = {
+                    "p_pattern_win": None,
+                    "mine_risk": None,
+                    "regime_tag": "UNKNOWN",
+                    "confidence_pattern": None,
+                    "model_ready": False,
+                    "reason": "no_model",
+                }
+            else:
+                pred = model.predict(feats)
+
+        fusion = fuse_technical_with_board(
+            prob_ia=prob_ia_live,
+            board_pred=pred,
+            ctt_state=CTT_STATE,
+            fusion_enable=bool(BOARDGATE_FUSION_ENABLE),
+            shadow_mode=bool(BOARDGATE_SHADOW_MODE),
+        )
+
+        st["boardgate_ready"] = bool(pred.get("model_ready", False))
+        st["boardgate_prob"] = float(pred["p_pattern_win"]) if isinstance(pred.get("p_pattern_win"), (int, float)) else None
+        st["boardgate_mine_risk"] = float(pred["mine_risk"]) if isinstance(pred.get("mine_risk"), (int, float)) else None
+        st["boardgate_regime"] = str(pred.get("regime_tag", "UNKNOWN") or "UNKNOWN")
+        st["boardgate_confidence"] = float(pred["confidence_pattern"]) if isinstance(pred.get("confidence_pattern"), (int, float)) else None
+        st["boardgate_reason"] = str(pred.get("reason", "unknown"))
+        st["boardgate_prob_final_preview"] = float(fusion.get("preview_prob_final")) if isinstance(fusion.get("preview_prob_final"), (int, float)) else None
+        st["boardgate_block_preview"] = str(fusion.get("preview_block_reason", "") or "")
+
+        _boardgate_log_reason(bot, st.get("boardgate_reason", ""))
+    except Exception as e:
+        _apply_boardgate_defaults(st, reason=f"err:{type(e).__name__}", prob_preview=prob_ia_live)
+        _boardgate_log_reason(bot, st.get("boardgate_reason", ""))
+    return st
+
 def actualizar_prob_ia_bot(bot: str):
     """
     Actualiza estado_bots[bot]['prob_ia'] de forma segura:
@@ -7173,7 +7370,8 @@ def reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=15, modo_suave=
             "ia_aciertos": 0,
             "ia_fallos": 0,
             "ia_senal_pendiente": False,
-            "ia_prob_senal": None
+            "ia_prob_senal": None,
+            **_boardgate_defaults("init")
         })
         SNAPSHOT_FILAS[bot] = contar_filas_csv(bot)
         OCULTAR_HASTA_NUEVO[bot] = False  # Cambiado para no ocultar
@@ -7235,7 +7433,8 @@ def reiniciar_bot(bot, borrar_csv=False):
         "ia_aciertos": 0,
         "ia_fallos": 0,
         "ia_senal_pendiente": False,
-        "ia_prob_senal": None
+        "ia_prob_senal": None,
+        **_boardgate_defaults("init")
     })
     SNAPSHOT_FILAS[bot] = contar_filas_csv(bot)
     OCULTAR_HASTA_NUEVO[bot] = False  # Cambiado para no ocultar
@@ -7267,6 +7466,9 @@ def cerrar_por_fin_de_ciclo(bot: str, reason: str):
         estado_bots[bot]["remate_active"] = False
         estado_bots[bot]["remate_start"] = None
         estado_bots[bot]["remate_reason"] = ""
+
+        # BoardGate limpio para evitar estados fantasma post-cierre.
+        _apply_boardgate_defaults(estado_bots[bot], reason="init")
 
     except Exception:
         pass
@@ -10573,6 +10775,35 @@ def mostrar_panel():
         n_min_txt = f"{n_min_disp}/{n_req_real}" + (f" (+{n_min_extra} acum)" if n_min_extra > 0 else "")
         print(padding + Fore.CYAN + f"📊 Prob IA visibles: {bots_con_prob}/{len(BOT_NAMES)} | OBS≥{umbral_obs*100:.1f}%: {bots_obs} | REAL≥{umbral_real_vigente*100:.1f}%: {bots_real} | Mejor: {mejor_txt} | Suceso↑: {best_suceso:5.1f} | SENSOR_PLANO: {sensores_planos}/{len(BOT_NAMES)} (warmup:{sensores_warmup}) | n_min_real: {n_min_txt} | Token: {owner_txt}")
 
+        # BoardGate-V1 HUD compacto (no invasivo)
+        try:
+            emb_top = EMBUDO_DECISION_STATE.get("top1_bot")
+            bg_bot = emb_top if emb_top in BOT_NAMES else (mejor[0] if isinstance(mejor, tuple) and mejor else None)
+            bg_st = estado_bots.get(bg_bot, {}) if bg_bot in BOT_NAMES else {}
+            bg_reason = str(bg_st.get("boardgate_reason", "") or "")
+            bg_ready = bool(bg_st.get("boardgate_ready", False))
+            bg_p = bg_st.get("boardgate_prob", None)
+            bg_risk = bg_st.get("boardgate_mine_risk", None)
+            bg_reg = str(bg_st.get("boardgate_regime", "UNKNOWN") or "UNKNOWN")
+            bg_pf = bg_st.get("boardgate_prob_final_preview", None)
+            bg_blk = str(bg_st.get("boardgate_block_preview", "") or "")
+
+            if not bg_bot:
+                bg_txt = "Board: warmup"
+            elif bg_reason in ("no_model", "low_data"):
+                bg_txt = f"Board: {bg_reason}"
+            elif bg_reason.startswith("err:") or bg_reason.startswith("load_err:") or bg_reason.startswith("predict_err:"):
+                bg_txt = "Board: err"
+            else:
+                p_txt = "--" if not isinstance(bg_p, (int, float)) else f"{float(bg_p)*100:.1f}%"
+                r_txt = "--" if not isinstance(bg_risk, (int, float)) else f"{float(bg_risk):.2f}"
+                pf_txt = "--" if not isinstance(bg_pf, (int, float)) else f"{float(bg_pf)*100:.1f}%"
+                blk_txt = f" block={bg_blk}" if bg_blk else ""
+                bg_txt = f"Board[{bg_bot}] p={p_txt} MineRisk={r_txt} Regime={bg_reg} Ready={'Y' if bg_ready else 'N'} FusionPreview={pf_txt}{blk_txt}"
+            print(padding + Fore.MAGENTA + f"🧩 {bg_txt}")
+        except Exception:
+            pass
+
         try:
             meta_live = resolver_canary_estado(leer_model_meta() or {})
             reliable = bool(meta_live.get("reliable", False))
@@ -11856,7 +12087,8 @@ def resetear_estado_hud(estado_bots: dict):
             "prob_ia": None, "prob_ia_oper": None, "token": "DEMO",
             "fuente": None, "modo_ia": "low_data",
             "ia_seniales": 0, "ia_aciertos": 0, "ia_fallos": 0, "ia_senal_pendiente": False,
-            "ia_prob_senal": None
+            "ia_prob_senal": None,
+            **_boardgate_defaults("init")
         })
 
 def limpieza_dura():
@@ -13455,6 +13687,9 @@ async def cargar_datos_bot(bot, token_actual):
                     estado_bots[bot]["modo_ia"] = "low_data"
                     estado_bots[bot]["ia_ready"] = False
 
+                    # BoardGate-V1 en shadow (sin tocar decisión actual)
+                    _boardgate_shadow_eval(bot, _boardgate_prob_live(bot))
+
                     meta = leer_model_meta() or {}
                     escribir_ia_ack(bot, fila_dict.get("epoch"), None, "LOW_DATA", meta)
 
@@ -13485,6 +13720,9 @@ async def cargar_datos_bot(bot, token_actual):
                             reliable and (rows >= MIN_FIT_ROWS_LOW) and (modo_norm != "off") and (prob_norm is not None)
                         )
 
+                        # BoardGate-V1 en shadow (sin tocar decisión actual)
+                        _boardgate_shadow_eval(bot, _boardgate_prob_live(bot))
+
                         escribir_ia_ack(bot, fila_dict.get("epoch"), prob_norm, modo_norm.upper(), meta)
 
                     except Exception as e:
@@ -13492,6 +13730,9 @@ async def cargar_datos_bot(bot, token_actual):
                         estado_bots[bot]["prob_ia"] = None
                         estado_bots[bot]["modo_ia"] = "low_data"
                         estado_bots[bot]["ia_ready"] = False
+
+                        # BoardGate-V1 en shadow (sin tocar decisión actual)
+                        _boardgate_shadow_eval(bot, _boardgate_prob_live(bot))
 
                         meta = leer_model_meta() or {}
                         escribir_ia_ack(bot, fila_dict.get("epoch"), None, "LOW_DATA", meta)
