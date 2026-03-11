@@ -66,7 +66,37 @@ def _load_optional_module(name: str):
     try:
         return importlib.import_module(name)
     except Exception:
-        return None
+        pass
+
+    # Fallback robusto: carga por ruta local del repo/script (útil cuando cwd no incluye el proyecto).
+    try:
+        mod_file = f"{str(name).strip()}.py"
+        base_dirs = []
+        try:
+            base_dirs.append(os.path.dirname(os.path.abspath(__file__)))
+        except Exception:
+            pass
+        try:
+            base_dirs.append(os.getcwd())
+        except Exception:
+            pass
+
+        for bdir in [d for d in base_dirs if isinstance(d, str) and d.strip()]:
+            p = os.path.join(bdir, mod_file)
+            if not os.path.exists(p):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(str(name), p)
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 websockets = _load_optional_module("websockets")
@@ -745,6 +775,7 @@ MAX_DATASET_ROWS = 10000
 last_retrain_count = 0
 last_retrain_ts    = time.time()  # Inicializado al boot para arranque en frío
 AUTO_RETRAIN_TICK_S = 20.0  # reintento periódico para no quedarse sin modelo tras warmup
+_LAST_RETRAIN_SKIP_LOG = {"sig": "", "ts": 0.0}
 IA_NO_MODEL_LOG_COOLDOWN_S = 30.0  # evita spam cuando aún no hay modelo
 _entrenando_lock = threading.Lock()  # Lock para antireentradas en maybe_retrain
 
@@ -4913,10 +4944,12 @@ def _boardgate_log_reason(bot: str, reason: str) -> None:
 
 
 def _boardgate_model_get():
-    global _BOARDGATE_MODEL_SINGLETON
+    global _BOARDGATE_MODEL_SINGLETON, _board_model_mod
     if _BOARDGATE_MODEL_SINGLETON is not None:
         return _BOARDGATE_MODEL_SINGLETON
     try:
+        if _board_model_mod is None:
+            _board_model_mod = _load_optional_module("board_model")
         if _board_model_mod is not None and hasattr(_board_model_mod, "BoardGateModel"):
             _BOARDGATE_MODEL_SINGLETON = _board_model_mod.BoardGateModel(
                 model_path=BOARDGATE_MODEL_PATH,
@@ -4931,6 +4964,7 @@ def _boardgate_model_get():
 
 
 def _boardgate_shadow_eval(bot: str, prob_live):
+    global _board_state_mod, _board_features_mod, _board_fusion_mod
     st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else None
     if not isinstance(st, dict):
         return
@@ -4939,6 +4973,17 @@ def _boardgate_shadow_eval(bot: str, prob_live):
     if not bool(BOARDGATE_ENABLE):
         st["boardgate_reason"] = "disabled"
         return
+
+    # Lazy-reload defensivo: si en boot falló import por path/cwd, reintentar en runtime.
+    try:
+        if _board_state_mod is None:
+            _board_state_mod = _load_optional_module("board_state")
+        if _board_features_mod is None:
+            _board_features_mod = _load_optional_module("board_features")
+        if _board_fusion_mod is None:
+            _board_fusion_mod = _load_optional_module("board_fusion")
+    except Exception:
+        pass
 
     if _board_state_mod is None or _board_features_mod is None or _board_fusion_mod is None:
         st["boardgate_reason"] = "mod_missing"
@@ -9746,6 +9791,7 @@ def _maybe_retrain_fallback_sklearn(force: bool = False):
             "warmup_mode": bool(len(X) < int(TRAIN_WARMUP_MIN_ROWS)),
             "feature_names": list(feats),
             "model_family": "sklearn_logreg_fallback",
+            "backend": "sklearn_logreg",
             "model_artifact_path": str(globals().get("_MODEL_PATH", "modelo_xgb_v2.pkl")),
             "model_artifact_kind": "sklearn_logreg_fallback",
         }
@@ -9773,6 +9819,19 @@ def _maybe_retrain_fallback_sklearn(force: bool = False):
     except Exception as e:
         agregar_evento(f"⚠️ IA fallback falló: {type(e).__name__}")
         return False
+
+
+def _log_retrain_gate_once(reason: str, cooldown_s: float = 60.0, prefix: str = "⏸️ IA retrain-gate"):
+    """Evita spam de eventos de gate/trigger en maybe_retrain."""
+    try:
+        now = float(time.time())
+        sig = str(reason or "skip")
+        last = globals().get("_LAST_RETRAIN_SKIP_LOG", {}) or {}
+        if (sig != str(last.get("sig", ""))) or ((now - float(last.get("ts", 0.0) or 0.0)) >= float(cooldown_s)):
+            agregar_evento(f"{prefix}: {sig}")
+            globals()["_LAST_RETRAIN_SKIP_LOG"] = {"sig": sig, "ts": now}
+    except Exception:
+        pass
 
 
 def maybe_retrain(force: bool = False):
@@ -9814,13 +9873,56 @@ def maybe_retrain(force: bool = False):
 
             # Si no hay modelo aún, reintentar entrenamiento aunque no se cumplan gatillos de filas/tiempo.
             if modelo_presente:
+                trigger_reason = ""
                 if new_rows >= int(RETRAIN_INTERVAL_ROWS):
-                    pass
+                    trigger_reason = f"rows:{new_rows}>={int(RETRAIN_INTERVAL_ROWS)}"
+                elif mins >= float(RETRAIN_INTERVAL_MIN) and new_rows >= int(MIN_NEW_ROWS_FOR_TIME):
+                    trigger_reason = f"time_rows:{mins:.1f}m,+{new_rows}"
                 else:
-                    if mins >= float(RETRAIN_INTERVAL_MIN) and new_rows >= int(MIN_NEW_ROWS_FOR_TIME):
+                    # Override de staleness: corridas largas con crecimiento moderado pero real.
+                    prev_n_meta = 0
+                    prev_trained_at = None
+                    try:
+                        meta_prev = leer_model_meta() or {}
+                        prev_n_meta = int(meta_prev.get("n_samples", meta_prev.get("rows_total", meta_prev.get("n", 0))) or 0)
+                        ts_old = str(meta_prev.get("trained_at", "") or "").strip()
+                        if ts_old:
+                            prev_trained_at = datetime.strptime(ts_old, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        prev_n_meta = 0
+                        prev_trained_at = None
+
+                    stale_secs = float(now - float(last_retrain_ts or 0.0))
+                    try:
+                        if prev_trained_at is not None:
+                            stale_secs = max(stale_secs, float((datetime.now() - prev_trained_at).total_seconds()))
+                    except Exception:
                         pass
+
+                    min_abs_growth = int(TRAIN_REFRESH_MIN_ABS_ROWS)
+                    try:
+                        if int(prev_n_meta) <= int(TRAIN_REFRESH_LOWN_CUTOFF):
+                            min_abs_growth = int(TRAIN_REFRESH_MIN_ABS_ROWS_LOWN)
+                    except Exception:
+                        min_abs_growth = int(TRAIN_REFRESH_MIN_ABS_ROWS)
+
+                    grew_abs = bool(new_rows >= max(5, min_abs_growth))
+                    grew_rel = bool(prev_n_meta > 0 and int(filas) >= int(round(prev_n_meta * (1.0 + float(TRAIN_REFRESH_MIN_GROWTH)))))
+                    stale_by_time = bool(stale_secs >= float(TRAIN_REFRESH_STALE_MIN))
+
+                    if stale_by_time and (grew_abs or grew_rel):
+                        trigger_reason = f"stale_override:{int(stale_secs)}s,+{new_rows}"
                     else:
+                        _log_retrain_gate_once(
+                            f"gates rows+time (new_rows={new_rows}, mins={mins:.1f}, stale_s={int(stale_secs)}, grew_abs={int(grew_abs)}, grew_rel={int(grew_rel)})",
+                            cooldown_s=75.0,
+                        )
                         return False
+
+                try:
+                    _log_retrain_gate_once(f"trigger {trigger_reason}", cooldown_s=20.0)
+                except Exception:
+                    pass
 
         # 3) Reparar incremental si quedó “mutante” + leer incremental (con LOCK)
         ruta_inc = "dataset_incremental.csv"
@@ -10532,6 +10634,7 @@ def maybe_retrain(force: bool = False):
             "feature_names": list(feats_used),
             "label_col": str(label_col),
             "model_family": "xgboost_calibrated",
+            "backend": "xgboost",
             "model_artifact_path": str(globals().get("_MODEL_PATH", "modelo_xgb_v2.pkl")),
             "model_artifact_kind": "xgb_or_calibrated_wrapper",
             "warmup_mode": bool(int(n_total) < int(TRAIN_WARMUP_MIN_ROWS)),
