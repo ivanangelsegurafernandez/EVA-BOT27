@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import math
+
 
 def _flatten(mat):
     return [v for row in (mat or []) for v in (row or [])]
@@ -88,43 +90,39 @@ def extract_board_features(board_matrix, candidate_row, right_edge_cols=4, right
         if len(row) < cols:
             row[:0] = [0] * (cols - len(row))
 
-    flat = _flatten(mat)
-    nz = [x for x in flat if x != 0]
-    edge_n = max(1, min(int(right_edge_cols), cols))
-    edge_w = max(edge_n, min(int(right_edge_cols_wide), cols))
-    edge = _flatten([r[-edge_n:] for r in mat])
-    edge_wide = _flatten([r[-edge_w:] for r in mat])
-
     cand = list(candidate_row or [0] * cols)
     if len(cand) < cols:
         cand[:0] = [0] * (cols - len(cand))
 
-    # coherencias
+    cand_idx = int(candidate_idx) if isinstance(candidate_idx, int) and 0 <= int(candidate_idx) < len(mat) else None
+    mat_ctx = [row for i, row in enumerate(mat) if i != cand_idx] if cand_idx is not None else list(mat)
+    if not mat_ctx:
+        mat_ctx = list(mat)
+
+    flat = _flatten(mat_ctx)
+    nz = [x for x in flat if x != 0]
+    edge_n = max(1, min(int(right_edge_cols), cols))
+    edge_w = max(edge_n, min(int(right_edge_cols_wide), cols))
+    edge = _flatten([r[-edge_n:] for r in mat_ctx])
+    edge_wide = _flatten([r[-edge_w:] for r in mat_ctx])
+
     vertical_vals = []
     diag_vals = []
     for c in range(cols):
-        col = [mat[r][c] for r in range(len(mat))]
+        col = [mat_ctx[r][c] for r in range(len(mat_ctx))]
         vertical_vals.append(_coherence_ratio(col))
         if c > 0:
             diag_a, diag_b = [], []
-            lim = min(len(mat), cols - c)
+            lim = min(len(mat_ctx), cols - c)
             for r in range(lim):
-                diag_a.append(mat[r][c + r])
-            lim2 = min(len(mat), c + 1)
+                diag_a.append(mat_ctx[r][c + r])
+            lim2 = min(len(mat_ctx), c + 1)
             for r in range(lim2):
-                diag_b.append(mat[r][c - r])
+                diag_b.append(mat_ctx[r][c - r])
             diag_vals.append(_coherence_ratio(diag_a))
             diag_vals.append(_coherence_ratio(diag_b))
 
-    row_coh = [_coherence_ratio(r) for r in mat]
-
-    # sincronía candidato vs resto (signo columna)
-    cand_idx = int(candidate_idx) if isinstance(candidate_idx, int) else None
-    if cand_idx is None or cand_idx < 0 or cand_idx >= len(mat):
-        try:
-            cand_idx = next(i for i, r in enumerate(mat) if list(r) == cand)
-        except Exception:
-            cand_idx = None
+    row_coh = [_coherence_ratio(r) for r in mat_ctx]
 
     sync_hits = 0
     sync_den = 0
@@ -132,11 +130,7 @@ def extract_board_features(board_matrix, candidate_row, right_edge_cols=4, right
         v = cand[c]
         if v == 0:
             continue
-        others = [
-            mat[r][c]
-            for r in range(len(mat))
-            if (cand_idx is None or r != cand_idx) and mat[r][c] != 0
-        ]
+        others = [mat[r][c] for r in range(len(mat)) if (cand_idx is None or r != cand_idx) and mat[r][c] != 0]
         if not others:
             continue
         maj = 1 if sum(1 for x in others if x > 0) >= sum(1 for x in others if x < 0) else -1
@@ -170,11 +164,19 @@ def extract_board_features(board_matrix, candidate_row, right_edge_cols=4, right
         "candidate_desync_ratio": float(1.0 - (sync_hits / max(1, sync_den))),
     }
 
-    # Riesgos interpretable V1
     feats["mine_risk_red_wall"] = max(0.0, min(1.0, feats["board_right6_red"] * 0.7 + red_comp * 0.6))
     feats["mine_risk_zebra"] = max(0.0, min(1.0, zebra))
     feats["mine_risk_late_green"] = max(0.0, min(1.0, feats["candidate_age_last_green"] / max(1.0, float(cols))))
     false_rebound = feats["board_right4_green"] * feats["board_right6_red"]
     feats["mine_risk_false_rebound"] = max(0.0, min(1.0, false_rebound + feats["candidate_desync_ratio"] * 0.2))
 
-    return feats
+    safe = {}
+    for k, v in feats.items():
+        try:
+            fv = float(v)
+            if not math.isfinite(fv):
+                fv = 0.0
+        except Exception:
+            fv = 0.0
+        safe[k] = fv
+    return safe
