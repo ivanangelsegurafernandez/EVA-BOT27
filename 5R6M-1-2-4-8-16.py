@@ -2549,6 +2549,9 @@ def cerrar_por_win(bot: str, reason: str):
         estado_bots[bot]["remate_start"] = None
         estado_bots[bot]["remate_reason"] = ""
 
+        # BoardGate limpio al cierre de ciclo para evitar estados fantasma.
+        _apply_boardgate_defaults(estado_bots.get(bot, {}), reason="cycle_close")
+
     except Exception:
         pass
 
@@ -4885,6 +4888,15 @@ def _boardgate_log_reason(bot: str, reason: str) -> None:
         now = float(time.time())
         key = f"{bot}|{str(reason or 'na')}"
         last = float(_BOARDGATE_LOG_REASON_TS.get(key, 0.0) or 0.0)
+
+        # Higiene de memoria: purga llaves viejas para evitar crecimiento indefinido.
+        if len(_BOARDGATE_LOG_REASON_TS) > 400:
+            ttl_keep = max(60.0, float(BOARDGATE_LOG_COOLDOWN_S) * 6.0)
+            cutoff = now - ttl_keep
+            for k, ts in list(_BOARDGATE_LOG_REASON_TS.items()):
+                if float(ts or 0.0) < cutoff:
+                    _BOARDGATE_LOG_REASON_TS.pop(k, None)
+
         if (now - last) < float(BOARDGATE_LOG_COOLDOWN_S):
             return
         _BOARDGATE_LOG_REASON_TS[key] = now
@@ -7448,6 +7460,9 @@ def cerrar_por_fin_de_ciclo(bot: str, reason: str):
         estado_bots[bot]["remate_active"] = False
         estado_bots[bot]["remate_start"] = None
         estado_bots[bot]["remate_reason"] = ""
+
+        # BoardGate limpio al cierre de ciclo para evitar estados fantasma.
+        _apply_boardgate_defaults(estado_bots.get(bot, {}), reason="cycle_close")
 
     except Exception:
         pass
