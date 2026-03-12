@@ -13424,14 +13424,20 @@ def _actualizar_compuerta_techo_dinamico(preferred_bot: str | None = None, mvrx_
 
         live = []
         mvrx_set = set()
-        if isinstance(mvrx_valid_bots, list):
+        mvrx_filter_provided = isinstance(mvrx_valid_bots, list)
+        if mvrx_filter_provided:
             mvrx_set = {str(b) for b in mvrx_valid_bots if isinstance(b, str) and b}
         for b in BOT_NAMES:
             try:
-                if mvrx_set and (str(b) not in mvrx_set):
-                    continue
-                if (not mvrx_set) and (not bool(estado_bots.get(b, {}).get("mvrx_ok", False))):
-                    continue
+                if mvrx_filter_provided:
+                    if str(b) not in mvrx_set:
+                        continue
+                else:
+                    st_b = estado_bots.get(b, {}) if isinstance(estado_bots, dict) else {}
+                    if not bool(st_b.get("mvrx_ok", False)):
+                        continue
+                    if str(st_b.get("mvrx_tier", "NONE") or "NONE") not in ("P1", "P2"):
+                        continue
                 if str(estado_bots.get(b, {}).get("modo_ia", "off")).lower() == "off":
                     continue
                 if not ia_prob_valida(b, max_age_s=12.0):
@@ -15206,9 +15212,22 @@ async def main():
 
                         # Selección automática: MVRX define top1, dyn roof solo valida confirmación.
                         if REAL_CLASSIC_GATE:
-                            top_pref = str(candidatos[0].get("bot", "") or "") if candidatos else None
-                            mvrx_live_bots = [str(c.get("bot", "") or "") for c in candidatos if isinstance(c, dict) and bool(c.get("mvrx_ok", False))]
-                            dyn_gate = _actualizar_compuerta_techo_dinamico(preferred_bot=top_pref, mvrx_valid_bots=mvrx_live_bots)
+                            mvrx_operational_bots = [
+                                str(c.get("bot", "") or "")
+                                for c in candidatos
+                                if isinstance(c, dict)
+                                and bool(c.get("mvrx_ok", False))
+                                and str(c.get("mvrx_tier", "NONE") or "NONE") in ("P1", "P2")
+                            ]
+                            mvrx_exploratory_bots = [
+                                str(c.get("bot", "") or "")
+                                for c in candidatos
+                                if isinstance(c, dict)
+                                and bool(c.get("mvrx_ok", False))
+                                and str(c.get("mvrx_tier", "NONE") or "NONE") == "P3"
+                            ]
+                            top_pref = str(mvrx_operational_bots[0]) if mvrx_operational_bots else None
+                            dyn_gate = _actualizar_compuerta_techo_dinamico(preferred_bot=top_pref, mvrx_valid_bots=mvrx_operational_bots)
                             if isinstance(dyn_gate, dict) and bool(dyn_gate.get("new_open", False)):
                                 agregar_evento(
                                     "🧭 Compuerta REAL abierta: "
