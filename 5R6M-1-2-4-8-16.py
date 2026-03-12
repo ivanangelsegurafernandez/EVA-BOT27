@@ -11218,8 +11218,15 @@ def mostrar_panel():
                 board_reason_h = str(estado_bots.get(mejor[0], {}).get("boardgate_reason", "") or "")
                 board_ready_h = bool(estado_bots.get(mejor[0], {}).get("boardgate_ready", False))
                 roof_def = max(0.0, float(roof_h) - float(best_prob))
+                try:
+                    saldo_now = float(valor) if isinstance(valor, (int, float)) else None
+                except Exception:
+                    saldo_now = None
+                costo_c1_h = float(MARTI_ESCALADO[0]) if MARTI_ESCALADO else 0.0
 
-                if (not roof_ok) and (roof_def <= float(DYN_ROOF_NEAR_TOL)):
+                if isinstance(saldo_now, (int, float)) and saldo_now < float(costo_c1_h):
+                    dominant_tag = "BALANCE_LT_C1"
+                elif (not roof_ok) and (roof_def <= float(DYN_ROOF_NEAR_TOL)):
                     dominant_tag = "ROOF_NEAR_MISS"
                 elif warmup_live:
                     dominant_tag = "WARMUP_LOW_N"
