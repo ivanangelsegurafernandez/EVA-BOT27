@@ -66,7 +66,37 @@ def _load_optional_module(name: str):
     try:
         return importlib.import_module(name)
     except Exception:
-        return None
+        pass
+
+    # Fallback robusto: carga por ruta local del repo/script (útil cuando cwd no incluye el proyecto).
+    try:
+        mod_file = f"{str(name).strip()}.py"
+        base_dirs = []
+        try:
+            base_dirs.append(os.path.dirname(os.path.abspath(__file__)))
+        except Exception:
+            pass
+        try:
+            base_dirs.append(os.getcwd())
+        except Exception:
+            pass
+
+        for bdir in [d for d in base_dirs if isinstance(d, str) and d.strip()]:
+            p = os.path.join(bdir, mod_file)
+            if not os.path.exists(p):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(str(name), p)
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 websockets = _load_optional_module("websockets")
@@ -745,6 +775,7 @@ MAX_DATASET_ROWS = 10000
 last_retrain_count = 0
 last_retrain_ts    = time.time()  # Inicializado al boot para arranque en frío
 AUTO_RETRAIN_TICK_S = 20.0  # reintento periódico para no quedarse sin modelo tras warmup
+_LAST_RETRAIN_SKIP_LOG = {"sig": "", "ts": 0.0}
 IA_NO_MODEL_LOG_COOLDOWN_S = 30.0  # evita spam cuando aún no hay modelo
 _entrenando_lock = threading.Lock()  # Lock para antireentradas en maybe_retrain
 
@@ -3886,6 +3917,13 @@ def leer_ultima_fila_con_resultado(bot: str) -> tuple[dict | None, int | None]:
 # ==========================================================
 
 IA_SIGNALS_LOG = "ia_signals_log.csv"
+IA_SIGNALS_COLUMNS = [
+    "ts", "bot", "epoch", "decision_id", "phase",
+    "prob", "prob_live", "thr", "modo", "authorized",
+    "shadow_mode", "board_ready", "board_prob", "board_mine_risk",
+    "board_regime", "board_reason", "fusion_preview", "block_reason",
+    "result", "y"
+]
 CANARY_STATE_CACHE = {"ts": 0.0, "meta": None}
 
 # Blindaje: evita crash si threading aún no estaba importado (aunque tú sí lo tienes)
@@ -4906,10 +4944,12 @@ def _boardgate_log_reason(bot: str, reason: str) -> None:
 
 
 def _boardgate_model_get():
-    global _BOARDGATE_MODEL_SINGLETON
+    global _BOARDGATE_MODEL_SINGLETON, _board_model_mod
     if _BOARDGATE_MODEL_SINGLETON is not None:
         return _BOARDGATE_MODEL_SINGLETON
     try:
+        if _board_model_mod is None:
+            _board_model_mod = _load_optional_module("board_model")
         if _board_model_mod is not None and hasattr(_board_model_mod, "BoardGateModel"):
             _BOARDGATE_MODEL_SINGLETON = _board_model_mod.BoardGateModel(
                 model_path=BOARDGATE_MODEL_PATH,
@@ -4924,6 +4964,7 @@ def _boardgate_model_get():
 
 
 def _boardgate_shadow_eval(bot: str, prob_live):
+    global _board_state_mod, _board_features_mod, _board_fusion_mod
     st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else None
     if not isinstance(st, dict):
         return
@@ -4932,6 +4973,17 @@ def _boardgate_shadow_eval(bot: str, prob_live):
     if not bool(BOARDGATE_ENABLE):
         st["boardgate_reason"] = "disabled"
         return
+
+    # Lazy-reload defensivo: si en boot falló import por path/cwd, reintentar en runtime.
+    try:
+        if _board_state_mod is None:
+            _board_state_mod = _load_optional_module("board_state")
+        if _board_features_mod is None:
+            _board_features_mod = _load_optional_module("board_features")
+        if _board_fusion_mod is None:
+            _board_fusion_mod = _load_optional_module("board_fusion")
+    except Exception:
+        pass
 
     if _board_state_mod is None or _board_features_mod is None or _board_fusion_mod is None:
         st["boardgate_reason"] = "mod_missing"
@@ -4972,7 +5024,7 @@ def _boardgate_shadow_eval(bot: str, prob_live):
                 "regime_tag": "UNKNOWN",
                 "confidence_pattern": 0.0,
                 "model_ready": False,
-                "reason": "no_model_class",
+                "reason": "no_model",
             }
 
         fus = _board_fusion_mod.fuse_technical_with_board(
@@ -5098,17 +5150,111 @@ def _cap_prob_por_madurez(prob: float | None, bot: str | None = None) -> float |
 
 
 def _ensure_ia_signals_log():
-    """Crea el archivo con header si no existe."""
-    if os.path.exists(IA_SIGNALS_LOG):
-        return
+    """Crea/normaliza el archivo de señales con esquema estable."""
     try:
-        with open(IA_SIGNALS_LOG, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["ts", "bot", "epoch", "prob", "thr", "modo", "y"])
-            f.flush()
-            os.fsync(f.fileno())
+        if not os.path.exists(IA_SIGNALS_LOG):
+            with open(IA_SIGNALS_LOG, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(list(IA_SIGNALS_COLUMNS))
+                f.flush()
+                os.fsync(f.fileno())
+            return
+
+        df = _safe_read_csv_any_encoding(IA_SIGNALS_LOG)
+        if df is None:
+            return
+
+        changed = False
+        for c in IA_SIGNALS_COLUMNS:
+            if c not in df.columns:
+                df[c] = ""
+                changed = True
+
+        extra = [c for c in list(df.columns) if c not in IA_SIGNALS_COLUMNS]
+        if extra:
+            changed = True
+
+        if changed:
+            df = df.reindex(columns=IA_SIGNALS_COLUMNS, fill_value="")
+            _atomic_write_text(IA_SIGNALS_LOG, df.to_csv(index=False, lineterminator="\n"))
     except Exception:
         pass
+
+def _append_ia_signal_event(row: dict) -> bool:
+    try:
+        _ensure_ia_signals_log()
+        payload = {c: row.get(c, "") for c in IA_SIGNALS_COLUMNS}
+        with IA_SIGNALS_LOCK:
+            with open(IA_SIGNALS_LOG, "a", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=IA_SIGNALS_COLUMNS)
+                w.writerow(payload)
+                f.flush()
+                os.fsync(f.fileno())
+        return True
+    except Exception:
+        return False
+
+def log_ia_signal_snapshot(bot: str, epoch: int | None, st: dict | None, reason: str = "") -> bool:
+    """Log liviano PRE_TRADE/ACK para que el shadow log tenga evidencia real."""
+    try:
+        if not isinstance(st, dict):
+            return False
+        ep = _to_int_epoch(epoch)
+        if ep is None:
+            return False
+
+        prob = st.get("prob_ia", None)
+        prob_live = st.get("prob_ia_oper", prob)
+        thr = float(get_umbral_operativo())
+        modo = str(st.get("modo_ia", "") or "")
+
+        p_live = float(prob_live) if isinstance(prob_live, (int, float)) else None
+        authorized = bool(
+            isinstance(p_live, float)
+            and np.isfinite(p_live)
+            and (modo.upper() not in ("", "OFF", "LOW_DATA"))
+            and (p_live >= thr)
+        )
+
+        row = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "bot": str(bot),
+            "epoch": str(int(ep)),
+            "decision_id": str(st.get("ia_decision_id", "") or ""),
+            "phase": str(reason or "pretrade"),
+            "prob": "" if prob is None else float(prob),
+            "prob_live": "" if p_live is None else float(p_live),
+            "thr": float(thr),
+            "modo": modo,
+            "authorized": int(authorized),
+            "shadow_mode": int(bool(BOARDGATE_SHADOW_MODE or (not BOARDGATE_FUSION_ENABLE))),
+            "board_ready": int(bool(st.get("boardgate_ready", False))),
+            "board_prob": "" if st.get("boardgate_prob", None) is None else float(st.get("boardgate_prob", 0.0) or 0.0),
+            "board_mine_risk": "" if st.get("boardgate_mine_risk", None) is None else float(st.get("boardgate_mine_risk", 0.0) or 0.0),
+            "board_regime": str(st.get("boardgate_regime", "UNKNOWN") or "UNKNOWN"),
+            "board_reason": str(st.get("boardgate_reason", "") or ""),
+            "fusion_preview": "" if st.get("boardgate_prob_final_preview", None) is None else float(st.get("boardgate_prob_final_preview", 0.0) or 0.0),
+            "block_reason": str(st.get("boardgate_block_preview", "") or ""),
+            "result": "",
+            "y": "",
+        }
+
+        with IA_SIGNALS_LOCK:
+            df = _safe_read_csv_any_encoding(IA_SIGNALS_LOG)
+            if df is not None and not df.empty:
+                for c in IA_SIGNALS_COLUMNS:
+                    if c not in df.columns:
+                        df[c] = ""
+                bot_s = _col_as_str_series(df, "bot").str.strip()
+                ep_s = pd.to_numeric(_col_as_str_series(df, "epoch"), errors="coerce")
+                ph_s = _col_as_str_series(df, "phase").str.strip().str.lower()
+                m = (bot_s == str(bot)) & (ep_s == float(int(ep))) & (ph_s == str(reason or "pretrade").strip().lower())
+                if m.any():
+                    return False
+
+        return _append_ia_signal_event(row)
+    except Exception:
+        return False
 
 def _leer_stats_canary_desde_log(ts_inicio: str | None) -> tuple[int, int]:
     """
@@ -5392,10 +5538,10 @@ def log_ia_open(bot: str, epoch: int, prob: float, thr: float, modo: str):
         with IA_SIGNALS_LOCK:
             df = _safe_read_csv_any_encoding(IA_SIGNALS_LOG)
             if df is None or df.empty:
-                df = pd.DataFrame(columns=["ts", "bot", "epoch", "prob", "thr", "modo", "y"])
+                df = pd.DataFrame(columns=list(IA_SIGNALS_COLUMNS))
 
             # Asegurar columnas base
-            for c in ["ts", "bot", "epoch", "prob", "thr", "modo", "y"]:
+            for c in IA_SIGNALS_COLUMNS:
                 if c not in df.columns:
                     df[c] = ""
 
@@ -5433,12 +5579,25 @@ def log_ia_open(bot: str, epoch: int, prob: float, thr: float, modo: str):
                     return False
 
             row = {
-                "ts": f"{time.time():.6f}",
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "bot": str(bot),
                 "epoch": str(int(epoch)),
+                "decision_id": "",
+                "phase": "open",
                 "prob": float(prob),
+                "prob_live": float(prob),
                 "thr": float(thr),
                 "modo": str(modo or ""),
+                "authorized": 1 if float(prob) >= float(thr) else 0,
+                "shadow_mode": "",
+                "board_ready": "",
+                "board_prob": "",
+                "board_mine_risk": "",
+                "board_regime": "",
+                "board_reason": "",
+                "fusion_preview": "",
+                "block_reason": "",
+                "result": "",
                 "y": ""
             }
 
@@ -5468,7 +5627,7 @@ def log_ia_close(
             if df is None or df.empty:
                 return False
 
-            for c in ["ts", "bot", "epoch", "prob", "thr", "modo", "y"]:
+            for c in IA_SIGNALS_COLUMNS:
                 if c not in df.columns:
                     df[c] = ""
 
@@ -5503,6 +5662,7 @@ def log_ia_close(
             if m_exact_open.any():
                 for idx in df.index[m_exact_open]:
                     df.at[idx, "y"] = str(yv)
+                    df.at[idx, "result"] = "GANANCIA" if int(yv) == 1 else "PÉRDIDA"
                     if prob_override is not None:
                         df.at[idx, "prob"] = float(prob_override)
                     if thr_override is not None:
@@ -5528,6 +5688,7 @@ def log_ia_close(
 
             pick_idx = cand["epoch_num"].idxmax()
             df.at[pick_idx, "y"] = str(yv)
+            df.at[pick_idx, "result"] = "GANANCIA" if int(yv) == 1 else "PÉRDIDA"
             if prob_override is not None:
                 df.at[pick_idx, "prob"] = float(prob_override)
             if thr_override is not None:
@@ -8110,22 +8271,40 @@ def build_xy_from_incremental(df: pd.DataFrame, feature_names: list | None = Non
     # y final
     y = y01.loc[mask].astype(int)
 
-    # Anti-duplicados exactos (features+label) para reducir sobreconfianza artificial
-    # keep='last' favorece estado más reciente cuando hay repeticiones.
+    # Anti-duplicados exactos (features+label) con guardia anti-colapso de muestra.
     before_n = int(len(X))
+    duplicates_removed = 0
+    dedup_applied = False
+    dedup_skipped = ""
     try:
         sig = X.round(6).astype(str).agg("|".join, axis=1) + "|" + y.astype(int).astype(str)
         keep = ~sig.duplicated(keep="last")
-        X = X.loc[keep].copy()
-        y = y.loc[keep].copy()
+        rows_after_dedup = int(keep.sum())
+        min_after = int(max(60, round(before_n * 0.55)))
+        if rows_after_dedup >= min_after:
+            X = X.loc[keep].copy()
+            y = y.loc[keep].copy()
+            duplicates_removed = max(0, before_n - int(len(X)))
+            dedup_applied = True
+        else:
+            dedup_skipped = f"dedup_guard:{before_n}->{rows_after_dedup}"
     except Exception:
-        pass
+        dedup_skipped = "dedup_err"
 
     try:
+        valid_label_rows = int(y01.isin([0.0, 1.0]).sum())
+        valid_quality_rows = int((y01.isin([0.0, 1.0]) & quality_mask).sum())
         globals()["_LAST_XY_QUALITY"] = {
+            "rows_df": int(len(df)),
+            "rows_label_valid": valid_label_rows,
+            "rows_label_drop": max(0, int(len(df)) - valid_label_rows),
+            "rows_quality_valid": valid_quality_rows,
+            "rows_quality_drop": max(0, valid_label_rows - valid_quality_rows),
             "rows_before": before_n,
             "rows_after": int(len(X)),
-            "duplicates_removed": max(0, before_n - int(len(X))),
+            "duplicates_removed": int(duplicates_removed),
+            "dedup_applied": bool(dedup_applied),
+            "dedup_skipped_reason": str(dedup_skipped),
             "used_quality_mask": bool(int((quality_mask & y01.isin([0.0, 1.0])).sum()) >= int(max(60, 0.50 * int(y01.isin([0.0, 1.0]).sum())))),
         }
     except Exception:
@@ -8292,12 +8471,25 @@ def _normalize_model_meta(meta: dict) -> dict:
         if k in m:
             m[k] = _to_float(m[k])
 
-    # 4) reliable como bool
+    # 4) bools/meta de honestidad
     m["reliable"] = bool(m.get("reliable", False))
+    m["warmup_mode"] = bool(m.get("warmup_mode", m["n_samples"] < int(TRAIN_WARMUP_MIN_ROWS)))
+    m["auc_applicable"] = bool(m.get("auc_applicable", False))
+    m["test_single_class"] = bool(m.get("test_single_class", False))
+    if (not m.get("auc_applicable", False)) and ("auc_reason" not in m):
+        m["auc_reason"] = "test_single_class" if bool(m.get("test_single_class", False)) else "auc_not_available"
 
     # 5) calibration string
     if "calibration" in m and m["calibration"] is None:
         m["calibration"] = "none"
+
+    # 6) backend explícito para evitar confusión de artefacto
+    if not str(m.get("backend", "") or "").strip():
+        fam = str(m.get("model_family", "") or "").lower()
+        if "sklearn" in fam or "logreg" in fam:
+            m["backend"] = "sklearn_logreg"
+        elif "xgboost" in fam or "xgb" in fam:
+            m["backend"] = "xgboost"
 
     return m
 
@@ -9575,39 +9767,11 @@ def _maybe_retrain_fallback_sklearn(force: bool = False):
             agregar_evento("⚠️ IA fallback: dataset incremental vacío.")
             return False
 
-        if "result_bin" not in df.columns:
-            agregar_evento("⚠️ IA fallback: falta result_bin en incremental.")
+        feats = list(INCREMENTAL_FEATURES_V2)
+        X, yb, feats, _ = _build_Xy_incremental(df, feature_names=feats)
+        if X is None or yb is None or len(X) < int(MIN_FIT_ROWS_LOW):
+            agregar_evento(f"⚠️ IA fallback: poca data útil ({0 if X is None else len(X)}).")
             return False
-
-        y = pd.to_numeric(df["result_bin"], errors="coerce")
-        mask = y.isin([0, 1])
-        if int(mask.sum()) < int(MIN_FIT_ROWS_LOW):
-            agregar_evento(f"⚠️ IA fallback: poca data útil ({int(mask.sum())}).")
-            return False
-
-        feats = [f for f in FEATURE_NAMES_DEFAULT if f in df.columns]
-        if not feats:
-            feats = [f for f in INCREMENTAL_FEATURES_V2 if f in df.columns]
-        if not feats:
-            reserved = {"result_bin", "resultado", "resultado_norm", "trade_status", "trade_status_norm"}
-            cand = []
-            for c in df.columns:
-                if c in reserved:
-                    continue
-                try:
-                    sc = pd.to_numeric(df[c], errors="coerce")
-                    if int(sc.notna().sum()) >= max(6, int(len(df) * 0.20)):
-                        cand.append(c)
-                except Exception:
-                    continue
-            feats = cand[:20]
-        if not feats:
-            agregar_evento("⚠️ IA fallback: no hay features numéricas utilizables en incremental.")
-            return False
-
-        X = df.loc[mask, feats].copy()
-        yb = y.loc[mask].astype(int).values
-        X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
         # Si solo hay una clase, no se puede entrenar
         if len(set(list(yb))) < 2:
@@ -9634,12 +9798,18 @@ def _maybe_retrain_fallback_sklearn(force: bool = False):
             "pos": int(np.sum(yb == 1)),
             "neg": int(np.sum(yb == 0)),
             "auc": float(auc),
+            "auc_applicable": True,
+            "test_single_class": False,
+            "auc_reason": "ok",
             "brier": float(brier),
             "threshold": float(THR_DEFAULT),
             "reliable": bool(len(X) >= int(MIN_FIT_ROWS_PROD)),
             "warmup_mode": bool(len(X) < int(TRAIN_WARMUP_MIN_ROWS)),
             "feature_names": list(feats),
             "model_family": "sklearn_logreg_fallback",
+            "backend": "sklearn_logreg",
+            "model_artifact_path": str(globals().get("_MODEL_PATH", "modelo_xgb_v2.pkl")),
+            "model_artifact_kind": "sklearn_logreg_fallback",
         }
 
         ok_save = False
@@ -9665,6 +9835,19 @@ def _maybe_retrain_fallback_sklearn(force: bool = False):
     except Exception as e:
         agregar_evento(f"⚠️ IA fallback falló: {type(e).__name__}")
         return False
+
+
+def _log_retrain_gate_once(reason: str, cooldown_s: float = 60.0, prefix: str = "⏸️ IA retrain-gate"):
+    """Evita spam de eventos de gate/trigger en maybe_retrain."""
+    try:
+        now = float(time.time())
+        sig = str(reason or "skip")
+        last = globals().get("_LAST_RETRAIN_SKIP_LOG", {}) or {}
+        if (sig != str(last.get("sig", ""))) or ((now - float(last.get("ts", 0.0) or 0.0)) >= float(cooldown_s)):
+            agregar_evento(f"{prefix}: {sig}")
+            globals()["_LAST_RETRAIN_SKIP_LOG"] = {"sig": sig, "ts": now}
+    except Exception:
+        pass
 
 
 def maybe_retrain(force: bool = False):
@@ -9706,13 +9889,56 @@ def maybe_retrain(force: bool = False):
 
             # Si no hay modelo aún, reintentar entrenamiento aunque no se cumplan gatillos de filas/tiempo.
             if modelo_presente:
+                trigger_reason = ""
                 if new_rows >= int(RETRAIN_INTERVAL_ROWS):
-                    pass
+                    trigger_reason = f"rows:{new_rows}>={int(RETRAIN_INTERVAL_ROWS)}"
+                elif mins >= float(RETRAIN_INTERVAL_MIN) and new_rows >= int(MIN_NEW_ROWS_FOR_TIME):
+                    trigger_reason = f"time_rows:{mins:.1f}m,+{new_rows}"
                 else:
-                    if mins >= float(RETRAIN_INTERVAL_MIN) and new_rows >= int(MIN_NEW_ROWS_FOR_TIME):
+                    # Override de staleness: corridas largas con crecimiento moderado pero real.
+                    prev_n_meta = 0
+                    prev_trained_at = None
+                    try:
+                        meta_prev = leer_model_meta() or {}
+                        prev_n_meta = int(meta_prev.get("n_samples", meta_prev.get("rows_total", meta_prev.get("n", 0))) or 0)
+                        ts_old = str(meta_prev.get("trained_at", "") or "").strip()
+                        if ts_old:
+                            prev_trained_at = datetime.strptime(ts_old, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        prev_n_meta = 0
+                        prev_trained_at = None
+
+                    stale_secs = float(now - float(last_retrain_ts or 0.0))
+                    try:
+                        if prev_trained_at is not None:
+                            stale_secs = max(stale_secs, float((datetime.now() - prev_trained_at).total_seconds()))
+                    except Exception:
                         pass
+
+                    min_abs_growth = int(TRAIN_REFRESH_MIN_ABS_ROWS)
+                    try:
+                        if int(prev_n_meta) <= int(TRAIN_REFRESH_LOWN_CUTOFF):
+                            min_abs_growth = int(TRAIN_REFRESH_MIN_ABS_ROWS_LOWN)
+                    except Exception:
+                        min_abs_growth = int(TRAIN_REFRESH_MIN_ABS_ROWS)
+
+                    grew_abs = bool(new_rows >= max(5, min_abs_growth))
+                    grew_rel = bool(prev_n_meta > 0 and int(filas) >= int(round(prev_n_meta * (1.0 + float(TRAIN_REFRESH_MIN_GROWTH)))))
+                    stale_by_time = bool(stale_secs >= float(TRAIN_REFRESH_STALE_MIN))
+
+                    if stale_by_time and (grew_abs or grew_rel or (new_rows >= int(MIN_NEW_ROWS_FOR_TIME))):
+                        trigger_reason = f"stale_override:{int(stale_secs)}s,+{new_rows}"
                     else:
+                        _log_retrain_gate_once(
+                            f"gates rows+time (new_rows={new_rows}, mins={mins:.1f}, stale_s={int(stale_secs)}, grew_abs={int(grew_abs)}, grew_rel={int(grew_rel)})",
+                            cooldown_s=75.0,
+                        )
                         return False
+
+                try:
+                    _log_retrain_gate_once(f"trigger {trigger_reason}", cooldown_s=20.0)
+                except Exception:
+                    pass
 
         # 3) Reparar incremental si quedó “mutante” + leer incremental (con LOCK)
         ruta_inc = "dataset_incremental.csv"
@@ -10184,6 +10410,9 @@ def maybe_retrain(force: bool = False):
         except Exception:
             pass
 
+        test_single_class = bool((p_test is not None) and (len(np.unique(y_test)) < 2))
+        auc_reason = "ok" if auc_applicable else ("test_single_class" if test_single_class else "auc_not_available")
+
         # 14) TimeSeriesSplit REAL (CV AUC) sobre TRAIN_BASE (diagnóstico)
         cv_auc = None
         try:
@@ -10395,15 +10624,20 @@ def maybe_retrain(force: bool = False):
             return False
 
         # 17) Guardado atómico (compatible con tu función si existe)
+        q = globals().get("_LAST_XY_QUALITY", {}) or {}
         meta = {
             "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "rows_total": int(n_total),
+            "n_samples": int(n_total),
             "rows_train": int(n_train),
             "rows_calib": int(n_cal),
             "rows_test": int(n_test),
             "pos": int(np.sum(y == 1)),
             "neg": int(np.sum(y == 0)),
             "auc": float(auc),
+            "auc_applicable": bool(auc_applicable),
+            "test_single_class": bool(test_single_class),
+            "auc_reason": str(auc_reason),
             "f1": float(f1t),
             "brier": float(brier),
             "cv_auc": float(cv_auc) if isinstance(cv_auc, (int, float)) else None,
@@ -10421,6 +10655,21 @@ def maybe_retrain(force: bool = False):
             "test_n_at_thr": int(test_n_at_thr),
             "feature_names": list(feats_used),
             "label_col": str(label_col),
+            "model_family": "xgboost_calibrated",
+            "backend": "xgboost",
+            "model_artifact_path": str(globals().get("_MODEL_PATH", "modelo_xgb_v2.pkl")),
+            "model_artifact_kind": "xgb_or_calibrated_wrapper",
+            "warmup_mode": bool(int(n_total) < int(TRAIN_WARMUP_MIN_ROWS)),
+            "train_data_quality": {
+                "rows_df": int(q.get("rows_df", 0) or 0),
+                "rows_label_valid": int(q.get("rows_label_valid", 0) or 0),
+                "rows_label_drop": int(q.get("rows_label_drop", 0) or 0),
+                "rows_quality_valid": int(q.get("rows_quality_valid", 0) or 0),
+                "rows_quality_drop": int(q.get("rows_quality_drop", 0) or 0),
+                "duplicates_removed": int(q.get("duplicates_removed", 0) or 0),
+                "dedup_applied": bool(q.get("dedup_applied", False)),
+                "dedup_skipped_reason": str(q.get("dedup_skipped_reason", "") or ""),
+            },
             "schema_version": str(SCHEMA_VERSION_ACTIVE),
             "trained_on_incremental": str(DATASET_SCHEMA_TAG),
             "feature_health": health_before,
@@ -10498,7 +10747,10 @@ def maybe_retrain(force: bool = False):
         last_retrain_ts = float(now)
 
         try:
-            msg = f"✅ IA reentrenada | AUC={auc:.3f} F1={f1t:.3f} thr={thr:.2f} calib={calib_kind}"
+            auc_txt = f"{auc:.3f}" if bool(auc_applicable) else "N/A"
+            msg = f"✅ IA reentrenada | AUC={auc_txt} F1={f1t:.3f} thr={thr:.2f} calib={calib_kind}"
+            if (not bool(auc_applicable)) and str(auc_reason):
+                msg += f" | auc_reason={auc_reason}"
             if cv_auc is not None:
                 msg += f" | CV_AUC={cv_auc:.3f}"
             agregar_evento(msg)
@@ -10775,7 +11027,7 @@ def mostrar_panel():
             b_reason = str(board_st.get("boardgate_reason", "init") or "init")
             if b_reason in ("low_data", "init"):
                 board_txt = "Board: low_data" if b_reason == "low_data" else "Board: warmup"
-            elif b_reason in ("no_model", "no_model_class", "joblib_missing"):
+            elif b_reason in ("no_model", "joblib_missing"):
                 board_txt = "Board: no_model"
             elif b_reason.startswith(("err:", "load_err:", "predict_err:")):
                 board_txt = "Board: err"
@@ -10957,6 +11209,40 @@ def mostrar_panel():
                 else:
                     principal_txt = principal[0]
 
+            # Etiqueta dominante diagnóstica (solo observabilidad; no altera trading).
+            dominant_tag = "ALLOW"
+            try:
+                emb_live = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
+                emb_reason = str(emb_live.get("decision_reason", "") or "")
+                emb_soft = str(emb_live.get("soft_wait_reason", "") or "")
+                board_reason_h = str(estado_bots.get(mejor[0], {}).get("boardgate_reason", "") or "")
+                board_ready_h = bool(estado_bots.get(mejor[0], {}).get("boardgate_ready", False))
+                roof_def = max(0.0, float(roof_h) - float(best_prob))
+                try:
+                    saldo_now = float(valor) if isinstance(valor, (int, float)) else None
+                except Exception:
+                    saldo_now = None
+                costo_c1_h = float(MARTI_ESCALADO[0]) if MARTI_ESCALADO else 0.0
+
+                if isinstance(saldo_now, (int, float)) and saldo_now < float(costo_c1_h):
+                    dominant_tag = "BALANCE_LT_C1"
+                elif (not roof_ok) and (roof_def <= float(DYN_ROOF_NEAR_TOL)):
+                    dominant_tag = "ROOF_NEAR_MISS"
+                elif warmup_live:
+                    dominant_tag = "WARMUP_LOW_N"
+                elif (not board_ready_h) and board_reason_h in ("mod_missing", "no_model", "joblib_missing"):
+                    dominant_tag = "BOARD_MISSING"
+                elif (not board_ready_h) and board_reason_h == "low_data":
+                    dominant_tag = "BOARD_LOW_DATA"
+                elif (not confirm_ok):
+                    dominant_tag = "CONFIRM_PENDING"
+                elif "sin_candidatos" in emb_reason or "sin_candidatos" in emb_soft:
+                    dominant_tag = "NO_CANDIDATES"
+                elif principal is not None:
+                    dominant_tag = str(principal[0])
+            except Exception:
+                dominant_tag = ("ALLOW" if principal is None else str(principal[0]))
+
             # Histograma compacto del bloqueo dominante para ventana reciente.
             try:
                 principal_key = "ALLOW" if principal is None else str(principal[0])
@@ -10980,9 +11266,10 @@ def mostrar_panel():
                 print(padding + Fore.CYAN + f"🧪 Embudo: {funnel_txt}")
             if owner in BOT_NAMES:
                 principal_txt = f"{principal_txt} (solo nuevas entradas; REAL activo={owner})"
-            decision_line = f"🧭 Decisión tick: P_diag={p_diag*100:.1f}% | P_model={p_model*100:.1f}% | P_oper={p_oper*100:.1f}% | modo={modo_score} | Bloqueo principal={principal_txt}"
+            decision_line = f"🧭 Decisión tick: P_diag={p_diag*100:.1f}% | P_model={p_model*100:.1f}% | P_oper={p_oper*100:.1f}% | modo={modo_score} | Bloqueo principal={principal_txt} | Dominante={dominant_tag}"
             print(padding + Fore.CYAN + decision_line)
             _runtime_audit_append(decision_line)
+            print(padding + Fore.CYAN + f"🔎 Dominante: {dominant_tag}")
             if bool(HUD_COMPACT_MODE):
                 print(padding + Fore.CYAN + f"📏 Umbrales: UNREL={unrel_thr_live*100:.0f}% | ROOF={roof_h*100:.1f}% | FLOOR={floor_h*100:.1f}% | CLASSIC={AUTO_REAL_THR_MIN*100:.0f}%")
             else:
@@ -13728,6 +14015,11 @@ async def cargar_datos_bot(bot, token_actual):
                     _boardgate_shadow_eval(bot, _boardgate_prob_live(bot))
                 except Exception:
                     _apply_boardgate_defaults(estado_bots.get(bot, {}), reason="err:shadow_eval")
+
+                try:
+                    log_ia_signal_snapshot(bot, fila_dict.get("epoch"), estado_bots.get(bot, {}), reason="pretrade")
+                except Exception:
+                    pass
 
                 estado_bots[bot]["token"] = "REAL" if effective_owner == bot else "DEMO"
                 last_update_time[bot] = time.time()
