@@ -255,6 +255,76 @@ BOARDGATE_FEATURES_PATH = "boardgate_features.pkl"
 BOARDGATE_META_PATH = "boardgate_meta.json"
 BOARDGATE_FUSION_ENABLE = False
 
+# === MVRX-75 (Matriz Verde con Rebote de X) ===
+MVRX_ENABLE = True
+MVRX_USE_PATTERN = True
+MVRX_GREEN_RATIO_P1 = 0.75
+MVRX_GREEN_RATIO_P2 = 0.67
+MVRX_PREV_GREEN_RATIO_P2 = 0.60
+MVRX_STREAK_MIN_P1 = 3
+MVRX_STREAK_MAX_P1 = 6
+MVRX_BLOCK_STREAK_GE = 7
+MVRX_PATTERN_BONUS = 0.08
+MVRX_P1_BASE_SCORE = 0.78
+MVRX_P2_BASE_SCORE = 0.66
+MVRX_P3_BASE_SCORE = 0.55
+MVRX_P3_ENABLE = True
+MVRX_SHADOW_ONLY = False
+MVRX_VALID_PATTERNS = {"RGRGR", "RRRR", "GRGR"}
+
+# === MVRX Debug / Observabilidad ===
+MVRX_DEBUG_ENABLE = True
+MVRX_DEBUG_VERBOSE = True
+MVRX_DEBUG_CSV_ENABLE = True
+MVRX_DEBUG_CSV_PATH = "mvrx_debug_log.csv"
+MVRX_WARMUP_DEMO_ASSIST = True
+MVRX_WARMUP_DEMO_ASSIST_SHADOW_ONLY = True
+
+# === SRX-3+ (complemento saturación roja controlada) ===
+SRX_ENABLE = True
+SRX_XCOUNT_MIN = 3
+SRX_XCOUNT_MAX = 5
+SRX_GREEN_RATIO_MIN = 0.15
+SRX_GREEN_RATIO_MAX = 0.60
+SRX_BLOCK_STREAK_GE = 8
+SRX_PATTERN_BONUS_ENABLE = True
+SRX_SHADOW_ONLY = True
+SRX_VALID_PATTERNS = {"RGRGR", "RRRR", "RRR"}
+
+
+def _mvrx_state_defaults() -> dict:
+    return {
+        "mvrx_ok": False,
+        "mvrx_tier": "NONE",
+        "mvrx_score": 0.0,
+        "mvrx_reason": "init",
+        "mvrx_block_reason": "",
+        "mvrx_green_ratio": 0.0,
+        "mvrx_x_count": 0,
+        "mvrx_streak": 0,
+        "mvrx_pattern": "",
+        "mvrx_candidate_idx": -1,
+        "mvrx_target_idx": -1,
+        "mvrx_top1": False,
+        "mvrx_priority_rank": 999,
+    }
+
+
+def _srx_state_defaults() -> dict:
+    return {
+        "srx_ok": False,
+        "srx_tier": "NONE",
+        "srx_score": 0.0,
+        "srx_reason": "init",
+        "srx_block_reason": "",
+        "srx_green_ratio": 0.0,
+        "srx_x_count": 0,
+        "srx_streak": 0,
+        "srx_pattern": "",
+        "srx_candidate_idx": -1,
+        "srx_top1": False,
+    }
+
 # --- Objetivos / umbrales globales de IA ---
 IA_OBJETIVO_REAL_THR = 0.70   # objetivo de calidad REAL (meta: 70% aprox)
 IA_ACTIVACION_REAL_THR = 0.60 # perfil moderado: habilitar REAL desde 60% con candados activos
@@ -704,8 +774,8 @@ def _shadow_micro_gate_ok(candidatos: list, dyn_gate: dict | None = None) -> tup
         allow_gate = bool(dgate.get("allow_real", False))
 
         best = candidatos[0]
-        best_bot = str(best[1])
-        p_best = float(best[2] or 0.0)
+        best_bot = _candidate_bot_name(best)
+        p_best = float(_candidate_prob(best))
         if best_bot != str(dgate.get("best_bot", best_bot)):
             return False, "best_mismatch"
         if p_best < float(REAL_SHADOW_MICRO_MIN_PROB):
@@ -743,8 +813,8 @@ def _micro_strong_gate_fallback_ok(candidatos: list, dyn_gate: dict | None = Non
             return False, "sin_candidatos"
         dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
         top = candidatos[0]
-        best_bot = str(top[1])
-        p_best = float(top[2] or 0.0)
+        best_bot = _candidate_bot_name(top)
+        p_best = float(_candidate_prob(top))
         confirm_need = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
         confirm_ok = int(dgate.get("confirm_streak", 0) or 0) >= confirm_need
         trigger_ok = bool(dgate.get("trigger_ok", False))
@@ -1211,6 +1281,8 @@ estado_bots = {
         "boardgate_reason": "init",
         "boardgate_prob_final_preview": None,
         "boardgate_block_preview": "",
+        **_mvrx_state_defaults(),
+        **_srx_state_defaults(),
     }
     for bot in BOT_NAMES
 }
@@ -4889,6 +4961,8 @@ def _boardgate_defaults(reason: str = "init") -> dict:
         "boardgate_reason": str(reason or "init"),
         "boardgate_prob_final_preview": None,
         "boardgate_block_preview": "",
+        **_mvrx_state_defaults(),
+        **_srx_state_defaults(),
     }
 
 
@@ -7526,7 +7600,9 @@ def reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=15, modo_suave=
             "ia_fallos": 0,
             "ia_senal_pendiente": False,
             "ia_prob_senal": None,
-            **_boardgate_defaults(reason="reset_full")
+            **_boardgate_defaults(reason="reset_full"),
+            **_mvrx_state_defaults(),
+            **_srx_state_defaults()
         })
         SNAPSHOT_FILAS[bot] = contar_filas_csv(bot)
         OCULTAR_HASTA_NUEVO[bot] = False  # Cambiado para no ocultar
@@ -7589,7 +7665,9 @@ def reiniciar_bot(bot, borrar_csv=False):
         "ia_fallos": 0,
         "ia_senal_pendiente": False,
         "ia_prob_senal": None,
-        **_boardgate_defaults(reason="reset_bot")
+        **_boardgate_defaults(reason="reset_bot"),
+        **_mvrx_state_defaults(),
+        **_srx_state_defaults()
     })
     SNAPSHOT_FILAS[bot] = contar_filas_csv(bot)
     OCULTAR_HASTA_NUEVO[bot] = False  # Cambiado para no ocultar
@@ -7883,7 +7961,7 @@ def elegir_candidato_rotacion_marti(
     if ultimo_bot_real in BOT_NAMES:
         usados_set.add(str(ultimo_bot_real))
 
-    candidatos_nuevos = [c for c in candidatos if c[1] not in usados_set]
+    candidatos_nuevos = [c for c in candidatos if _candidate_bot_name(c) not in usados_set]
     if candidatos_nuevos:
         return candidatos_nuevos[0]
 
@@ -7895,12 +7973,7 @@ def elegir_candidato_rotacion_marti(
         # Blindaje defensivo: mantener umbral dentro de rango probabilístico.
         min_prob = max(0.0, min(1.0, min_prob))
         for c in candidatos:
-            # Tupla esperada: (score, bot, p_model, p_oper, ...)
-            if not isinstance(c, (tuple, list)):
-                continue
-            if len(c) <= 2:
-                continue
-            p_oper = c[3] if len(c) > 3 else c[2]
+            p_oper = _candidate_prob(c)
             try:
                 p_val = float(p_oper)
                 p_ok = (p_val == p_val) and (p_val >= min_prob)  # NaN-safe
@@ -11388,9 +11461,24 @@ def mostrar_panel():
                 f"🧪 Embudo: final={emb.get('decision_final','--')} risk={emb.get('risk_mode','--')} gate={emb.get('gate_quality','--')} "
                 f"top1={emb.get('top1_bot') or '--'}({float(emb.get('top1_prob',0.0) or 0.0)*100:.1f}%) "
                 f"top2={emb.get('top2_bot') or '--'} gap={float(emb.get('gap_value',0.0) or 0.0)*100:.1f}pp "
+                f"src={emb.get('signal_source','MVRX')} mvrx={emb.get('mvrx_tier','--')}({float(emb.get('mvrx_score',0.0) or 0.0)*100:.1f}%) srx={emb.get('srx_tier','--')}({float(emb.get('srx_score',0.0) or 0.0)*100:.1f}%) "
                 f"why={emb.get('decision_reason','--')} wait={emb.get('soft_wait_reason','') or '--'} "
-                f"hard={emb.get('hard_block_reason','') or '--'} deg={emb.get('degrade_from','--')}"
+                f"hard={emb.get('hard_block_reason','') or '--'} mvrx_blk={emb.get('mvrx_block_reason','') or '--'} deg={emb.get('degrade_from','--')}"
             )
+            try:
+                top_b = str(emb.get('top1_bot') or '')
+                if top_b in estado_bots:
+                    st_top = estado_bots.get(top_b, {})
+                    print(
+                        padding + Fore.CYAN +
+                        f"🟩 MVRX top1 {top_b}: green={float(st_top.get('mvrx_green_ratio',0.0) or 0.0)*100:.1f}% "
+                        f"x={int(st_top.get('mvrx_x_count',0) or 0)} streak={int(st_top.get('mvrx_streak',0) or 0)} "
+                        f"pat={st_top.get('mvrx_pattern','') or '--'} tier={st_top.get('mvrx_tier','NONE')} "
+                        f"score={float(st_top.get('mvrx_score',0.0) or 0.0):.3f} reason={st_top.get('mvrx_reason','--')} "
+                        f"block={st_top.get('mvrx_block_reason','--') or '--'}"
+                    )
+            except Exception:
+                pass
 
             ref_racha = ultimo_bot_real if ultimo_bot_real in BOT_NAMES else "--"
             elegido_tick = mejor[0] if isinstance(mejor, tuple) and len(mejor) >= 1 else "--"
@@ -12194,14 +12282,23 @@ PENDIENTE_FORZAR_EXPIRA = 0.0
 FORZAR_LOCK = threading.Lock()
 
 def condiciones_seguras_para(bot: str) -> bool:
-    # Fuente operativa única: prob_ia_oper + estado final del embudo
+    # Seguridad operativa: embudo + señal matricial MVRX + prob IA operativa.
     thr = float(get_umbral_operativo())
     prob = float(_prob_ia_operativa_bot(bot, default=0.0) or 0.0)
-    n = int(estado_bots.get(bot, {}).get("tamano_muestra", 0) or 0)
+    st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+    n = int(st.get("tamano_muestra", 0) or 0)
     emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
     dec = str(emb.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
     top1 = str(emb.get("top1_bot") or "")
     if top1 and bot != top1:
+        return False
+    if not bool(st.get("mvrx_ok", False)):
+        return False
+    if not bool(st.get("mvrx_top1", False)):
+        return False
+    if str(st.get("mvrx_tier", "NONE") or "NONE") not in ("P1", "P2"):
+        return False
+    if float(st.get("mvrx_score", 0.0) or 0.0) <= 0.0:
         return False
     return (n >= ORACULO_N_MIN) and (prob >= thr) and (dec in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO))
 
@@ -12370,7 +12467,9 @@ def resetear_estado_hud(estado_bots: dict):
             "fuente": None, "modo_ia": "low_data",
             "ia_seniales": 0, "ia_aciertos": 0, "ia_fallos": 0, "ia_senal_pendiente": False,
             "ia_prob_senal": None,
-            **_boardgate_defaults(reason="reset_hud")
+            **_boardgate_defaults(reason="reset_hud"),
+            **_mvrx_state_defaults(),
+            **_srx_state_defaults()
         })
 
 def limpieza_dura():
@@ -13010,7 +13109,492 @@ def _umbral_unrel_operativo(best_bot: str | None, best_prob: float | None = None
         return float(AUTO_REAL_UNRELIABLE_MIN_PROB)
 
 
-def _actualizar_compuerta_techo_dinamico() -> dict:
+
+
+def mvrx_build_live_board(bot: str) -> dict:
+    if not bool(MVRX_ENABLE):
+        return {"__mvrx_board_error": "mvrx_disabled"}
+    global _board_state_mod
+    try:
+        if _board_state_mod is None:
+            _board_state_mod = _load_optional_module("board_state")
+        if _board_state_mod is None:
+            return {"__mvrx_board_error": "board_unavailable"}
+        board = _board_state_mod.build_board_state(
+            bot_names=BOT_NAMES,
+            candidate_bot=bot,
+            lookback_cols=int(BOARDGATE_LOOKBACK_COLS),
+            csv_dir='.',
+            status_normalizer=normalizar_trade_status,
+            result_normalizer=normalizar_resultado,
+        )
+        if not isinstance(board, dict):
+            return {"__mvrx_board_error": "board_unavailable"}
+        return board
+    except Exception:
+        return {"__mvrx_board_error": "board_unavailable"}
+
+
+def mvrx_get_effective_matrix(board: dict) -> list:
+    if not isinstance(board, dict):
+        return []
+    mat = board.get('board_matrix', [])
+    return mat if isinstance(mat, list) else []
+
+
+def mvrx_get_rightmost_live_col(board_matrix: list) -> int:
+    try:
+        if not board_matrix:
+            return -1
+        max_cols = max((len(r) for r in board_matrix if isinstance(r, list)), default=0)
+        for c in range(max_cols - 1, -1, -1):
+            for r in board_matrix:
+                if not isinstance(r, list) or c >= len(r):
+                    continue
+                if _mvrx_norm_cell(r[c]) in ('G', 'R'):
+                    return c
+        return -1
+    except Exception:
+        return -1
+
+
+def _mvrx_norm_cell(v) -> str:
+    try:
+        t = str(v).strip().upper()
+    except Exception:
+        return 'N'
+    if t in ('', '-', '--', 'NONE', 'NULL', 'NAN'):
+        return 'N'
+    if t in ('✅', '✔', 'CHECK', 'GANANCIA', 'WIN', 'G', 'GREEN', 'VERDE', '1', 'TRUE'):
+        return 'G'
+    if t in ('❌', 'X', 'PÉRDIDA', 'PERDIDA', 'LOSS', 'L', 'R', 'RED', 'ROJO', '0', 'FALSE'):
+        return 'R'
+    return 'N'
+
+
+def mvrx_calc_green_ratio(board_matrix: list, col_idx: int) -> float:
+    vals = []
+    for r in board_matrix:
+        if not isinstance(r, list) or col_idx < 0 or col_idx >= len(r):
+            continue
+        n = _mvrx_norm_cell(r[col_idx])
+        if n in ('G', 'R'):
+            vals.append(n)
+    if not vals:
+        return 0.0
+    return float(sum(1 for x in vals if x == 'G')) / float(len(vals))
+
+
+def mvrx_count_x_in_col(board_matrix: list, col_idx: int) -> int:
+    return len(mvrx_find_x_rows(board_matrix, col_idx))
+
+
+def mvrx_find_x_rows(board_matrix: list, col_idx: int) -> list:
+    out = []
+    for i, r in enumerate(board_matrix):
+        if not isinstance(r, list) or col_idx < 0 or col_idx >= len(r):
+            continue
+        if _mvrx_norm_cell(r[col_idx]) == 'R':
+            out.append(i)
+    return out
+
+
+def mvrx_calc_row_streak_x(board_matrix: list, row_idx: int, col_idx: int) -> int:
+    if row_idx < 0 or row_idx >= len(board_matrix):
+        return 0
+    row = board_matrix[row_idx] if isinstance(board_matrix[row_idx], list) else []
+    c = min(col_idx, len(row)-1)
+    streak = 0
+    while c >= 0:
+        n = _mvrx_norm_cell(row[c])
+        if n == 'R':
+            streak += 1
+            c -= 1
+            continue
+        if n == 'N':
+            c -= 1
+            continue
+        break
+    return streak
+
+
+def mvrx_detect_row_pattern(board_matrix: list, row_idx: int, col_idx: int) -> str:
+    if row_idx < 0 or row_idx >= len(board_matrix):
+        return ''
+    row = board_matrix[row_idx] if isinstance(board_matrix[row_idx], list) else []
+    seq = []
+    for c in range(min(col_idx - 1, len(row)-1), -1, -1):
+        n = _mvrx_norm_cell(row[c])
+        if n in ('G', 'R'):
+            seq.append(n)
+        if len(seq) >= 5:
+            break
+    seq = ''.join(reversed(seq))
+    if len(seq) >= 5:
+        return seq[-5:]
+    return seq
+
+
+def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
+    st = _mvrx_state_defaults()
+    st['mvrx_reason'] = 'no_board'
+    st['bot'] = bot
+    st['prob_ia_oper'] = float(prob_live) if isinstance(prob_live, (int, float)) else float(_prob_ia_operativa_bot(bot, default=0.0) or 0.0)
+    try:
+        if not isinstance(board, dict):
+            st['mvrx_block_reason'] = 'board_unavailable'
+            st['mvrx_reason'] = 'board_unavailable'
+            return st
+        board_err = str(board.get('__mvrx_board_error', '') or '').strip()
+        if board_err:
+            st['mvrx_block_reason'] = board_err
+            st['mvrx_reason'] = board_err
+            return st
+
+        mat = mvrx_get_effective_matrix(board)
+        if not mat:
+            st['mvrx_block_reason'] = 'board_empty'
+            st['mvrx_reason'] = 'board_empty'
+            return st
+        col = mvrx_get_rightmost_live_col(mat)
+        if col < 0:
+            st['mvrx_block_reason'] = 'no_live_col'
+            st['mvrx_reason'] = 'no_live_col'
+            return st
+        gr = float(mvrx_calc_green_ratio(mat, col))
+        xr = mvrx_find_x_rows(mat, col)
+        xc = len(xr)
+        st['mvrx_green_ratio'] = gr
+        st['mvrx_x_count'] = int(xc)
+
+        bmeta = board.get('board_meta', {}) if isinstance(board, dict) else {}
+        cand_idx = int(bmeta.get('candidate_idx', -1) or -1)
+        if cand_idx < 0:
+            cand_idx = int(board.get('candidate_idx', -1) or -1)
+        st['mvrx_candidate_idx'] = cand_idx
+        if cand_idx < 0:
+            st['mvrx_block_reason'] = 'candidate_idx_missing'
+            st['mvrx_reason'] = 'candidate_idx_missing'
+            return st
+
+        if gr < float(MVRX_GREEN_RATIO_P2):
+            st['mvrx_block_reason'] = 'green_ratio_low'
+            st['mvrx_reason'] = f'green<{MVRX_GREEN_RATIO_P2:.2f}'
+            return st
+        if xc == 0:
+            st['mvrx_block_reason'] = 'x_count_0'
+            st['mvrx_reason'] = 'sin_x'
+            return st
+        if xc >= 3:
+            st['mvrx_block_reason'] = 'x_count_ge_3'
+            st['mvrx_reason'] = 'x_count_invalid'
+            return st
+
+        target_idx = -1
+        tier = 'NONE'
+        score = 0.0
+        reason = 'no_rule'
+        block = ''
+
+        if xc == 1:
+            target_idx = int(xr[0])
+            st["mvrx_target_idx"] = int(target_idx)
+            streak = int(mvrx_calc_row_streak_x(mat, target_idx, col))
+            patt = mvrx_detect_row_pattern(mat, target_idx, col)
+            st['mvrx_streak'] = streak
+            st['mvrx_pattern'] = patt
+            if streak >= int(MVRX_BLOCK_STREAK_GE):
+                block = 'streak_ge_block'
+            elif (gr >= float(MVRX_GREEN_RATIO_P1)) and (int(MVRX_STREAK_MIN_P1) <= streak <= int(MVRX_STREAK_MAX_P1)):
+                tier = 'P1'
+                score = float(MVRX_P1_BASE_SCORE + (gr - MVRX_GREEN_RATIO_P1) * 0.25)
+                reason = 'p1_core'
+            elif bool(MVRX_P3_ENABLE):
+                tier = 'P3'
+                score = float(MVRX_P3_BASE_SCORE + max(0.0, gr - MVRX_GREEN_RATIO_P2) * 0.10)
+                reason = 'p3_explore'
+            if bool(MVRX_USE_PATTERN) and patt in MVRX_VALID_PATTERNS and tier in ('P1', 'P2', 'P3'):
+                score += float(MVRX_PATTERN_BONUS)
+                reason = f'{reason}+pattern'
+        elif xc == 2:
+            prev_gr = float(mvrx_calc_green_ratio(mat, col - 1)) if col > 0 else 0.0
+            streaks = [(ri, int(mvrx_calc_row_streak_x(mat, ri, col))) for ri in xr]
+            pick = None
+            pref = [ri for ri, stx in streaks if stx in (5, 6)]
+            if prev_gr >= float(MVRX_PREV_GREEN_RATIO_P2) and pref:
+                pick = int(pref[0])
+                reason = 'p2_pref_5_6_prev_ok'
+            else:
+                streaks_sorted = sorted(streaks, key=lambda t: (t[1], t[0]))
+                if len(streaks_sorted) >= 2 and streaks_sorted[0][1] == streaks_sorted[1][1] and prev_gr < float(MVRX_PREV_GREEN_RATIO_P2):
+                    st['mvrx_block_reason'] = 'p2_ambiguous'
+                    st['mvrx_reason'] = 'p2_ambiguous'
+                    return st
+                pick = int(streaks_sorted[0][0]) if streaks_sorted else -1
+                reason = 'p2_shorter_streak'
+            if pick >= 0 and gr >= float(MVRX_GREEN_RATIO_P2):
+                target_idx = pick
+                st["mvrx_target_idx"] = int(target_idx)
+                streak = int(mvrx_calc_row_streak_x(mat, target_idx, col))
+                if streak >= int(MVRX_BLOCK_STREAK_GE):
+                    block = 'streak_ge_block'
+                else:
+                    tier = 'P2'
+                    score = float(MVRX_P2_BASE_SCORE + max(0.0, gr - MVRX_GREEN_RATIO_P2) * 0.20)
+                    st['mvrx_streak'] = streak
+                    st['mvrx_pattern'] = mvrx_detect_row_pattern(mat, target_idx, col)
+        else:
+            st['mvrx_block_reason'] = 'x_count_invalid'
+            st['mvrx_reason'] = 'x_count_invalid'
+            return st
+
+        if target_idx >= 0:
+            st["mvrx_target_idx"] = int(target_idx)
+        if target_idx >= 0 and target_idx != int(cand_idx):
+            st['mvrx_block_reason'] = 'target_idx_mismatch'
+            st['mvrx_reason'] = f'target={int(target_idx)}!=candidate={int(cand_idx)}'
+            st['mvrx_tier'] = 'NONE'
+            st['mvrx_score'] = 0.0
+            return st
+
+        if target_idx >= 0 and st.get('mvrx_streak', 0) <= 0:
+            st['mvrx_streak'] = int(mvrx_calc_row_streak_x(mat, target_idx, col))
+        if target_idx >= 0 and not st.get('mvrx_pattern'):
+            st['mvrx_pattern'] = mvrx_detect_row_pattern(mat, target_idx, col)
+
+        if block:
+            st['mvrx_ok'] = False
+            st['mvrx_block_reason'] = block
+            st['mvrx_reason'] = reason
+            st['mvrx_tier'] = 'NONE'
+            st['mvrx_score'] = 0.0
+            return st
+
+        st['mvrx_ok'] = tier in ('P1', 'P2', 'P3')
+        st['mvrx_tier'] = tier
+        st['mvrx_score'] = float(max(0.0, min(1.0, score)))
+        st['mvrx_reason'] = reason
+        st['mvrx_block_reason'] = '' if st['mvrx_ok'] else 'no_tier'
+        return st
+    except Exception as e:
+        st['mvrx_ok'] = False
+        st['mvrx_tier'] = 'NONE'
+        st['mvrx_reason'] = f'err:{type(e).__name__}'
+        st['mvrx_block_reason'] = 'eval_error'
+        return st
+
+
+def mvrx_rank_candidates(candidates: list) -> list:
+    def keyf(c: dict):
+        tier = str(c.get('mvrx_tier', 'NONE') or 'NONE')
+        t_rank = {'P1': 0, 'P2': 1, 'P3': 2}.get(tier, 9)
+        score_final = float(c.get('score_final', c.get('mvrx_score', 0.0)) or 0.0)
+        mvrx_score = float(c.get('mvrx_score', 0.0) or 0.0)
+        p_oper = float(c.get('prob_ia_oper', c.get('prob', 0.0)) or 0.0)
+        ev_n = int(c.get('ev_n', 0) or 0)
+        return (t_rank, -score_final, -mvrx_score, -p_oper, -ev_n, str(c.get('bot', '')))
+    ranked = sorted([c for c in candidates if isinstance(c, dict)], key=keyf)
+    for i, c in enumerate(ranked, start=1):
+        c['mvrx_priority_rank'] = int(i)
+        c['mvrx_top1'] = (i == 1)
+    return ranked
+
+
+def mvrx_select_top_candidate(candidates: list) -> dict | None:
+    ranked = mvrx_rank_candidates(candidates)
+    return ranked[0] if ranked else None
+
+
+def srx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
+    st = _srx_state_defaults()
+    st["bot"] = bot
+    try:
+        if not bool(SRX_ENABLE):
+            st["srx_block_reason"] = "srx_disabled"
+            return st
+        if not isinstance(board, dict):
+            st["srx_block_reason"] = "board_unavailable"
+            return st
+        mat = mvrx_get_effective_matrix(board)
+        if not mat:
+            st["srx_block_reason"] = "board_empty"
+            return st
+        col = mvrx_get_rightmost_live_col(mat)
+        if col < 0:
+            st["srx_block_reason"] = "no_live_col"
+            return st
+        xr = mvrx_find_x_rows(mat, col)
+        xc = len(xr)
+        gr = float(mvrx_calc_green_ratio(mat, col))
+        st["srx_x_count"] = int(xc)
+        st["srx_green_ratio"] = float(gr)
+
+        bmeta = board.get('board_meta', {}) if isinstance(board, dict) else {}
+        cand_idx = int(bmeta.get('candidate_idx', -1) or -1)
+        if cand_idx < 0:
+            cand_idx = int(board.get('candidate_idx', -1) or -1)
+        st["srx_candidate_idx"] = int(cand_idx)
+
+        if xc < int(SRX_XCOUNT_MIN):
+            st["srx_block_reason"] = "x_count_lt_3"
+            return st
+        if xc > int(SRX_XCOUNT_MAX):
+            st["srx_block_reason"] = "x_count_gt_5"
+            return st
+        if gr < float(SRX_GREEN_RATIO_MIN) or gr > float(SRX_GREEN_RATIO_MAX):
+            st["srx_block_reason"] = "green_ratio_outside_band"
+            return st
+        if cand_idx < 0:
+            st["srx_block_reason"] = "candidate_idx_missing"
+            return st
+        if cand_idx not in set(int(x) for x in xr):
+            st["srx_block_reason"] = "candidate_not_in_x_cluster"
+            return st
+
+        streak = int(mvrx_calc_row_streak_x(mat, int(cand_idx), col))
+        patt = mvrx_detect_row_pattern(mat, int(cand_idx), col)
+        st["srx_streak"] = int(streak)
+        st["srx_pattern"] = str(patt)
+        if streak >= int(SRX_BLOCK_STREAK_GE):
+            st["srx_block_reason"] = "streak_ge_block"
+            return st
+
+        tier = "S2"
+        score = 0.52 + max(0.0, min(0.15, (float(SRX_GREEN_RATIO_MAX) - gr)))
+        if streak in (3, 4, 5):
+            tier = "S1"
+            score += 0.07
+        if bool(SRX_PATTERN_BONUS_ENABLE) and patt in SRX_VALID_PATTERNS:
+            score += 0.04
+        st["srx_ok"] = True
+        st["srx_tier"] = tier
+        st["srx_score"] = float(max(0.0, min(1.0, score)))
+        st["srx_reason"] = "srx_core"
+        st["srx_block_reason"] = ""
+        return st
+    except Exception as e:
+        st["srx_ok"] = False
+        st["srx_block_reason"] = "eval_error"
+        st["srx_reason"] = f"err:{type(e).__name__}"
+        return st
+
+
+def _mvrx_debug_columns() -> list[str]:
+    return [
+        "ts","bot","estado_real","decision_final","top1_bot","mvrx_top1",
+        "mvrx_ok","mvrx_tier","mvrx_score","mvrx_reason","mvrx_block_reason",
+        "mvrx_green_ratio","mvrx_x_count","mvrx_streak","mvrx_pattern","candidate_idx","target_idx",
+        "preferred_bot","dyn_best_bot","allow_real","trigger_ok","confirm_streak","confirm_needed","gap_ok","gate_mode","reliable_mode","warmup_mode",
+        "funnel_state","safe_to_operate","owner_lock_block","cooldown_block","balance_block","hard_block_reason",
+        "root_block_layer","root_block_reason","would_demo_assist_enter","would_demo_assist_mode",
+        "signal_source","signal_tier","srx_ok","srx_tier","srx_score","srx_reason","srx_block_reason"
+    ]
+
+
+def mvrx_debug_log_event(row: dict) -> None:
+    if not bool(MVRX_DEBUG_ENABLE):
+        return
+    try:
+        if bool(MVRX_DEBUG_CSV_ENABLE):
+            cols = _mvrx_debug_columns()
+            write_header = (not os.path.exists(MVRX_DEBUG_CSV_PATH))
+            with open(MVRX_DEBUG_CSV_PATH, "a", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=cols)
+                if write_header:
+                    w.writeheader()
+                w.writerow({c: row.get(c, "") for c in cols})
+        if bool(MVRX_DEBUG_VERBOSE):
+            layer = str(row.get("root_block_layer", "--") or "--")
+            reason = str(row.get("root_block_reason", "--") or "--")
+            bot = str(row.get("bot", "--") or "--")
+            if layer in ("MVRX", "NO_SIGNAL"):
+                agregar_evento(f"🧱 MVRX blk={reason} bot={bot} tier={row.get('mvrx_tier','NONE')} g={float(row.get('mvrx_green_ratio',0.0) or 0.0):.2f} x={int(row.get('mvrx_x_count',0) or 0)}")
+            elif layer == "WARMUP_ASSIST":
+                agregar_evento(f"🧪 DEMO_ASSIST yes bot={bot} tier={row.get('mvrx_tier','NONE')} why={reason}")
+            else:
+                agregar_evento(f"🚪 BLOCK layer={layer} reason={reason}")
+            if bool(row.get("mvrx_top1", False)):
+                agregar_evento(f"📌 TOP1 {row.get('signal_source','MVRX')} {bot} {row.get('mvrx_tier','NONE')} g={float(row.get('mvrx_green_ratio',0.0) or 0.0):.2f} x={int(row.get('mvrx_x_count',0) or 0)} streak={int(row.get('mvrx_streak',0) or 0)} patt={row.get('mvrx_pattern','--') or '--'}")
+    except Exception:
+        pass
+
+
+def mvrx_debug_root_block(top: dict | None, dyn_gate: dict | None, embudo: dict | None, estado_real: str, balance_ok: bool) -> tuple[str, str, bool, str]:
+    top = top if isinstance(top, dict) else {}
+    d = dyn_gate if isinstance(dyn_gate, dict) else {}
+    e = embudo if isinstance(embudo, dict) else {}
+    layer = "NO_SIGNAL"
+    reason = "no_signal"
+    dec = str(e.get("decision_final", "") or "")
+    m_ok = bool(top.get("mvrx_ok", False))
+    s_ok = bool(top.get("srx_ok", False))
+    if not top:
+        layer, reason = "NO_SIGNAL", "no_signal"
+    elif (not m_ok) and (not s_ok):
+        layer, reason = "MVRX", str(top.get("mvrx_block_reason", "no_signal") or "no_signal")
+    elif not bool(d.get("allow_real", False)):
+        if not bool(d.get("gap_ok", True)):
+            layer, reason = "DYN_ROOF", "dyn_gap_fail"
+        elif int(d.get("confirm_streak", 0) or 0) < int(d.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS):
+            layer, reason = "DYN_ROOF", "dyn_confirm_pending"
+        elif not bool(d.get("trigger_ok", False)):
+            layer, reason = "DYN_ROOF", "dyn_trigger_fail"
+        else:
+            layer, reason = "DYN_ROOF", "dyn_block"
+    elif dec == EMBUDO_FINAL_BLOCK_HARD:
+        layer, reason = "FUNNEL", "funnel_block_hard"
+    elif dec == EMBUDO_FINAL_WAIT_SOFT:
+        layer, reason = "FUNNEL", "funnel_wait_soft"
+    elif dec == EMBUDO_FINAL_SHADOW_OK:
+        layer, reason = "FUNNEL", "funnel_shadow_only"
+    elif str(top.get("mvrx_tier", "NONE") or "NONE") == "P3":
+        layer, reason = "SAFE_GUARD", "safe_not_real_tier"
+
+    owner = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+    bot = str(top.get("bot", "") or "")
+    if owner in BOT_NAMES and bot and str(owner) != bot:
+        layer, reason = "OWNER_LOCK", "owner_lock"
+    elif time.time() < float(REAL_COOLDOWN_UNTIL_TS):
+        layer, reason = "COOLDOWN", "cooldown_active"
+    elif not bool(balance_ok):
+        layer, reason = "BALANCE", "balance_low"
+
+    meta = resolver_canary_estado(leer_model_meta() or {}) if callable(resolver_canary_estado) else {}
+    warmup_mode = bool(meta.get("warmup_mode", False))
+    reliable_mode = bool(meta.get("reliable", False)) and (not warmup_mode)
+    would_assist = False
+    would_mode = ""
+    if bool(MVRX_WARMUP_DEMO_ASSIST) and (warmup_mode or (not reliable_mode)) and (layer in ("FUNNEL", "DYN_ROOF", "SAFE_GUARD")) and (m_ok or s_ok):
+        would_assist = True
+        would_mode = "SHADOW_OK" if bool(MVRX_WARMUP_DEMO_ASSIST_SHADOW_ONLY) else "MICRO_OBS"
+        layer = "WARMUP_ASSIST"
+        reason = "warmup_soft_block"
+    return layer, reason, would_assist, would_mode
+
+
+def _candidate_bot_name(c):
+    if isinstance(c, dict):
+        return str(c.get('bot', '') or '')
+    if isinstance(c, (tuple, list)) and len(c) > 1:
+        return str(c[1])
+    return ''
+
+
+def _candidate_prob(c) -> float:
+    if isinstance(c, dict):
+        return float(c.get('prob_ia_oper', c.get('prob', 0.0)) or 0.0)
+    if isinstance(c, (tuple, list)) and len(c) > 2:
+        return float(c[2] or 0.0)
+    return 0.0
+
+
+def _candidate_score(c) -> float:
+    if isinstance(c, dict):
+        return float(c.get('score_final', c.get('mvrx_score', 0.0)) or 0.0)
+    if isinstance(c, (tuple, list)) and len(c) > 0:
+        return float(c[0] or 0.0)
+    return 0.0
+def _actualizar_compuerta_techo_dinamico(preferred_bot: str | None = None, mvrx_valid_bots: list[str] | None = None) -> dict:
     """
     Actualiza el techo dinámico y evalúa la compuerta REAL del mejor bot del tick.
 
@@ -13051,13 +13635,26 @@ def _actualizar_compuerta_techo_dinamico() -> dict:
         tick_now = int(DYN_ROOF_STATE["tick"])
 
         live = []
+        mvrx_set = set()
+        mvrx_filter_provided = isinstance(mvrx_valid_bots, list)
+        if mvrx_filter_provided:
+            mvrx_set = {str(b) for b in mvrx_valid_bots if isinstance(b, str) and b}
         for b in BOT_NAMES:
             try:
+                if mvrx_filter_provided:
+                    if str(b) not in mvrx_set:
+                        continue
+                else:
+                    st_b = estado_bots.get(b, {}) if isinstance(estado_bots, dict) else {}
+                    if not bool(st_b.get("mvrx_ok", False)):
+                        continue
+                    if str(st_b.get("mvrx_tier", "NONE") or "NONE") not in ("P1", "P2"):
+                        continue
                 if str(estado_bots.get(b, {}).get("modo_ia", "off")).lower() == "off":
                     continue
                 if not ia_prob_valida(b, max_age_s=12.0):
                     continue
-                p = float(estado_bots.get(b, {}).get("prob_ia", 0.0) or 0.0)
+                p = float(_prob_ia_operativa_bot(b, default=0.0) or 0.0)
                 n = int(estado_bots.get(b, {}).get("tamano_muestra", 0) or 0)
                 if np.isfinite(p):
                     live.append((b, p, n))
@@ -13072,6 +13669,16 @@ def _actualizar_compuerta_techo_dinamico() -> dict:
         live.sort(key=lambda x: x[1], reverse=True)
         best_bot, p_best, n_best = live[0]
         p_second = float(live[1][1]) if len(live) > 1 else 0.0
+
+        # MVRX es el origen del campeón; dyn roof solo valida trigger/confirm/gap.
+        pref = str(preferred_bot or "").strip()
+        if pref:
+            for b_live, p_live, n_live in live:
+                if str(b_live) == pref:
+                    best_bot, p_best, n_best = str(b_live), float(p_live), int(n_live)
+                    rest = [float(pv) for bb, pv, _nn in live if str(bb) != best_bot]
+                    p_second = max(rest) if rest else 0.0
+                    break
 
         # Empates prácticos del top (ej. 85.0%/85.0%/85.0%) pueden alternar
         # best_bot por ruido mínimo y reiniciar confirmación. Si el bot ya en
@@ -13418,14 +14025,50 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
     if not candidatos:
         return out
     try:
-        ordered = sorted(candidatos, key=lambda x: float(x[2] if len(x) > 2 else 0.0), reverse=True)
+        ordered = mvrx_rank_candidates(candidatos) if candidatos and isinstance(candidatos[0], dict) else sorted(candidatos, key=lambda x: _candidate_score(x), reverse=True)
         top1 = ordered[0]
         top2 = ordered[1] if len(ordered) > 1 else None
-        top1_bot = str(top1[1])
-        top1_prob = float(top1[2] or 0.0)
-        top2_bot = str(top2[1]) if top2 else None
-        top2_prob = float(top2[2] or 0.0) if top2 else 0.0
+        top1_bot = _candidate_bot_name(top1)
+        top1_prob = float(_candidate_prob(top1))
+        top2_bot = _candidate_bot_name(top2) if top2 else None
+        top2_prob = float(_candidate_prob(top2)) if top2 else 0.0
         gap_value = float(top1_prob - top2_prob)
+
+        signal_source = str(top1.get("signal_source", "MVRX") or "MVRX") if isinstance(top1, dict) else "MVRX"
+        mvrx_ok = bool(top1.get("mvrx_ok", False)) if isinstance(top1, dict) else False
+        mvrx_tier = str(top1.get("mvrx_tier", "NONE") or "NONE") if isinstance(top1, dict) else "NONE"
+        srx_ok = bool(top1.get("srx_ok", False)) if isinstance(top1, dict) else False
+        srx_tier = str(top1.get("srx_tier", "NONE") or "NONE") if isinstance(top1, dict) else "NONE"
+        if signal_source == "MVRX" and not mvrx_ok:
+            return _registrar_estado_embudo({
+                "decision_final": EMBUDO_FINAL_WAIT_SOFT,
+                "decision_reason": "mvrx_block",
+                "gate_quality": "wait",
+                "risk_mode": "WAIT_SOFT",
+                "soft_wait_reason": str(top1.get("mvrx_block_reason", "mvrx_block") or "mvrx_block") if isinstance(top1, dict) else "mvrx_block",
+                "hard_block_reason": "",
+                "top1_bot": top1_bot,
+                "top2_bot": top2_bot,
+                "gap_value": gap_value,
+                "top1_prob": top1_prob,
+                "top2_prob": top2_prob,
+                "degrade_from": "mvrx",
+            })
+        if signal_source == "SRX" and not srx_ok:
+            return _registrar_estado_embudo({
+                "decision_final": EMBUDO_FINAL_WAIT_SOFT,
+                "decision_reason": "srx_block",
+                "gate_quality": "wait",
+                "risk_mode": "WAIT_SOFT",
+                "soft_wait_reason": str(top1.get("srx_block_reason", "srx_block") or "srx_block") if isinstance(top1, dict) else "srx_block",
+                "hard_block_reason": "",
+                "top1_bot": top1_bot,
+                "top2_bot": top2_bot,
+                "gap_value": gap_value,
+                "top1_prob": top1_prob,
+                "top2_prob": top2_prob,
+                "degrade_from": "srx",
+            })
 
         dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
         allow_real = bool(dgate.get("allow_real", False))
@@ -13461,6 +14104,13 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         else:
             soft_wait_reason = "gate_wait"
 
+        # SRX-3+ es complementario observacional en esta fase: shadow only.
+        if signal_source == "SRX":
+            decision = EMBUDO_FINAL_SHADOW_OK
+            reason = "srx_shadow_only"
+            risk_mode = "SHADOW_OK"
+            soft_wait_reason = "srx_shadow_only"
+
         meta = meta_live if isinstance(meta_live, dict) else {}
         n_samples = int(meta.get("n_samples", meta.get("n", 0)) or 0)
         reliable = bool(meta.get("reliable", False))
@@ -13487,11 +14137,14 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
 
         # Consistencia explícita: no permitir doble ganador entre dyn_gate y embudo.
         best_dyn = str(dgate.get("best_bot", "") or "").strip()
-        if best_dyn and (best_dyn != top1_bot):
-            decision = EMBUDO_FINAL_WAIT_SOFT
-            risk_mode = "WAIT_SOFT"
-            soft_wait_reason = "best_bot_mismatch"
-            reason = f"best_bot_mismatch:{best_dyn}!={top1_bot}"
+        if signal_source == "MVRX" and best_dyn and (best_dyn != top1_bot):
+            if mvrx_ok and mvrx_tier in ("P1", "P2"):
+                reason = f"mvrx_top1_over_dyn:{top1_bot}"
+            else:
+                decision = EMBUDO_FINAL_WAIT_SOFT
+                risk_mode = "WAIT_SOFT"
+                soft_wait_reason = "best_bot_mismatch"
+                reason = f"best_bot_mismatch:{best_dyn}!={top1_bot}"
 
         # Modulador Pattern V1: aporta contexto/calidad, no veto principal.
         try:
@@ -13502,13 +14155,23 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 risk_mode = "REAL_MICRO"
                 degrade_from = "pattern_v1"
                 reason = f"pattern->{why_pat}"
-            elif (not ok_pat) and decision == EMBUDO_FINAL_REAL_MICRO:
+            elif (not ok_pat) and decision == EMBUDO_FINAL_REAL_MICRO and mvrx_tier not in ("P1",):
                 decision = EMBUDO_FINAL_SHADOW_OK
                 risk_mode = "SHADOW_OK"
                 degrade_from = "pattern_v1"
                 reason = f"pattern_shadow:{why_pat}"
         except Exception:
             pass
+
+        # Política operativa P3: exploratoria, nunca compite al nivel P1/P2.
+        if mvrx_tier == "P3" and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
+            decision = EMBUDO_FINAL_SHADOW_OK
+            risk_mode = "SHADOW_OK"
+            if not soft_wait_reason:
+                soft_wait_reason = "p3_shadow_only"
+            if degrade_from == "none":
+                degrade_from = "p3_policy"
+            reason = "p3_shadow_only"
 
         # CTT (fase previa): completamente neutralizado en decisión operativa.
 
@@ -13550,6 +14213,16 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "top1_prob": top1_prob,
             "top2_prob": top2_prob,
             "degrade_from": degrade_from,
+            "mvrx_tier": mvrx_tier,
+            "mvrx_score": float(top1.get("mvrx_score", 0.0) or 0.0) if isinstance(top1, dict) else 0.0,
+            "mvrx_reason": str(top1.get("mvrx_reason", "") or "") if isinstance(top1, dict) else "",
+            "mvrx_block_reason": str(top1.get("mvrx_block_reason", "") or "") if isinstance(top1, dict) else "",
+            "signal_source": signal_source,
+            "signal_tier": str(top1.get("signal_tier", "") or "") if isinstance(top1, dict) else "",
+            "srx_tier": srx_tier,
+            "srx_score": float(top1.get("srx_score", 0.0) or 0.0) if isinstance(top1, dict) else 0.0,
+            "srx_reason": str(top1.get("srx_reason", "") or "") if isinstance(top1, dict) else "",
+            "srx_block_reason": str(top1.get("srx_block_reason", "") or "") if isinstance(top1, dict) else "",
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
@@ -13794,6 +14467,11 @@ def evaluar_ctt_fase(candidatos: list) -> tuple[list, dict]:
     no_participantes = [str(b) for b in BOT_NAMES if str(b) not in bots_wave and str(b) not in set(rezagados_validos)]
 
     def _adj_score(cand, delta):
+        if isinstance(cand, dict):
+            out = dict(cand)
+            sc = float(out.get("score_final", out.get("mvrx_score", 0.0)) or 0.0)
+            out["score_final"] = float(max(0.0, min(1.0, sc + float(delta))))
+            return out
         if not isinstance(cand, tuple) or len(cand) < 1:
             return cand
         try:
@@ -13810,7 +14488,7 @@ def evaluar_ctt_fase(candidatos: list) -> tuple[list, dict]:
         filtrados = []
     elif gate == "ALLOW_REZAGADOS":
         rez_set = set(rezagados_validos)
-        filtrados = [_adj_score(c, roof_delta) for c in candidatos if len(c) > 1 and str(c[1]) in rez_set]
+        filtrados = [_adj_score(c, roof_delta) for c in candidatos if _candidate_bot_name(c) in rez_set]
     else:
         if roof_policy == "harden" and abs(roof_delta) > 0:
             filtrados = [_adj_score(c, roof_delta) for c in candidatos]
@@ -14619,21 +15297,7 @@ async def main():
                         # usando los valores altos observados recientemente.
                         if REAL_CLASSIC_GATE:
                             umbral_ia_real = float(_umbral_real_operativo_actual())
-                            dyn_gate = _actualizar_compuerta_techo_dinamico()
-                            if isinstance(dyn_gate, dict) and bool(dyn_gate.get("new_open", False)):
-                                agregar_evento(
-                                    "🧭 Compuerta REAL abierta: "
-                                    f"{dyn_gate.get('best_bot','--')} | "
-                                    f"p_best={float(dyn_gate.get('p_best',0.0))*100:.1f}% "
-                                    f"roof_eff={float(dyn_gate.get('roof_eff',0.0))*100:.1f}% "
-                                    f"floor={float(dyn_gate.get('floor_eff',0.0))*100:.1f}% "
-                                    f"gap_ok={'sí' if dyn_gate.get('gap_ok') else 'no'} "
-                                    f"cross={'sí' if dyn_gate.get('crossed_up') else 'no'} "
-                                    f"suceso={'sí' if dyn_gate.get('suceso_ok') else 'no'} "
-                                    f"mode={dyn_gate.get('gate_mode','A')} "
-                                    f"stall={int(float(dyn_gate.get('stall_s',0.0))//60)}m "
-                                    f"confirm={int(dyn_gate.get('confirm_streak',0))}/{int(dyn_gate.get('confirm_need', DYN_ROOF_CONFIRM_TICKS))}"
-                                )
+                            dyn_gate = None
                         else:
                             umbral_ia_real = max(float(REAL_TRIGGER_MIN), float(get_umbral_real_calibrado()))
                             dyn_gate = None
@@ -14664,198 +15328,180 @@ async def main():
                                 f"🟫 CTT modo prudente ({ctt_status_pre}): embudo pasa a evaluación blanda ({ctt_reason_pre})."
                             )
 
+                        for _b in BOT_NAMES:
+                            if _b in estado_bots:
+                                estado_bots[_b]["mvrx_top1"] = False
+                                estado_bots[_b]["mvrx_priority_rank"] = 999
+                                estado_bots[_b]["srx_top1"] = False
+
                         for b in BOT_NAMES:
+                            st_bot = estado_bots.get(b, {}) if isinstance(estado_bots, dict) else {}
                             try:
-                                modo_b = str(estado_bots.get(b, {}).get("modo_ia", "off")).lower()
+                                st_bot.update(_mvrx_state_defaults())
+                                modo_b = str(st_bot.get("modo_ia", "off")).lower()
                                 if modo_b == "off":
+                                    st_bot["mvrx_reason"] = "ia_off"
+                                    st_bot["mvrx_block_reason"] = "ia_off"
                                     continue
                                 if not ia_prob_valida(b, max_age_s=12.0):
+                                    st_bot["mvrx_reason"] = "ia_stale"
+                                    st_bot["mvrx_block_reason"] = "ia_stale"
                                     continue
-                                # Redundancia: no bloquear en seco; aplicar penalización de score y desempate posterior.
-                                redundante_tick = bool(estado_bots.get(b, {}).get("ia_input_redundante", False))
 
                                 p = _prob_ia_operativa_bot(b, default=None)
                                 if not isinstance(p, (int, float)):
-                                    continue
-                                # Primer filtro suave: evitar basura por debajo del piso operativo.
-                                piso_operativo = float(_umbral_real_operativo_actual()) if REAL_CLASSIC_GATE else float(IA_ACTIVACION_REAL_THR)
-                                if float(p) < float(piso_operativo):
+                                    st_bot["mvrx_reason"] = "p_invalid"
+                                    st_bot["mvrx_block_reason"] = "p_invalid"
                                     continue
 
-                                # Embudo refactor v1:
-                                # - Fase 1 selecciona campeón provisional por prob operativa.
-                                # - Los candados blandos/moduladores se evalúan después sobre top-1.
-                                regime_score = _score_regimen_contexto(_ultimo_contexto_operativo_bot(b))
-                                p_post = float(p)
-                                p_rank = float(estado_bots.get(b, {}).get("ia_prob_pre_cap", p_post) or p_post)
-                                score_final = float(max(0.0, min(1.0, p_rank)))
-                                estado_bots[b]["ia_regime_score"] = float(regime_score)
-                                estado_bots[b]["ia_evidence_n"] = int(estado_bots[b].get("ia_evidence_n", 0) or 0)
-                                estado_bots[b]["ia_evidence_wr"] = float(estado_bots[b].get("ia_evidence_wr", 0.0) or 0.0)
-                                candidatos.append((float(score_final), b, float(p), float(p_post), float(regime_score), 0, 0.0, 0.0))
-                                continue
+                                board = mvrx_build_live_board(b)
+                                mvrx = mvrx_eval_candidate(board, b, prob_live=float(p))
+                                srx = srx_eval_candidate(board, b, prob_live=float(p))
+                                for k, v in mvrx.items():
+                                    if k.startswith("mvrx_"):
+                                        st_bot[k] = v
+                                for k, v in srx.items():
+                                    if k.startswith("srx_"):
+                                        st_bot[k] = v
+                                mvrx_blk = str(mvrx.get("mvrx_block_reason", "") or "")
+                                if mvrx_blk in ("board_unavailable", "board_empty", "candidate_idx_missing"):
+                                    try:
+                                        agregar_evento(f"🧱 MVRX {b}: {mvrx_blk}")
+                                    except Exception:
+                                        pass
 
-                                # 1) Gate de calidad por racha/rebote (priorizar precisión real)
-                                ctx = _ultimo_contexto_operativo_bot(b)
-                                racha_now = float(ctx.get("racha_actual", 0.0) or 0.0)
-                                rebote_now = float(ctx.get("es_rebote", 0.0) or 0.0)
-                                if racha_now <= float(GATE_RACHA_NEG_BLOQUEO):
-                                    if not (bool(GATE_PERMITE_REBOTE_EN_NEG) and rebote_now >= 0.5):
-                                        continue
+                                if bool(MVRX_SHADOW_ONLY):
+                                    mvrx["mvrx_ok"] = True if mvrx.get("mvrx_tier") in ("P1", "P2") else bool(mvrx.get("mvrx_ok", False))
 
-                                # 2) Validación por régimen/activo (evita mezclar HZ con mal tramo reciente)
-                                activo_now = str(ctx.get("activo", "") or "").strip()
-                                ok_reg, wr_reg, n_reg = _gate_regimen_activo_ok(b, activo=activo_now)
-                                if not ok_reg:
-                                    agregar_evento(
-                                        f"🧯 Gate régimen: {b}/{activo_now or 'NA'} bloqueado "
-                                        f"(WR{n_reg}={wr_reg*100:.1f}% < {GATE_ACTIVO_MIN_WR*100:.1f}%)."
-                                    )
+                                if (not bool(mvrx.get("mvrx_ok", False))) and (not bool(srx.get("srx_ok", False))):
                                     continue
 
-                                # 3) Gate por segmento (payout/vol/hora) para ejecutar donde hay más señal estable
-                                ok_seg, wr_seg, n_seg, seg_key = _gate_segmento_ok(b, ctx)
-                                if not ok_seg:
-                                    agregar_evento(
-                                        f"🧱 Gate segmento: {b}/{seg_key} bloqueado "
-                                        f"(WR{n_seg}={wr_seg*100:.1f}% < {GATE_SEGMENTO_MIN_WR*100:.1f}%)."
-                                    )
-                                    continue
-
-                                # 4) Capa A del embudo: score de régimen
-                                regime_score = _score_regimen_contexto(ctx)
-                                if regime_score < float(REGIME_GATE_MIN_SCORE):
-                                    continue
-
-                                # 5) Índice de evidencia por bot en umbral objetivo (evita inflar 0.70+ sin soporte)
+                                redundante_tick = bool(st_bot.get("ia_input_redundante", False))
+                                regime_score = float(_score_regimen_contexto(_ultimo_contexto_operativo_bot(b)))
                                 ev = _evidencia_bot_umbral_objetivo(b)
                                 ev_n = int(ev.get("n", 0) or 0)
                                 ev_wr = float(ev.get("wr", 0.0) or 0.0)
                                 ev_lb = float(ev.get("lb", 0.0) or 0.0)
-                                if (ev_n >= int(EVIDENCE_MIN_N_HARD)) and (not bool(ev.get("ok_hard", True))):
-                                    agregar_evento(
-                                        f"🧪 Evidencia: {b} bloqueado (n={ev_n}, WR={ev_wr*100:.1f}%, LB={ev_lb*100:.1f}% < LB_min {EVIDENCE_MIN_LB_HARD*100:.1f}%)."
-                                    )
-                                    continue
+                                p_post = float(_prob_real_posterior(float(p), float(regime_score), int(ev_n), float(ev_wr), float(ev_lb)))
 
-                                # Candado blando: con muestra intermedia exigimos LB mínimo intermedio.
-                                if (ev_n >= int(EVIDENCE_MIN_N_SOFT)) and (ev_lb < float(EVIDENCE_MIN_LB_SOFT)):
-                                    continue
-
-                                # 6) Prob REAL posterior (modelo + régimen + evidencia + bound)
-                                p_post = _prob_real_posterior(float(p), float(regime_score), int(ev_n), float(ev_wr), float(ev_lb))
-
-                                # Guardas por bot (alineadas al HUD): evitar promoción cuando hay
-                                # desalineación severa entre probabilidad y performance real reciente.
-                                if (ev_n >= int(EVIDENCE_MIN_N_SOFT)) and (ev_wr < float(IA_PROMO_MIN_WR_POR_BOT)):
-                                    agregar_evento(
-                                        f"🧱 Guarda WR bot: {b} bloqueado (WR={ev_wr*100:.1f}% < {IA_PROMO_MIN_WR_POR_BOT*100:.1f}%, n={ev_n})."
-                                    )
-                                    continue
-                                overconf_gap = float(p_post) - float(ev_wr)
-                                if (ev_n >= int(EVIDENCE_MIN_N_SOFT)) and (overconf_gap > float(IA_PROMO_MAX_OVERCONF_GAP)):
-                                    agregar_evento(
-                                        f"🧯 Guarda calibración: {b} bloqueado (p_real-WR={overconf_gap*100:.1f}pp > {IA_PROMO_MAX_OVERCONF_GAP*100:.1f}pp)."
-                                    )
-                                    continue
-
-                                # Guardas por bot (alineadas al HUD): evitar promoción cuando hay
-                                # desalineación severa entre probabilidad y performance real reciente.
-                                if (ev_n >= int(EVIDENCE_MIN_N_SOFT)) and (ev_wr < float(IA_PROMO_MIN_WR_POR_BOT)):
-                                    agregar_evento(
-                                        f"🧱 Guarda WR bot: {b} bloqueado (WR={ev_wr*100:.1f}% < {IA_PROMO_MIN_WR_POR_BOT*100:.1f}%, n={ev_n})."
-                                    )
-                                    continue
-                                overconf_gap = float(p_post) - float(ev_wr)
-                                if (ev_n >= int(EVIDENCE_MIN_N_SOFT)) and (overconf_gap > float(IA_PROMO_MAX_OVERCONF_GAP)):
-                                    agregar_evento(
-                                        f"🧯 Guarda calibración: {b} bloqueado (p_real-WR={overconf_gap*100:.1f}pp > {IA_PROMO_MAX_OVERCONF_GAP*100:.1f}pp)."
-                                    )
-                                    continue
-
-                                # Candado final: el umbral REAL se valida sobre la probabilidad posterior (no p_model)
-                                thr_post = float(umbral_ia_real)
-                                if ev_n < int(EVIDENCE_MIN_N_SOFT):
-                                    thr_post = min(0.99, thr_post + float(EVIDENCE_LOW_N_EXTRA_MARGIN))
-                                if float(p_post) < float(thr_post):
-                                    continue
-
-                                # Candado anti-overconfidence global: si el diagnóstico reporta gap alto,
-                                # solo promover con evidencia fuerte (LB + N) aunque p_post supere umbral.
-                                if bool(diag_gate.get("force_evidence", False)):
-                                    if not ((ev_n >= int(EVIDENCE_MIN_N_HARD)) and (ev_lb >= float(EVIDENCE_MIN_LB_HARD))):
-                                        continue
-
-                                # 7) Ranking final (Capa B + régimen + evidencia)
-                                evidence_score = min(1.0, p_post + min(0.15, ev_n / 400.0))
-                                suceso_idx_b = float(estado_bots.get(b, {}).get("ia_suceso_idx", 0.0) or 0.0) / 100.0
-                                sensor_plano_b = bool(estado_bots.get(b, {}).get("ia_sensor_plano", False))
-                                score_final = (
-                                    float(REGIME_GATE_WEIGHT_PROB) * float(p_post)
-                                    + float(REGIME_GATE_WEIGHT_REGIME) * float(regime_score)
-                                    + float(REGIME_GATE_WEIGHT_EVIDENCE) * float(evidence_score)
-                                    + float(IA_SUCESO_SCORE_WEIGHT) * float(max(0.0, min(1.0, suceso_idx_b)))
-                                )
+                                signal_source = "MVRX" if bool(mvrx.get("mvrx_ok", False)) else "SRX"
+                                signal_tier = str(mvrx.get("mvrx_tier", "NONE") or "NONE") if signal_source == "MVRX" else str(srx.get("srx_tier", "NONE") or "NONE")
+                                score_mod = float(mvrx.get("mvrx_score", 0.0) or 0.0) if signal_source == "MVRX" else float(srx.get("srx_score", 0.0) or 0.0)
+                                score_mod += float(REGIME_GATE_WEIGHT_PROB) * float(max(0.0, min(1.0, p_post))) * 0.15
+                                score_mod += float(REGIME_GATE_WEIGHT_REGIME) * float(max(0.0, min(1.0, regime_score))) * 0.10
                                 if redundante_tick:
-                                    score_final = float(score_final) - float(IA_REDUNDANCY_SCORE_PENALTY)
-                                if sensor_plano_b:
-                                    score_final = float(score_final) - float(IA_SENSOR_PLANO_SCORE_PENALTY)
+                                    score_mod -= float(IA_REDUNDANCY_SCORE_PENALTY) * 0.5
 
-                                # Pattern V1 (gradual): score híbrido detrás de flag.
                                 pattern_score_b = 0.0
                                 pattern_bonus_b = 0.0
                                 pattern_penal_b = 0.0
-                                score_hibrido = float(score_final)
                                 if bool(PATTERN_V1_ENABLE) and bool(PATTERN_V1_USE_HYBRID_RANKING):
+                                    ctx = _ultimo_contexto_operativo_bot(b)
                                     q3_proxy, q2_proxy = _pattern_v1_thresholds_proxy()
                                     pattern_score_b, pattern_bonus_b, pattern_penal_b, pattern_total_b = pattern_score_operativo_v1(ctx, q3_proxy, q2_proxy)
-                                    # Ajuste en escala probabilística (evita mezclar puntos de pattern con prob 0..1)
                                     k_pts = float(PATTERN_V1_HYBRID_PTS_TO_PROB)
-                                    delta_hibrido = 0.0
                                     if float(pattern_total_b) >= float(PATTERN_V1_SCORE_THR):
-                                        delta_hibrido = k_pts * (float(pattern_bonus_b) - float(pattern_penal_b))
+                                        score_mod += k_pts * (float(pattern_bonus_b) - float(pattern_penal_b)) * 0.5
                                     else:
-                                        delta_hibrido = -k_pts * float(pattern_penal_b)
-                                    score_hibrido = float(score_final) + float(delta_hibrido)
-                                    score_hibrido = float(max(0.0, min(1.0, score_hibrido)))
-                                    _pattern_v1_log_bot(
-                                        b,
-                                        pattern_score=float(pattern_score_b),
-                                        bonus_dual=float(pattern_bonus_b),
-                                        penal_tardia=float(pattern_penal_b),
-                                        score_hibrido=float(score_hibrido),
-                                    )
+                                        score_mod -= k_pts * float(pattern_penal_b) * 0.5
 
-                                estado_bots[b]["ia_pattern_score"] = float(pattern_score_b)
-                                estado_bots[b]["ia_pattern_bonus"] = float(pattern_bonus_b)
-                                estado_bots[b]["ia_pattern_penal"] = float(pattern_penal_b)
-                                estado_bots[b]["ia_score_hibrido"] = float(score_hibrido)
-                                estado_bots[b]["ia_score_hibrido_delta"] = float(score_hibrido - float(score_final))
-                                estado_bots[b]["ia_regime_score"] = float(regime_score)
-                                estado_bots[b]["ia_evidence_n"] = int(ev_n)
-                                estado_bots[b]["ia_evidence_wr"] = float(ev_wr)
+                                score_mod = float(max(0.0, min(1.0, score_mod)))
+                                st_bot["ia_pattern_score"] = float(pattern_score_b)
+                                st_bot["ia_pattern_bonus"] = float(pattern_bonus_b)
+                                st_bot["ia_pattern_penal"] = float(pattern_penal_b)
+                                st_bot["ia_score_hibrido"] = float(score_mod)
+                                st_bot["ia_score_hibrido_delta"] = float(score_mod - float(mvrx.get("mvrx_score", 0.0) or 0.0))
+                                st_bot["ia_regime_score"] = float(regime_score)
+                                st_bot["ia_evidence_n"] = int(ev_n)
+                                st_bot["ia_evidence_wr"] = float(ev_wr)
 
-                                candidatos.append((float(score_hibrido), b, float(p), float(p_post), float(regime_score), int(ev_n), float(ev_wr), float(ev_lb)))
+                                cand = {
+                                    "score_final": float(score_mod),
+                                    "bot": b,
+                                    "prob": float(p),
+                                    "prob_ia_oper": float(p),
+                                    "p_post": float(p_post),
+                                    "regime_score": float(regime_score),
+                                    "ev_n": int(ev_n),
+                                    "ev_wr": float(ev_wr),
+                                    "ev_lb": float(ev_lb),
+                                    "mvrx_ok": bool(mvrx.get("mvrx_ok", False)),
+                                    "mvrx_tier": str(mvrx.get("mvrx_tier", "NONE") or "NONE"),
+                                    "mvrx_score": float(mvrx.get("mvrx_score", 0.0) or 0.0),
+                                    "mvrx_reason": str(mvrx.get("mvrx_reason", "") or ""),
+                                    "mvrx_block_reason": str(mvrx.get("mvrx_block_reason", "") or ""),
+                                    "mvrx_green_ratio": float(mvrx.get("mvrx_green_ratio", 0.0) or 0.0),
+                                    "mvrx_x_count": int(mvrx.get("mvrx_x_count", 0) or 0),
+                                    "mvrx_streak": int(mvrx.get("mvrx_streak", 0) or 0),
+                                    "mvrx_pattern": str(mvrx.get("mvrx_pattern", "") or ""),
+                                    "mvrx_candidate_idx": int(mvrx.get("mvrx_candidate_idx", -1) or -1),
+                                    "mvrx_target_idx": int(mvrx.get("mvrx_target_idx", -1) or -1),
+                                    "signal_source": signal_source,
+                                    "signal_tier": signal_tier,
+                                    "srx_ok": bool(srx.get("srx_ok", False)),
+                                    "srx_tier": str(srx.get("srx_tier", "NONE") or "NONE"),
+                                    "srx_score": float(srx.get("srx_score", 0.0) or 0.0),
+                                    "srx_reason": str(srx.get("srx_reason", "") or ""),
+                                    "srx_block_reason": str(srx.get("srx_block_reason", "") or ""),
+                                }
+                                candidatos.append(cand)
                             except Exception:
                                 continue
 
-                            candidatos.sort(key=lambda x: x[0], reverse=True)
+                        candidatos = mvrx_rank_candidates(candidatos)
+                        for _i, _c in enumerate(candidatos, start=1):
+                            _b = str(_c.get("bot", "") or "")
+                            if _b in estado_bots:
+                                estado_bots[_b]["mvrx_top1"] = bool(_i == 1)
+                                estado_bots[_b]["mvrx_priority_rank"] = int(_i)
+                                estado_bots[_b]["srx_top1"] = bool(_i == 1 and str(_c.get("signal_source", "MVRX")) == "SRX")
+                        ctt_eval = evaluar_ctt_fase([])[1]
+                        if candidatos:
+                            ctt_status = str(ctt_eval.get("status", "NEUTRAL"))
+                            ctt_gate = str(ctt_eval.get("gate", "NEUTRAL"))
+                            ctt_reason = str(ctt_eval.get("reason", "na"))
+                            if ctt_gate == "BLOCK":
+                                agregar_evento(
+                                    f"🟥 CTT telemetría ({ctt_status}): {ctt_reason} | sin efecto operativo en esta fase."
+                                )
+                            elif ctt_status in ("GREEN_DIAGNOSTIC", "RED_WEAK"):
+                                agregar_evento(
+                                    f"🟨 CTT telemetría ({ctt_status}): {ctt_reason}."
+                                )
 
-                            ctt_eval = evaluar_ctt_fase([])[1]
-                            if candidatos:
-                                ctt_status = str(ctt_eval.get("status", "NEUTRAL"))
-                                ctt_gate = str(ctt_eval.get("gate", "NEUTRAL"))
-                                ctt_reason = str(ctt_eval.get("reason", "na"))
-                                if ctt_gate == "BLOCK":
-                                    agregar_evento(
-                                        f"🟥 CTT telemetría ({ctt_status}): {ctt_reason} | sin efecto operativo en esta fase."
-                                    )
-                                elif ctt_status in ("GREEN_DIAGNOSTIC", "RED_WEAK"):
-                                    agregar_evento(
-                                        f"🟨 CTT telemetría ({ctt_status}): {ctt_reason}."
-                                    )
+                        # Selección automática: MVRX define top1, dyn roof solo valida confirmación.
+                        if REAL_CLASSIC_GATE:
+                            mvrx_operational_bots = [
+                                str(c.get("bot", "") or "")
+                                for c in candidatos
+                                if isinstance(c, dict)
+                                and bool(c.get("mvrx_ok", False))
+                                and str(c.get("mvrx_tier", "NONE") or "NONE") in ("P1", "P2")
+                            ]
+                            mvrx_exploratory_bots = [
+                                str(c.get("bot", "") or "")
+                                for c in candidatos
+                                if isinstance(c, dict)
+                                and bool(c.get("mvrx_ok", False))
+                                and str(c.get("mvrx_tier", "NONE") or "NONE") == "P3"
+                            ]
+                            top_pref = str(mvrx_operational_bots[0]) if mvrx_operational_bots else None
+                            dyn_gate = _actualizar_compuerta_techo_dinamico(preferred_bot=top_pref, mvrx_valid_bots=mvrx_operational_bots)
+                            if isinstance(dyn_gate, dict) and bool(dyn_gate.get("new_open", False)):
+                                agregar_evento(
+                                    "🧭 Compuerta REAL abierta: "
+                                    f"{dyn_gate.get('best_bot','--')} | "
+                                    f"p_best={float(dyn_gate.get('p_best',0.0))*100:.1f}% "
+                                    f"roof_eff={float(dyn_gate.get('roof_eff',0.0))*100:.1f}% "
+                                    f"floor={float(dyn_gate.get('floor_eff',0.0))*100:.1f}% "
+                                    f"gap_ok={'sí' if dyn_gate.get('gap_ok') else 'no'} "
+                                    f"cross={'sí' if dyn_gate.get('crossed_up') else 'no'} "
+                                    f"suceso={'sí' if dyn_gate.get('suceso_ok') else 'no'} "
+                                    f"mode={dyn_gate.get('gate_mode','A')} "
+                                    f"stall={int(float(dyn_gate.get('stall_s',0.0))//60)}m "
+                                    f"confirm={int(dyn_gate.get('confirm_streak',0))}/{int(dyn_gate.get('confirm_need', DYN_ROOF_CONFIRM_TICKS))}"
+                                )
 
-                            # Selección automática: tomar la mejor señal elegible >= umbral REAL vigente.
 
                         # Si hay señal y el saldo no cubre el plan completo, solo avisar (no bloquear).
                         if candidatos and saldo_val < costo_plan:
@@ -14880,14 +15526,75 @@ async def main():
                             estado_real = "SHADOW"
 
                         if candidatos and estado_real == "SHADOW":
-                            candidatos.sort(key=lambda x: float(x[2]), reverse=True)
                             candidatos = candidatos[:max(1, int(REAL_SHADOW_MICRO_TOP_K))]
                         elif candidatos and estado_real == "MICRO":
-                            candidatos.sort(key=lambda x: float(x[2]), reverse=True)
                             candidatos = candidatos[:max(1, int(REAL_MICRO_TOP_K))]
 
                         embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
                         decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
+
+                        # Debug estructurado MVRX/SRX: razón raíz de bloqueo y carril demo assist (solo observación).
+                        try:
+                            top_dbg = candidatos[0] if (isinstance(candidatos, list) and candidatos and isinstance(candidatos[0], dict)) else {}
+                            owner_dbg = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+                            cooldown_block_dbg = bool(time.time() < float(REAL_COOLDOWN_UNTIL_TS))
+                            balance_block_dbg = bool(saldo_val < costo_ciclo1)
+                            safe_dbg = bool(condiciones_seguras_para(str(top_dbg.get("bot", "") or ""))) if top_dbg else False
+                            layer_dbg, reason_dbg, assist_dbg, assist_mode_dbg = mvrx_debug_root_block(
+                                top_dbg, dyn_gate, embudo, estado_real, (not balance_block_dbg)
+                            )
+                            meta_dbg = resolver_canary_estado(leer_model_meta() or {})
+                            warmup_dbg = bool(meta_dbg.get("warmup_mode", False))
+                            reliable_dbg = bool(meta_dbg.get("reliable", False)) and (not warmup_dbg)
+                            row_dbg = {
+                                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "bot": str(top_dbg.get("bot", "") or ""),
+                                "estado_real": str(estado_real),
+                                "decision_final": str(decision_final),
+                                "top1_bot": str(embudo.get("top1_bot", "") or ""),
+                                "mvrx_top1": bool(top_dbg.get("mvrx_top1", False)),
+                                "mvrx_ok": bool(top_dbg.get("mvrx_ok", False)),
+                                "mvrx_tier": str(top_dbg.get("mvrx_tier", "NONE") or "NONE"),
+                                "mvrx_score": float(top_dbg.get("mvrx_score", 0.0) or 0.0),
+                                "mvrx_reason": str(top_dbg.get("mvrx_reason", "") or ""),
+                                "mvrx_block_reason": str(top_dbg.get("mvrx_block_reason", "") or ""),
+                                "mvrx_green_ratio": float(top_dbg.get("mvrx_green_ratio", 0.0) or 0.0),
+                                "mvrx_x_count": int(top_dbg.get("mvrx_x_count", 0) or 0),
+                                "mvrx_streak": int(top_dbg.get("mvrx_streak", 0) or 0),
+                                "mvrx_pattern": str(top_dbg.get("mvrx_pattern", "") or ""),
+                                "candidate_idx": int(top_dbg.get("mvrx_candidate_idx", -1) or -1),
+                                "target_idx": int(top_dbg.get("mvrx_target_idx", -1) or -1),
+                                "preferred_bot": str(dyn_gate.get("best_bot", "") if isinstance(dyn_gate, dict) else ""),
+                                "dyn_best_bot": str(dyn_gate.get("best_bot", "") if isinstance(dyn_gate, dict) else ""),
+                                "allow_real": bool(dyn_gate.get("allow_real", False)) if isinstance(dyn_gate, dict) else False,
+                                "trigger_ok": bool(dyn_gate.get("trigger_ok", False)) if isinstance(dyn_gate, dict) else False,
+                                "confirm_streak": int(dyn_gate.get("confirm_streak", 0) or 0) if isinstance(dyn_gate, dict) else 0,
+                                "confirm_needed": int(dyn_gate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS) if isinstance(dyn_gate, dict) else int(DYN_ROOF_CONFIRM_TICKS),
+                                "gap_ok": bool(dyn_gate.get("gap_ok", False)) if isinstance(dyn_gate, dict) else False,
+                                "gate_mode": str(dyn_gate.get("gate_mode", "") or "") if isinstance(dyn_gate, dict) else "",
+                                "reliable_mode": bool(reliable_dbg),
+                                "warmup_mode": bool(warmup_dbg),
+                                "funnel_state": str(decision_final),
+                                "safe_to_operate": bool(safe_dbg),
+                                "owner_lock_block": bool(owner_dbg in BOT_NAMES and str(owner_dbg) != str(top_dbg.get("bot", "") or "")),
+                                "cooldown_block": bool(cooldown_block_dbg),
+                                "balance_block": bool(balance_block_dbg),
+                                "hard_block_reason": str(embudo.get("hard_block_reason", "") or ""),
+                                "root_block_layer": str(layer_dbg),
+                                "root_block_reason": str(reason_dbg),
+                                "would_demo_assist_enter": bool(assist_dbg),
+                                "would_demo_assist_mode": str(assist_mode_dbg),
+                                "signal_source": str(top_dbg.get("signal_source", "MVRX") or "MVRX"),
+                                "signal_tier": str(top_dbg.get("signal_tier", "") or ""),
+                                "srx_ok": bool(top_dbg.get("srx_ok", False)),
+                                "srx_tier": str(top_dbg.get("srx_tier", "NONE") or "NONE"),
+                                "srx_score": float(top_dbg.get("srx_score", 0.0) or 0.0),
+                                "srx_reason": str(top_dbg.get("srx_reason", "") or ""),
+                                "srx_block_reason": str(top_dbg.get("srx_block_reason", "") or ""),
+                            }
+                            mvrx_debug_log_event(row_dbg)
+                        except Exception:
+                            pass
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
                             agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
                             candidatos = []
@@ -14920,9 +15627,16 @@ async def main():
                                     ciclo_auto = 1
                                 emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
                                 mejor_bot = str(emb.get("top1_bot") or "").strip()
-                                mejor = next((c for c in candidatos if str(c[1]) == mejor_bot), None)
+                                mejor = next((c for c in candidatos if _candidate_bot_name(c) == mejor_bot), None)
                                 if mejor is not None:
-                                    score_top, mejor_bot, prob, p_post, reg_score, ev_n, ev_wr, ev_lb = mejor
+                                    score_top = float(mejor.get("score_final", 0.0) or 0.0)
+                                    mejor_bot = str(mejor.get("bot", "") or "")
+                                    prob = float(mejor.get("prob_ia_oper", 0.0) or 0.0)
+                                    p_post = float(mejor.get("p_post", prob) or prob)
+                                    reg_score = float(mejor.get("regime_score", 0.0) or 0.0)
+                                    ev_n = int(mejor.get("ev_n", 0) or 0)
+                                    ev_wr = float(mejor.get("ev_wr", 0.0) or 0.0)
+                                    ev_lb = float(mejor.get("ev_lb", 0.0) or 0.0)
                                     agregar_evento(f"🧠 Embudo IA (manual): ganador único={mejor_bot} | p_oper={prob*100:.1f}% | risk={emb.get('risk_mode','--')}")
                                     PENDIENTE_FORZAR_BOT = mejor_bot
                                     PENDIENTE_FORZAR_INICIO = ahora
@@ -14957,9 +15671,16 @@ async def main():
                                 ciclo_auto = 1
                             emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
                             mejor_bot = str(emb.get("top1_bot") or "").strip()
-                            mejor = next((c for c in candidatos if str(c[1]) == mejor_bot), None)
+                            mejor = next((c for c in candidatos if _candidate_bot_name(c) == mejor_bot), None)
                             if mejor is not None:
-                                score_top, mejor_bot, prob, p_post, reg_score, ev_n, ev_wr, ev_lb = mejor
+                                score_top = float(mejor.get("score_final", 0.0) or 0.0)
+                                mejor_bot = str(mejor.get("bot", "") or "")
+                                prob = float(mejor.get("prob_ia_oper", 0.0) or 0.0)
+                                p_post = float(mejor.get("p_post", prob) or prob)
+                                reg_score = float(mejor.get("regime_score", 0.0) or 0.0)
+                                ev_n = int(mejor.get("ev_n", 0) or 0)
+                                ev_wr = float(mejor.get("ev_wr", 0.0) or 0.0)
+                                ev_lb = float(mejor.get("ev_lb", 0.0) or 0.0)
                                 agregar_evento(f"⚙️ IA AUTO (embudo único): {mejor_bot} p_oper={prob*100:.1f}% risk={emb.get('risk_mode','--')} gate={emb.get('gate_quality','--')}")
                                 monto = MARTI_ESCALADO[max(0, min(len(MARTI_ESCALADO)-1, ciclo_auto - 1))]
                                 val = obtener_valor_saldo()
