@@ -13561,7 +13561,7 @@ def _mvrx_debug_columns() -> list[str]:
         "signal_source","signal_tier","srx_ok","srx_tier","srx_score","srx_reason","srx_block_reason",
         "top1_mvrx_tier","top1_pattern","top1_pattern_rank","top1_real_eligible",
         "ctt_status","ctt_regime","ctt_gate","dyn_allow_real","dyn_trigger_ok","dyn_confirm_ok",
-        "embudo_decision","embudo_reason_final","final_block_reason"
+        "embudo_decision","embudo_reason_final","final_block_reason","reason_source"
     ]
 
 
@@ -13619,12 +13619,16 @@ def mvrx_debug_root_block(top: dict | None, dyn_gate: dict | None, embudo: dict 
     elif dec == EMBUDO_FINAL_BLOCK_HARD:
         layer, reason = "FUNNEL", "funnel_block_hard"
     elif dec == EMBUDO_FINAL_WAIT_SOFT:
+        blk = str(e.get("final_block_reason", "") or "")
         if emb_reason in ("ctt_block_pre", "ctt_block_post"):
             layer, reason = "FUNNEL", emb_reason
+        elif blk:
+            layer, reason = "FUNNEL", blk
         else:
             layer, reason = "FUNNEL", "funnel_wait_soft"
     elif dec == EMBUDO_FINAL_SHADOW_OK:
-        layer, reason = "FUNNEL", "funnel_shadow_only"
+        blk = str(e.get("final_block_reason", "") or "")
+        layer, reason = "FUNNEL", (blk or emb_reason or "funnel_shadow_only")
     elif str(top.get("mvrx_tier", "NONE") or "NONE") == "P3":
         layer, reason = "SAFE_GUARD", "safe_not_real_tier"
 
@@ -14056,8 +14060,39 @@ def _actualizar_compuerta_techo_dinamico(preferred_bot: str | None = None, mvrx_
         return out
 
 
+def _resolver_razon_final_embudo(estado_embudo: dict | None) -> tuple[str, str, str]:
+    """Normaliza razones del embudo del tick actual sin arrastre histórico.
+
+    Retorna: (embudo_reason_final, final_block_reason, reason_source)
+    """
+    e = estado_embudo if isinstance(estado_embudo, dict) else {}
+    dec = str(e.get("decision_final", EMBUDO_FINAL_WAIT_SOFT) or EMBUDO_FINAL_WAIT_SOFT)
+    decision_reason = str(e.get("decision_reason", "") or "")
+    hard = str(e.get("hard_block_reason", "") or "")
+    soft = str(e.get("soft_wait_reason", "") or "")
+
+    if dec == EMBUDO_FINAL_BLOCK_HARD:
+        emb = decision_reason or "block_hard"
+        fin = hard or emb
+        return emb, fin, "hard"
+    if dec == EMBUDO_FINAL_WAIT_SOFT:
+        emb = decision_reason or "wait_soft"
+        fin = soft or emb
+        return emb, fin, "soft"
+    if dec == EMBUDO_FINAL_SHADOW_OK:
+        emb = decision_reason or "shadow_ok"
+        fin = emb
+        return emb, fin, "decision"
+    if dec in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
+        emb = decision_reason or "promoted_real"
+        return emb, "", "real"
+
+    emb = decision_reason or "unknown"
+    return emb, emb, "decision"
+
+
 def _registrar_estado_embudo(data: dict | None = None) -> dict:
-    """Persistencia del estado unificado del embudo para HUD/eventos."""
+    """Persistencia del estado unificado del embudo para HUD/eventos (tick limpio)."""
     global EMBUDO_DECISION_STATE
     base = {
         "decision_final": EMBUDO_FINAL_WAIT_SOFT,
@@ -14066,23 +14101,48 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
         "risk_mode": "WAIT_SOFT",
         "hard_block_reason": "",
         "soft_wait_reason": "",
+        "embudo_reason_final": "init",
+        "final_block_reason": "init",
+        "reason_source": "decision",
         "top1_bot": None,
         "top2_bot": None,
         "gap_value": 0.0,
         "top1_prob": 0.0,
         "top2_prob": 0.0,
         "degrade_from": "none",
+        "mvrx_tier": "NONE",
+        "mvrx_score": 0.0,
+        "mvrx_reason": "",
+        "mvrx_block_reason": "",
+        "signal_source": "MVRX",
+        "signal_tier": "",
+        "srx_tier": "NONE",
+        "srx_score": 0.0,
+        "srx_reason": "",
+        "srx_block_reason": "",
+        "top1_mvrx_tier": "NONE",
+        "top1_pattern": "",
+        "top1_pattern_rank": 9,
+        "top1_real_eligible": False,
+        "dyn_allow_real": False,
+        "dyn_trigger_ok": False,
+        "dyn_confirm_ok": False,
+        "embudo_decision": EMBUDO_FINAL_WAIT_SOFT,
+        "ctt_status": "NEUTRAL",
+        "ctt_regime": "NEUTRAL",
+        "ctt_gate": "NEUTRAL",
     }
-    try:
-        if isinstance(EMBUDO_DECISION_STATE, dict):
-            base.update(EMBUDO_DECISION_STATE)
-    except Exception:
-        pass
     if isinstance(data, dict):
         base.update(data)
+
+    emb_final, blk_final, src_final = _resolver_razon_final_embudo(base)
+    base["embudo_reason_final"] = emb_final
+    base["final_block_reason"] = blk_final
+    base["reason_source"] = src_final
+    base["embudo_decision"] = str(base.get("decision_final", EMBUDO_FINAL_WAIT_SOFT) or EMBUDO_FINAL_WAIT_SOFT)
+
     EMBUDO_DECISION_STATE = base
     return EMBUDO_DECISION_STATE
-
 
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
     """Embudo unificado: selección -> calidad blanda -> modulación -> estado final."""
@@ -14329,11 +14389,9 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "dyn_trigger_ok": trigger_ok,
             "dyn_confirm_ok": confirm_ok,
             "embudo_decision": decision,
-            "embudo_reason_final": reason,
-            "final_block_reason": (out_hard or soft_wait_reason or reason),
         })
     except Exception:
-        return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
+        return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err", "hard_block_reason": ""})
 
 
 def _umbral_senal_actual_hud() -> float:
@@ -15652,18 +15710,74 @@ async def main():
                         # CTT BLOCK no permite promoción REAL en este tick (pre/post).
                         if ctt_block_pre and decision_final in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
                             embudo = _registrar_estado_embudo({
-                                **(EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}),
                                 "decision_final": EMBUDO_FINAL_WAIT_SOFT,
                                 "decision_reason": "ctt_block_pre",
                                 "soft_wait_reason": "ctt_block_pre",
+                                "hard_block_reason": "",
+                                "gate_quality": str(embudo.get("gate_quality", "weak") or "weak"),
+                                "risk_mode": "WAIT_SOFT",
+                                "top1_bot": embudo.get("top1_bot"),
+                                "top2_bot": embudo.get("top2_bot"),
+                                "top1_prob": float(embudo.get("top1_prob", 0.0) or 0.0),
+                                "top2_prob": float(embudo.get("top2_prob", 0.0) or 0.0),
+                                "gap_value": float(embudo.get("gap_value", 0.0) or 0.0),
+                                "degrade_from": str(embudo.get("degrade_from", "none") or "none"),
+                                "mvrx_tier": str(embudo.get("mvrx_tier", "NONE") or "NONE"),
+                                "mvrx_score": float(embudo.get("mvrx_score", 0.0) or 0.0),
+                                "mvrx_reason": str(embudo.get("mvrx_reason", "") or ""),
+                                "mvrx_block_reason": str(embudo.get("mvrx_block_reason", "") or ""),
+                                "signal_source": str(embudo.get("signal_source", "MVRX") or "MVRX"),
+                                "signal_tier": str(embudo.get("signal_tier", "") or ""),
+                                "srx_tier": str(embudo.get("srx_tier", "NONE") or "NONE"),
+                                "srx_score": float(embudo.get("srx_score", 0.0) or 0.0),
+                                "srx_reason": str(embudo.get("srx_reason", "") or ""),
+                                "srx_block_reason": str(embudo.get("srx_block_reason", "") or ""),
+                                "top1_mvrx_tier": str(embudo.get("top1_mvrx_tier", "NONE") or "NONE"),
+                                "top1_pattern": str(embudo.get("top1_pattern", "") or ""),
+                                "top1_pattern_rank": int(embudo.get("top1_pattern_rank", 9) or 9),
+                                "top1_real_eligible": bool(embudo.get("top1_real_eligible", False)),
+                                "dyn_allow_real": bool(embudo.get("dyn_allow_real", False)),
+                                "dyn_trigger_ok": bool(embudo.get("dyn_trigger_ok", False)),
+                                "dyn_confirm_ok": bool(embudo.get("dyn_confirm_ok", False)),
+                                "ctt_status": str(ctt_eval.get("status", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
+                                "ctt_regime": str(ctt_eval.get("regime", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
+                                "ctt_gate": str(ctt_eval.get("gate", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
                             })
                             decision_final = EMBUDO_FINAL_WAIT_SOFT
                         if ctt_block_post and decision_final in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
                             embudo = _registrar_estado_embudo({
-                                **(EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}),
                                 "decision_final": EMBUDO_FINAL_WAIT_SOFT,
                                 "decision_reason": "ctt_block_post",
                                 "soft_wait_reason": "ctt_block_post",
+                                "hard_block_reason": "",
+                                "gate_quality": str(embudo.get("gate_quality", "weak") or "weak"),
+                                "risk_mode": "WAIT_SOFT",
+                                "top1_bot": embudo.get("top1_bot"),
+                                "top2_bot": embudo.get("top2_bot"),
+                                "top1_prob": float(embudo.get("top1_prob", 0.0) or 0.0),
+                                "top2_prob": float(embudo.get("top2_prob", 0.0) or 0.0),
+                                "gap_value": float(embudo.get("gap_value", 0.0) or 0.0),
+                                "degrade_from": str(embudo.get("degrade_from", "none") or "none"),
+                                "mvrx_tier": str(embudo.get("mvrx_tier", "NONE") or "NONE"),
+                                "mvrx_score": float(embudo.get("mvrx_score", 0.0) or 0.0),
+                                "mvrx_reason": str(embudo.get("mvrx_reason", "") or ""),
+                                "mvrx_block_reason": str(embudo.get("mvrx_block_reason", "") or ""),
+                                "signal_source": str(embudo.get("signal_source", "MVRX") or "MVRX"),
+                                "signal_tier": str(embudo.get("signal_tier", "") or ""),
+                                "srx_tier": str(embudo.get("srx_tier", "NONE") or "NONE"),
+                                "srx_score": float(embudo.get("srx_score", 0.0) or 0.0),
+                                "srx_reason": str(embudo.get("srx_reason", "") or ""),
+                                "srx_block_reason": str(embudo.get("srx_block_reason", "") or ""),
+                                "top1_mvrx_tier": str(embudo.get("top1_mvrx_tier", "NONE") or "NONE"),
+                                "top1_pattern": str(embudo.get("top1_pattern", "") or ""),
+                                "top1_pattern_rank": int(embudo.get("top1_pattern_rank", 9) or 9),
+                                "top1_real_eligible": bool(embudo.get("top1_real_eligible", False)),
+                                "dyn_allow_real": bool(embudo.get("dyn_allow_real", False)),
+                                "dyn_trigger_ok": bool(embudo.get("dyn_trigger_ok", False)),
+                                "dyn_confirm_ok": bool(embudo.get("dyn_confirm_ok", False)),
+                                "ctt_status": str(ctt_eval.get("status", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
+                                "ctt_regime": str(ctt_eval.get("regime", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
+                                "ctt_gate": str(ctt_eval.get("gate", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
                             })
                             decision_final = EMBUDO_FINAL_WAIT_SOFT
 
@@ -15731,8 +15845,9 @@ async def main():
                                 "dyn_trigger_ok": bool(dyn_gate.get("trigger_ok", False)) if isinstance(dyn_gate, dict) else False,
                                 "dyn_confirm_ok": bool((int(dyn_gate.get("confirm_streak", 0) or 0) >= int(dyn_gate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS))) if isinstance(dyn_gate, dict) else False,
                                 "embudo_decision": str(decision_final),
-                                "embudo_reason_final": str(embudo.get("decision_reason", "") or ""),
-                                "final_block_reason": str(embudo.get("hard_block_reason", embudo.get("soft_wait_reason", "")) or ""),
+                                "embudo_reason_final": str(embudo.get("embudo_reason_final", embudo.get("decision_reason", "")) or ""),
+                                "final_block_reason": str(embudo.get("final_block_reason", "") or ""),
+                                "reason_source": str(embudo.get("reason_source", "") or ""),
                                 "srx_ok": bool(top_dbg.get("srx_ok", False)),
                                 "srx_tier": str(top_dbg.get("srx_tier", "NONE") or "NONE"),
                                 "srx_score": float(top_dbg.get("srx_score", 0.0) or 0.0),
