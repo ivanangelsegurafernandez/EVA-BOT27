@@ -12256,7 +12256,7 @@ def condiciones_seguras_para(bot: str) -> bool:
         return False
     if not bool(st.get("mvrx_top1", False)):
         return False
-    if str(st.get("mvrx_tier", "NONE") or "NONE") not in ("P1", "P2", "P3"):
+    if str(st.get("mvrx_tier", "NONE") or "NONE") not in ("P1", "P2"):
         return False
     if float(st.get("mvrx_score", 0.0) or 0.0) <= 0.0:
         return False
@@ -13072,20 +13072,26 @@ def _umbral_unrel_operativo(best_bot: str | None, best_prob: float | None = None
 
 def mvrx_build_live_board(bot: str) -> dict:
     if not bool(MVRX_ENABLE):
-        return {}
+        return {"__mvrx_board_error": "mvrx_disabled"}
+    global _board_state_mod
     try:
         if _board_state_mod is None:
-            return {}
-        return _board_state_mod.build_board_state(
+            _board_state_mod = _load_optional_module("board_state")
+        if _board_state_mod is None:
+            return {"__mvrx_board_error": "board_unavailable"}
+        board = _board_state_mod.build_board_state(
             bot_names=BOT_NAMES,
             candidate_bot=bot,
             lookback_cols=int(BOARDGATE_LOOKBACK_COLS),
             csv_dir='.',
             status_normalizer=normalizar_trade_status,
             result_normalizer=normalizar_resultado,
-        ) or {}
+        )
+        if not isinstance(board, dict):
+            return {"__mvrx_board_error": "board_unavailable"}
+        return board
     except Exception:
-        return {}
+        return {"__mvrx_board_error": "board_unavailable"}
 
 
 def mvrx_get_effective_matrix(board: dict) -> list:
@@ -13194,13 +13200,25 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
     st['bot'] = bot
     st['prob_ia_oper'] = float(prob_live) if isinstance(prob_live, (int, float)) else float(_prob_ia_operativa_bot(bot, default=0.0) or 0.0)
     try:
+        if not isinstance(board, dict):
+            st['mvrx_block_reason'] = 'board_unavailable'
+            st['mvrx_reason'] = 'board_unavailable'
+            return st
+        board_err = str(board.get('__mvrx_board_error', '') or '').strip()
+        if board_err:
+            st['mvrx_block_reason'] = board_err
+            st['mvrx_reason'] = board_err
+            return st
+
         mat = mvrx_get_effective_matrix(board)
         if not mat:
-            st['mvrx_block_reason'] = 'matrix_empty'
+            st['mvrx_block_reason'] = 'board_empty'
+            st['mvrx_reason'] = 'board_empty'
             return st
         col = mvrx_get_rightmost_live_col(mat)
         if col < 0:
             st['mvrx_block_reason'] = 'no_live_col'
+            st['mvrx_reason'] = 'no_live_col'
             return st
         gr = float(mvrx_calc_green_ratio(mat, col))
         xr = mvrx_find_x_rows(mat, col)
@@ -13213,9 +13231,13 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         if cand_idx < 0:
             cand_idx = int(board.get('candidate_idx', -1) or -1)
         st['mvrx_candidate_idx'] = cand_idx
+        if cand_idx < 0:
+            st['mvrx_block_reason'] = 'candidate_idx_missing'
+            st['mvrx_reason'] = 'candidate_idx_missing'
+            return st
 
         if gr < float(MVRX_GREEN_RATIO_P2):
-            st['mvrx_block_reason'] = 'low_green_ratio'
+            st['mvrx_block_reason'] = 'green_ratio_low'
             st['mvrx_reason'] = f'green<{MVRX_GREEN_RATIO_P2:.2f}'
             return st
         if xc == 0:
@@ -13224,7 +13246,7 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             return st
         if xc >= 3:
             st['mvrx_block_reason'] = 'x_count_ge_3'
-            st['mvrx_reason'] = 'columna_congestionada'
+            st['mvrx_reason'] = 'x_count_invalid'
             return st
 
         target_idx = -1
@@ -13283,6 +13305,13 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             st['mvrx_reason'] = 'x_count_invalid'
             return st
 
+        if target_idx >= 0 and target_idx != int(cand_idx):
+            st['mvrx_block_reason'] = 'target_idx_mismatch'
+            st['mvrx_reason'] = f'target={int(target_idx)}!=candidate={int(cand_idx)}'
+            st['mvrx_tier'] = 'NONE'
+            st['mvrx_score'] = 0.0
+            return st
+
         if target_idx >= 0 and st.get('mvrx_streak', 0) <= 0:
             st['mvrx_streak'] = int(mvrx_calc_row_streak_x(mat, target_idx, col))
         if target_idx >= 0 and not st.get('mvrx_pattern'):
@@ -13294,7 +13323,6 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             st['mvrx_reason'] = reason
             st['mvrx_tier'] = 'NONE'
             st['mvrx_score'] = 0.0
-            st['mvrx_candidate_idx'] = int(target_idx)
             return st
 
         st['mvrx_ok'] = tier in ('P1', 'P2', 'P3')
@@ -13302,8 +13330,6 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         st['mvrx_score'] = float(max(0.0, min(1.0, score)))
         st['mvrx_reason'] = reason
         st['mvrx_block_reason'] = '' if st['mvrx_ok'] else 'no_tier'
-        if target_idx >= 0:
-            st['mvrx_candidate_idx'] = int(target_idx)
         return st
     except Exception as e:
         st['mvrx_ok'] = False
@@ -13315,9 +13341,13 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
 
 def mvrx_rank_candidates(candidates: list) -> list:
     def keyf(c: dict):
-        tier = str(c.get('mvrx_tier', 'NONE'))
+        tier = str(c.get('mvrx_tier', 'NONE') or 'NONE')
         t_rank = {'P1': 0, 'P2': 1, 'P3': 2}.get(tier, 9)
-        return (t_rank, -float(c.get('mvrx_score', 0.0) or 0.0), -float(c.get('prob_ia_oper', 0.0) or 0.0), str(c.get('bot', '')))
+        score_final = float(c.get('score_final', c.get('mvrx_score', 0.0)) or 0.0)
+        mvrx_score = float(c.get('mvrx_score', 0.0) or 0.0)
+        p_oper = float(c.get('prob_ia_oper', c.get('prob', 0.0)) or 0.0)
+        ev_n = int(c.get('ev_n', 0) or 0)
+        return (t_rank, -score_final, -mvrx_score, -p_oper, -ev_n, str(c.get('bot', '')))
     ranked = sorted([c for c in candidates if isinstance(c, dict)], key=keyf)
     for i, c in enumerate(ranked, start=1):
         c['mvrx_priority_rank'] = int(i)
@@ -13352,7 +13382,7 @@ def _candidate_score(c) -> float:
     if isinstance(c, (tuple, list)) and len(c) > 0:
         return float(c[0] or 0.0)
     return 0.0
-def _actualizar_compuerta_techo_dinamico(preferred_bot: str | None = None) -> dict:
+def _actualizar_compuerta_techo_dinamico(preferred_bot: str | None = None, mvrx_valid_bots: list[str] | None = None) -> dict:
     """
     Actualiza el techo dinámico y evalúa la compuerta REAL del mejor bot del tick.
 
@@ -13393,8 +13423,15 @@ def _actualizar_compuerta_techo_dinamico(preferred_bot: str | None = None) -> di
         tick_now = int(DYN_ROOF_STATE["tick"])
 
         live = []
+        mvrx_set = set()
+        if isinstance(mvrx_valid_bots, list):
+            mvrx_set = {str(b) for b in mvrx_valid_bots if isinstance(b, str) and b}
         for b in BOT_NAMES:
             try:
+                if mvrx_set and (str(b) not in mvrx_set):
+                    continue
+                if (not mvrx_set) and (not bool(estado_bots.get(b, {}).get("mvrx_ok", False))):
+                    continue
                 if str(estado_bots.get(b, {}).get("modo_ia", "off")).lower() == "off":
                     continue
                 if not ia_prob_valida(b, max_age_s=12.0):
@@ -13875,13 +13912,23 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 risk_mode = "REAL_MICRO"
                 degrade_from = "pattern_v1"
                 reason = f"pattern->{why_pat}"
-            elif (not ok_pat) and decision == EMBUDO_FINAL_REAL_MICRO:
+            elif (not ok_pat) and decision == EMBUDO_FINAL_REAL_MICRO and mvrx_tier not in ("P1",):
                 decision = EMBUDO_FINAL_SHADOW_OK
                 risk_mode = "SHADOW_OK"
                 degrade_from = "pattern_v1"
                 reason = f"pattern_shadow:{why_pat}"
         except Exception:
             pass
+
+        # Política operativa P3: exploratoria, nunca compite al nivel P1/P2.
+        if mvrx_tier == "P3" and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
+            decision = EMBUDO_FINAL_SHADOW_OK
+            risk_mode = "SHADOW_OK"
+            if not soft_wait_reason:
+                soft_wait_reason = "p3_shadow_only"
+            if degrade_from == "none":
+                degrade_from = "p3_policy"
+            reason = "p3_shadow_only"
 
         # CTT (fase previa): completamente neutralizado en decisión operativa.
 
@@ -15062,6 +15109,12 @@ async def main():
                                 for k, v in mvrx.items():
                                     if k.startswith("mvrx_"):
                                         st_bot[k] = v
+                                mvrx_blk = str(mvrx.get("mvrx_block_reason", "") or "")
+                                if mvrx_blk in ("board_unavailable", "board_empty", "candidate_idx_missing"):
+                                    try:
+                                        agregar_evento(f"🧱 MVRX {b}: {mvrx_blk}")
+                                    except Exception:
+                                        pass
 
                                 if bool(MVRX_SHADOW_ONLY):
                                     mvrx["mvrx_ok"] = True if mvrx.get("mvrx_tier") in ("P1", "P2") else bool(mvrx.get("mvrx_ok", False))
@@ -15154,7 +15207,8 @@ async def main():
                         # Selección automática: MVRX define top1, dyn roof solo valida confirmación.
                         if REAL_CLASSIC_GATE:
                             top_pref = str(candidatos[0].get("bot", "") or "") if candidatos else None
-                            dyn_gate = _actualizar_compuerta_techo_dinamico(preferred_bot=top_pref)
+                            mvrx_live_bots = [str(c.get("bot", "") or "") for c in candidatos if isinstance(c, dict) and bool(c.get("mvrx_ok", False))]
+                            dyn_gate = _actualizar_compuerta_techo_dinamico(preferred_bot=top_pref, mvrx_valid_bots=mvrx_live_bots)
                             if isinstance(dyn_gate, dict) and bool(dyn_gate.get("new_open", False)):
                                 agregar_evento(
                                     "🧭 Compuerta REAL abierta: "
@@ -15194,10 +15248,8 @@ async def main():
                             estado_real = "SHADOW"
 
                         if candidatos and estado_real == "SHADOW":
-                            candidatos.sort(key=lambda x: float(_candidate_prob(x)), reverse=True)
                             candidatos = candidatos[:max(1, int(REAL_SHADOW_MICRO_TOP_K))]
                         elif candidatos and estado_real == "MICRO":
-                            candidatos.sort(key=lambda x: float(_candidate_prob(x)), reverse=True)
                             candidatos = candidatos[:max(1, int(REAL_MICRO_TOP_K))]
 
                         embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
