@@ -270,6 +270,7 @@ MVRX_P2_BASE_SCORE = 0.66
 MVRX_P3_BASE_SCORE = 0.55
 MVRX_P3_ENABLE = True
 MVRX_SHADOW_ONLY = False
+MVRX_P3_REAL_DISABLED = True
 MVRX_VALID_PATTERNS = {"RGRGR", "RRRR", "GRGR"}
 
 # === MVRX Debug / Observabilidad ===
@@ -307,6 +308,10 @@ def _mvrx_state_defaults() -> dict:
         "mvrx_target_idx": -1,
         "mvrx_top1": False,
         "mvrx_priority_rank": 999,
+        "mvrx_priority_class": "NONE",
+        "mvrx_pattern_rank": 9,
+        "mvrx_prev_green_ratio": 0.0,
+        "mvrx_real_eligible": False,
     }
 
 
@@ -13235,6 +13240,17 @@ def mvrx_detect_row_pattern(board_matrix: list, row_idx: int, col_idx: int) -> s
     return seq
 
 
+def _mvrx_pattern_rank(patt: str) -> int:
+    p = str(patt or "")
+    if p == "RGRGR":
+        return 1
+    if p == "RRRR":
+        return 2
+    if p == "GRGR":
+        return 3
+    return 9
+
+
 def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
     st = _mvrx_state_defaults()
     st['mvrx_reason'] = 'no_board'
@@ -13261,16 +13277,30 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             st['mvrx_block_reason'] = 'no_live_col'
             st['mvrx_reason'] = 'no_live_col'
             return st
+
         gr = float(mvrx_calc_green_ratio(mat, col))
+        prev_gr = float(mvrx_calc_green_ratio(mat, col - 1)) if col > 0 else 0.0
         xr = mvrx_find_x_rows(mat, col)
         xc = len(xr)
         st['mvrx_green_ratio'] = gr
+        st['mvrx_prev_green_ratio'] = prev_gr
         st['mvrx_x_count'] = int(xc)
 
         bmeta = board.get('board_meta', {}) if isinstance(board, dict) else {}
-        cand_idx = int(bmeta.get('candidate_idx', -1) or -1)
+        cand_idx = -1
+        try:
+            raw_idx = bmeta.get('candidate_idx', None)
+            if raw_idx is not None and str(raw_idx).strip() != '':
+                cand_idx = int(raw_idx)
+        except Exception:
+            cand_idx = -1
         if cand_idx < 0:
-            cand_idx = int(board.get('candidate_idx', -1) or -1)
+            try:
+                raw_idx2 = board.get('candidate_idx', None)
+                if raw_idx2 is not None and str(raw_idx2).strip() != '':
+                    cand_idx = int(raw_idx2)
+            except Exception:
+                cand_idx = -1
         st['mvrx_candidate_idx'] = cand_idx
         if cand_idx < 0:
             st['mvrx_block_reason'] = 'candidate_idx_missing'
@@ -13279,15 +13309,15 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
 
         if gr < float(MVRX_GREEN_RATIO_P2):
             st['mvrx_block_reason'] = 'green_ratio_low'
-            st['mvrx_reason'] = f'green<{MVRX_GREEN_RATIO_P2:.2f}'
+            st['mvrx_reason'] = 'green_ratio_low'
             return st
         if xc == 0:
             st['mvrx_block_reason'] = 'x_count_0'
-            st['mvrx_reason'] = 'sin_x'
+            st['mvrx_reason'] = 'x_count_0'
             return st
         if xc >= 3:
             st['mvrx_block_reason'] = 'x_count_ge_3'
-            st['mvrx_reason'] = 'x_count_invalid'
+            st['mvrx_reason'] = 'x_count_ge_3'
             return st
 
         target_idx = -1
@@ -13295,83 +13325,109 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         score = 0.0
         reason = 'no_rule'
         block = ''
+        patt = ''
+        patt_rank = 9
+        streak = 0
 
         if xc == 1:
             target_idx = int(xr[0])
-            st["mvrx_target_idx"] = int(target_idx)
+            st['mvrx_target_idx'] = int(target_idx)
             streak = int(mvrx_calc_row_streak_x(mat, target_idx, col))
             patt = mvrx_detect_row_pattern(mat, target_idx, col)
-            st['mvrx_streak'] = streak
-            st['mvrx_pattern'] = patt
+            patt_rank = _mvrx_pattern_rank(patt)
             if streak >= int(MVRX_BLOCK_STREAK_GE):
                 block = 'streak_ge_block'
+            elif streak == 1 and patt_rank == 9:
+                block = 'streak_1_no_pattern'
             elif (gr >= float(MVRX_GREEN_RATIO_P1)) and (int(MVRX_STREAK_MIN_P1) <= streak <= int(MVRX_STREAK_MAX_P1)):
                 tier = 'P1'
-                score = float(MVRX_P1_BASE_SCORE + (gr - MVRX_GREEN_RATIO_P1) * 0.25)
                 reason = 'p1_core'
+                score = float(MVRX_P1_BASE_SCORE + (gr - MVRX_GREEN_RATIO_P1) * 0.25)
             elif bool(MVRX_P3_ENABLE):
                 tier = 'P3'
-                score = float(MVRX_P3_BASE_SCORE + max(0.0, gr - MVRX_GREEN_RATIO_P2) * 0.10)
                 reason = 'p3_explore'
-            if bool(MVRX_USE_PATTERN) and patt in MVRX_VALID_PATTERNS and tier in ('P1', 'P2', 'P3'):
+                score = float(MVRX_P3_BASE_SCORE + max(0.0, gr - MVRX_GREEN_RATIO_P2) * 0.10)
+            if bool(MVRX_USE_PATTERN) and patt_rank < 9 and tier in ('P1', 'P2', 'P3'):
                 score += float(MVRX_PATTERN_BONUS)
                 reason = f'{reason}+pattern'
+
         elif xc == 2:
-            prev_gr = float(mvrx_calc_green_ratio(mat, col - 1)) if col > 0 else 0.0
-            streaks = [(ri, int(mvrx_calc_row_streak_x(mat, ri, col))) for ri in xr]
+            evals = []
+            for ri in xr:
+                stx = int(mvrx_calc_row_streak_x(mat, int(ri), col))
+                ptx = mvrx_detect_row_pattern(mat, int(ri), col)
+                prk = _mvrx_pattern_rank(ptx)
+                evals.append((int(ri), stx, ptx, prk))
+
             pick = None
-            pref = [ri for ri, stx in streaks if stx in (5, 6)]
+            pref = [e for e in evals if e[1] in (5, 6)]
             if prev_gr >= float(MVRX_PREV_GREEN_RATIO_P2) and pref:
-                pick = int(pref[0])
-                reason = 'p2_pref_5_6_prev_ok'
-            else:
-                streaks_sorted = sorted(streaks, key=lambda t: (t[1], t[0]))
-                if len(streaks_sorted) >= 2 and streaks_sorted[0][1] == streaks_sorted[1][1] and prev_gr < float(MVRX_PREV_GREEN_RATIO_P2):
+                pref = sorted(pref, key=lambda e: (e[3], -e[1], e[0]))
+                if len(pref) >= 2 and pref[0][1] == pref[1][1] and pref[0][3] == pref[1][3] and pref[0][3] == 9:
                     st['mvrx_block_reason'] = 'p2_ambiguous'
                     st['mvrx_reason'] = 'p2_ambiguous'
                     return st
-                pick = int(streaks_sorted[0][0]) if streaks_sorted else -1
-                reason = 'p2_shorter_streak'
-            if pick >= 0 and gr >= float(MVRX_GREEN_RATIO_P2):
-                target_idx = pick
-                st["mvrx_target_idx"] = int(target_idx)
-                streak = int(mvrx_calc_row_streak_x(mat, target_idx, col))
-                if streak >= int(MVRX_BLOCK_STREAK_GE):
-                    block = 'streak_ge_block'
+                pick = pref[0]
+            else:
+                evals_sorted = sorted(evals, key=lambda e: (e[1], e[3], e[0]))
+                if len(evals_sorted) >= 2 and evals_sorted[0][1] == evals_sorted[1][1] and evals_sorted[0][3] == evals_sorted[1][3] and evals_sorted[0][3] == 9:
+                    st['mvrx_block_reason'] = 'p2_ambiguous'
+                    st['mvrx_reason'] = 'p2_ambiguous'
+                    return st
+                pick = evals_sorted[0] if evals_sorted else None
+
+            if pick is None:
+                st['mvrx_block_reason'] = 'p2_ambiguous'
+                st['mvrx_reason'] = 'p2_ambiguous'
+                return st
+
+            target_idx, streak, patt, patt_rank = int(pick[0]), int(pick[1]), str(pick[2]), int(pick[3])
+            st['mvrx_target_idx'] = int(target_idx)
+            if streak >= int(MVRX_BLOCK_STREAK_GE):
+                block = 'streak_ge_block'
+            else:
+                ok_p2 = bool((3 <= streak <= 4) or ((5 <= streak <= 6) and prev_gr >= float(MVRX_PREV_GREEN_RATIO_P2)))
+                if not ok_p2:
+                    block = 'p2_ambiguous'
                 else:
                     tier = 'P2'
+                    reason = 'p2_selective'
                     score = float(MVRX_P2_BASE_SCORE + max(0.0, gr - MVRX_GREEN_RATIO_P2) * 0.20)
-                    st['mvrx_streak'] = streak
-                    st['mvrx_pattern'] = mvrx_detect_row_pattern(mat, target_idx, col)
+                    if bool(MVRX_USE_PATTERN) and patt_rank < 9:
+                        score += float(MVRX_PATTERN_BONUS)
+                        reason = f'{reason}+pattern'
         else:
             st['mvrx_block_reason'] = 'x_count_invalid'
             st['mvrx_reason'] = 'x_count_invalid'
             return st
 
-        if target_idx >= 0:
-            st["mvrx_target_idx"] = int(target_idx)
+        st['mvrx_streak'] = int(streak)
+        st['mvrx_pattern'] = str(patt)
+        st['mvrx_pattern_rank'] = int(patt_rank)
+
         if target_idx >= 0 and target_idx != int(cand_idx):
             st['mvrx_block_reason'] = 'target_idx_mismatch'
             st['mvrx_reason'] = f'target={int(target_idx)}!=candidate={int(cand_idx)}'
             st['mvrx_tier'] = 'NONE'
+            st['mvrx_priority_class'] = 'NONE'
+            st['mvrx_real_eligible'] = False
             st['mvrx_score'] = 0.0
             return st
-
-        if target_idx >= 0 and st.get('mvrx_streak', 0) <= 0:
-            st['mvrx_streak'] = int(mvrx_calc_row_streak_x(mat, target_idx, col))
-        if target_idx >= 0 and not st.get('mvrx_pattern'):
-            st['mvrx_pattern'] = mvrx_detect_row_pattern(mat, target_idx, col)
 
         if block:
             st['mvrx_ok'] = False
             st['mvrx_block_reason'] = block
-            st['mvrx_reason'] = reason
+            st['mvrx_reason'] = block
             st['mvrx_tier'] = 'NONE'
+            st['mvrx_priority_class'] = 'NONE'
+            st['mvrx_real_eligible'] = False
             st['mvrx_score'] = 0.0
             return st
 
         st['mvrx_ok'] = tier in ('P1', 'P2', 'P3')
         st['mvrx_tier'] = tier
+        st['mvrx_priority_class'] = tier if tier in ('P1', 'P2', 'P3') else 'NONE'
+        st['mvrx_real_eligible'] = bool(tier in ('P1', 'P2'))
         st['mvrx_score'] = float(max(0.0, min(1.0, score)))
         st['mvrx_reason'] = reason
         st['mvrx_block_reason'] = '' if st['mvrx_ok'] else 'no_tier'
@@ -13379,26 +13435,30 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
     except Exception as e:
         st['mvrx_ok'] = False
         st['mvrx_tier'] = 'NONE'
+        st['mvrx_priority_class'] = 'NONE'
+        st['mvrx_real_eligible'] = False
         st['mvrx_reason'] = f'err:{type(e).__name__}'
         st['mvrx_block_reason'] = 'eval_error'
         return st
-
 
 def mvrx_rank_candidates(candidates: list) -> list:
     def keyf(c: dict):
         tier = str(c.get('mvrx_tier', 'NONE') or 'NONE')
         t_rank = {'P1': 0, 'P2': 1, 'P3': 2}.get(tier, 9)
+        pattern_rank = int(c.get('mvrx_pattern_rank', 9) or 9)
+        if t_rank != 0:
+            pattern_rank = 9
         score_final = float(c.get('score_final', c.get('mvrx_score', 0.0)) or 0.0)
         mvrx_score = float(c.get('mvrx_score', 0.0) or 0.0)
         p_oper = float(c.get('prob_ia_oper', c.get('prob', 0.0)) or 0.0)
         ev_n = int(c.get('ev_n', 0) or 0)
-        return (t_rank, -score_final, -mvrx_score, -p_oper, -ev_n, str(c.get('bot', '')))
+        return (t_rank, pattern_rank, -score_final, -mvrx_score, -p_oper, -ev_n, str(c.get('bot', '')))
+
     ranked = sorted([c for c in candidates if isinstance(c, dict)], key=keyf)
     for i, c in enumerate(ranked, start=1):
         c['mvrx_priority_rank'] = int(i)
         c['mvrx_top1'] = (i == 1)
     return ranked
-
 
 def mvrx_select_top_candidate(candidates: list) -> dict | None:
     ranked = mvrx_rank_candidates(candidates)
@@ -13430,9 +13490,20 @@ def srx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         st["srx_green_ratio"] = float(gr)
 
         bmeta = board.get('board_meta', {}) if isinstance(board, dict) else {}
-        cand_idx = int(bmeta.get('candidate_idx', -1) or -1)
+        cand_idx = -1
+        try:
+            raw_idx = bmeta.get('candidate_idx', None)
+            if raw_idx is not None and str(raw_idx).strip() != '':
+                cand_idx = int(raw_idx)
+        except Exception:
+            cand_idx = -1
         if cand_idx < 0:
-            cand_idx = int(board.get('candidate_idx', -1) or -1)
+            try:
+                raw_idx2 = board.get('candidate_idx', None)
+                if raw_idx2 is not None and str(raw_idx2).strip() != '':
+                    cand_idx = int(raw_idx2)
+            except Exception:
+                cand_idx = -1
         st["srx_candidate_idx"] = int(cand_idx)
 
         if xc < int(SRX_XCOUNT_MIN):
@@ -13487,7 +13558,10 @@ def _mvrx_debug_columns() -> list[str]:
         "preferred_bot","dyn_best_bot","allow_real","trigger_ok","confirm_streak","confirm_needed","gap_ok","gate_mode","reliable_mode","warmup_mode",
         "funnel_state","safe_to_operate","owner_lock_block","cooldown_block","balance_block","hard_block_reason",
         "root_block_layer","root_block_reason","would_demo_assist_enter","would_demo_assist_mode",
-        "signal_source","signal_tier","srx_ok","srx_tier","srx_score","srx_reason","srx_block_reason"
+        "signal_source","signal_tier","srx_ok","srx_tier","srx_score","srx_reason","srx_block_reason",
+        "top1_mvrx_tier","top1_pattern","top1_pattern_rank","top1_real_eligible",
+        "ctt_status","ctt_regime","ctt_gate","dyn_allow_real","dyn_trigger_ok","dyn_confirm_ok",
+        "embudo_decision","embudo_reason_final","final_block_reason"
     ]
 
 
@@ -13526,6 +13600,7 @@ def mvrx_debug_root_block(top: dict | None, dyn_gate: dict | None, embudo: dict 
     layer = "NO_SIGNAL"
     reason = "no_signal"
     dec = str(e.get("decision_final", "") or "")
+    emb_reason = str(e.get("decision_reason", "") or "")
     m_ok = bool(top.get("mvrx_ok", False))
     s_ok = bool(top.get("srx_ok", False))
     if not top:
@@ -13544,7 +13619,10 @@ def mvrx_debug_root_block(top: dict | None, dyn_gate: dict | None, embudo: dict 
     elif dec == EMBUDO_FINAL_BLOCK_HARD:
         layer, reason = "FUNNEL", "funnel_block_hard"
     elif dec == EMBUDO_FINAL_WAIT_SOFT:
-        layer, reason = "FUNNEL", "funnel_wait_soft"
+        if emb_reason in ("ctt_block_pre", "ctt_block_post"):
+            layer, reason = "FUNNEL", emb_reason
+        else:
+            layer, reason = "FUNNEL", "funnel_wait_soft"
     elif dec == EMBUDO_FINAL_SHADOW_OK:
         layer, reason = "FUNNEL", "funnel_shadow_only"
     elif str(top.get("mvrx_tier", "NONE") or "NONE") == "P3":
@@ -14092,20 +14170,40 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         risk_mode = "WAIT_SOFT"
         soft_wait_reason = ""
 
-        if quality == "strong":
-            decision = EMBUDO_FINAL_REAL_NORMAL
-            risk_mode = "REAL_NORMAL"
-        elif quality == "medium":
-            decision = EMBUDO_FINAL_REAL_MICRO
-            risk_mode = "REAL_MICRO"
-        elif quality == "weak":
-            decision = EMBUDO_FINAL_SHADOW_OK
-            risk_mode = "SHADOW_OK"
+        if signal_source == "MVRX":
+            if mvrx_tier == "P1":
+                if quality == "strong":
+                    decision = EMBUDO_FINAL_REAL_NORMAL
+                    risk_mode = "REAL_NORMAL"
+                elif quality == "medium":
+                    decision = EMBUDO_FINAL_REAL_MICRO
+                    risk_mode = "REAL_MICRO"
+                elif quality == "weak":
+                    decision = EMBUDO_FINAL_SHADOW_OK
+                    risk_mode = "SHADOW_OK"
+                else:
+                    soft_wait_reason = "gate_wait"
+            elif mvrx_tier == "P2":
+                if quality == "strong":
+                    decision = EMBUDO_FINAL_REAL_MICRO
+                    risk_mode = "REAL_MICRO"
+                elif quality in ("medium", "weak"):
+                    decision = EMBUDO_FINAL_WAIT_SOFT
+                    risk_mode = "WAIT_SOFT"
+                    soft_wait_reason = "p2_gate_not_strong"
+                    reason = "p2_gate_not_strong"
+                else:
+                    soft_wait_reason = "gate_wait"
+            elif mvrx_tier == "P3" and bool(MVRX_P3_REAL_DISABLED):
+                decision = EMBUDO_FINAL_SHADOW_OK
+                reason = "p3_exploratory_only"
+                risk_mode = "SHADOW_OK"
+                soft_wait_reason = "p3_exploratory_only"
+            elif quality == "weak":
+                decision = EMBUDO_FINAL_SHADOW_OK
+                risk_mode = "SHADOW_OK"
         else:
-            soft_wait_reason = "gate_wait"
-
-        # SRX-3+ es complementario observacional en esta fase: shadow only.
-        if signal_source == "SRX":
+            # SRX-3+ es complementario observacional en esta fase: shadow only.
             decision = EMBUDO_FINAL_SHADOW_OK
             reason = "srx_shadow_only"
             risk_mode = "SHADOW_OK"
@@ -14163,15 +14261,15 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         except Exception:
             pass
 
-        # Política operativa P3: exploratoria, nunca compite al nivel P1/P2.
-        if mvrx_tier == "P3" and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
+        # Política operativa P3 (flag explícito): exploratoria, nunca REAL.
+        if bool(MVRX_P3_REAL_DISABLED) and mvrx_tier == "P3" and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
             decision = EMBUDO_FINAL_SHADOW_OK
             risk_mode = "SHADOW_OK"
             if not soft_wait_reason:
-                soft_wait_reason = "p3_shadow_only"
+                soft_wait_reason = "p3_exploratory_only"
             if degrade_from == "none":
                 degrade_from = "p3_policy"
-            reason = "p3_shadow_only"
+            reason = "p3_exploratory_only"
 
         # CTT (fase previa): completamente neutralizado en decisión operativa.
 
@@ -14223,6 +14321,16 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "srx_score": float(top1.get("srx_score", 0.0) or 0.0) if isinstance(top1, dict) else 0.0,
             "srx_reason": str(top1.get("srx_reason", "") or "") if isinstance(top1, dict) else "",
             "srx_block_reason": str(top1.get("srx_block_reason", "") or "") if isinstance(top1, dict) else "",
+            "top1_mvrx_tier": mvrx_tier,
+            "top1_pattern": str(top1.get("mvrx_pattern", "") or "") if isinstance(top1, dict) else "",
+            "top1_pattern_rank": int(top1.get("mvrx_pattern_rank", 9) or 9) if isinstance(top1, dict) else 9,
+            "top1_real_eligible": bool(top1.get("mvrx_real_eligible", False)) if isinstance(top1, dict) else False,
+            "dyn_allow_real": allow_real,
+            "dyn_trigger_ok": trigger_ok,
+            "dyn_confirm_ok": confirm_ok,
+            "embudo_decision": decision,
+            "embudo_reason_final": reason,
+            "final_block_reason": (out_hard or soft_wait_reason or reason),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
@@ -14447,7 +14555,7 @@ def evaluar_ctt_fase(candidatos: list) -> tuple[list, dict]:
         elif sample < 1 or confirmadores < int(_ctt_min_confirmadores()):
             reason = "muestra_insuficiente"
 
-    status = regime
+    # Mantener status fino (GREEN_OPERABLE/GREEN_DIAGNOSTIC/RED_WEAK/RED_STRONG/NEUTRAL).
 
     last_ts_bot = {}
     for ev in eventos:
@@ -15316,12 +15424,14 @@ async def main():
                         # CTT como autoridad contextual superior: si hay veto duro,
                         # no se evalúan señales individuales/techo en este tick.
                         ctt_pre_eval = None
+                        ctt_block_pre = False
                         try:
                             _dummy, ctt_pre_eval = evaluar_ctt_fase([])
                         except Exception:
                             ctt_pre_eval = None
 
                         if str((ctt_pre_eval or {}).get("gate", "NEUTRAL")) == "BLOCK":
+                            ctt_block_pre = True
                             ctt_status_pre = str((ctt_pre_eval or {}).get("status", "RED_STRONG"))
                             ctt_reason_pre = str((ctt_pre_eval or {}).get("reason", "ctt_block"))
                             agregar_evento(
@@ -15436,6 +15546,10 @@ async def main():
                                     "mvrx_pattern": str(mvrx.get("mvrx_pattern", "") or ""),
                                     "mvrx_candidate_idx": int(mvrx.get("mvrx_candidate_idx", -1) or -1),
                                     "mvrx_target_idx": int(mvrx.get("mvrx_target_idx", -1) or -1),
+                                    "mvrx_prev_green_ratio": float(mvrx.get("mvrx_prev_green_ratio", 0.0) or 0.0),
+                                    "mvrx_pattern_rank": int(mvrx.get("mvrx_pattern_rank", 9) or 9),
+                                    "mvrx_priority_class": str(mvrx.get("mvrx_priority_class", "NONE") or "NONE"),
+                                    "mvrx_real_eligible": bool(mvrx.get("mvrx_real_eligible", False)),
                                     "signal_source": signal_source,
                                     "signal_tier": signal_tier,
                                     "srx_ok": bool(srx.get("srx_ok", False)),
@@ -15455,14 +15569,15 @@ async def main():
                                 estado_bots[_b]["mvrx_top1"] = bool(_i == 1)
                                 estado_bots[_b]["mvrx_priority_rank"] = int(_i)
                                 estado_bots[_b]["srx_top1"] = bool(_i == 1 and str(_c.get("signal_source", "MVRX")) == "SRX")
-                        ctt_eval = evaluar_ctt_fase([])[1]
+                        ctt_eval = evaluar_ctt_fase(candidatos)[1]
+                        ctt_block_post = bool(str(ctt_eval.get("gate", "NEUTRAL")) == "BLOCK")
                         if candidatos:
                             ctt_status = str(ctt_eval.get("status", "NEUTRAL"))
                             ctt_gate = str(ctt_eval.get("gate", "NEUTRAL"))
                             ctt_reason = str(ctt_eval.get("reason", "na"))
                             if ctt_gate == "BLOCK":
                                 agregar_evento(
-                                    f"🟥 CTT telemetría ({ctt_status}): {ctt_reason} | sin efecto operativo en esta fase."
+                                    f"🟥 CTT bloquea promoción REAL ({ctt_status}): {ctt_reason}."
                                 )
                             elif ctt_status in ("GREEN_DIAGNOSTIC", "RED_WEAK"):
                                 agregar_evento(
@@ -15476,6 +15591,7 @@ async def main():
                                 for c in candidatos
                                 if isinstance(c, dict)
                                 and bool(c.get("mvrx_ok", False))
+                                and bool(c.get("mvrx_real_eligible", False))
                                 and str(c.get("mvrx_tier", "NONE") or "NONE") in ("P1", "P2")
                             ]
                             mvrx_exploratory_bots = [
@@ -15533,6 +15649,24 @@ async def main():
                         embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
                         decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
 
+                        # CTT BLOCK no permite promoción REAL en este tick (pre/post).
+                        if ctt_block_pre and decision_final in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
+                            embudo = _registrar_estado_embudo({
+                                **(EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}),
+                                "decision_final": EMBUDO_FINAL_WAIT_SOFT,
+                                "decision_reason": "ctt_block_pre",
+                                "soft_wait_reason": "ctt_block_pre",
+                            })
+                            decision_final = EMBUDO_FINAL_WAIT_SOFT
+                        if ctt_block_post and decision_final in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
+                            embudo = _registrar_estado_embudo({
+                                **(EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}),
+                                "decision_final": EMBUDO_FINAL_WAIT_SOFT,
+                                "decision_reason": "ctt_block_post",
+                                "soft_wait_reason": "ctt_block_post",
+                            })
+                            decision_final = EMBUDO_FINAL_WAIT_SOFT
+
                         # Debug estructurado MVRX/SRX: razón raíz de bloqueo y carril demo assist (solo observación).
                         try:
                             top_dbg = candidatos[0] if (isinstance(candidatos, list) and candidatos and isinstance(candidatos[0], dict)) else {}
@@ -15586,6 +15720,19 @@ async def main():
                                 "would_demo_assist_mode": str(assist_mode_dbg),
                                 "signal_source": str(top_dbg.get("signal_source", "MVRX") or "MVRX"),
                                 "signal_tier": str(top_dbg.get("signal_tier", "") or ""),
+                                "top1_mvrx_tier": str(top_dbg.get("mvrx_tier", "NONE") or "NONE"),
+                                "top1_pattern": str(top_dbg.get("mvrx_pattern", "") or ""),
+                                "top1_pattern_rank": int(top_dbg.get("mvrx_pattern_rank", 9) or 9),
+                                "top1_real_eligible": bool(top_dbg.get("mvrx_real_eligible", False)),
+                                "ctt_status": str(ctt_eval.get("status", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
+                                "ctt_regime": str(ctt_eval.get("regime", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
+                                "ctt_gate": str(ctt_eval.get("gate", "NEUTRAL") if isinstance(ctt_eval, dict) else "NEUTRAL"),
+                                "dyn_allow_real": bool(dyn_gate.get("allow_real", False)) if isinstance(dyn_gate, dict) else False,
+                                "dyn_trigger_ok": bool(dyn_gate.get("trigger_ok", False)) if isinstance(dyn_gate, dict) else False,
+                                "dyn_confirm_ok": bool((int(dyn_gate.get("confirm_streak", 0) or 0) >= int(dyn_gate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS))) if isinstance(dyn_gate, dict) else False,
+                                "embudo_decision": str(decision_final),
+                                "embudo_reason_final": str(embudo.get("decision_reason", "") or ""),
+                                "final_block_reason": str(embudo.get("hard_block_reason", embudo.get("soft_wait_reason", "")) or ""),
                                 "srx_ok": bool(top_dbg.get("srx_ok", False)),
                                 "srx_tier": str(top_dbg.get("srx_tier", "NONE") or "NONE"),
                                 "srx_score": float(top_dbg.get("srx_score", 0.0) or 0.0),
