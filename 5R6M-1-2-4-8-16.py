@@ -272,6 +272,25 @@ MVRX_P3_ENABLE = True
 MVRX_SHADOW_ONLY = False
 MVRX_VALID_PATTERNS = {"RGRGR", "RRRR", "GRGR"}
 
+# === MVRX Debug / Observabilidad ===
+MVRX_DEBUG_ENABLE = True
+MVRX_DEBUG_VERBOSE = True
+MVRX_DEBUG_CSV_ENABLE = True
+MVRX_DEBUG_CSV_PATH = "mvrx_debug_log.csv"
+MVRX_WARMUP_DEMO_ASSIST = True
+MVRX_WARMUP_DEMO_ASSIST_SHADOW_ONLY = True
+
+# === SRX-3+ (complemento saturación roja controlada) ===
+SRX_ENABLE = True
+SRX_XCOUNT_MIN = 3
+SRX_XCOUNT_MAX = 5
+SRX_GREEN_RATIO_MIN = 0.15
+SRX_GREEN_RATIO_MAX = 0.60
+SRX_BLOCK_STREAK_GE = 8
+SRX_PATTERN_BONUS_ENABLE = True
+SRX_SHADOW_ONLY = True
+SRX_VALID_PATTERNS = {"RGRGR", "RRRR", "RRR"}
+
 
 def _mvrx_state_defaults() -> dict:
     return {
@@ -285,8 +304,25 @@ def _mvrx_state_defaults() -> dict:
         "mvrx_streak": 0,
         "mvrx_pattern": "",
         "mvrx_candidate_idx": -1,
+        "mvrx_target_idx": -1,
         "mvrx_top1": False,
         "mvrx_priority_rank": 999,
+    }
+
+
+def _srx_state_defaults() -> dict:
+    return {
+        "srx_ok": False,
+        "srx_tier": "NONE",
+        "srx_score": 0.0,
+        "srx_reason": "init",
+        "srx_block_reason": "",
+        "srx_green_ratio": 0.0,
+        "srx_x_count": 0,
+        "srx_streak": 0,
+        "srx_pattern": "",
+        "srx_candidate_idx": -1,
+        "srx_top1": False,
     }
 
 # --- Objetivos / umbrales globales de IA ---
@@ -1246,6 +1282,7 @@ estado_bots = {
         "boardgate_prob_final_preview": None,
         "boardgate_block_preview": "",
         **_mvrx_state_defaults(),
+        **_srx_state_defaults(),
     }
     for bot in BOT_NAMES
 }
@@ -4925,6 +4962,7 @@ def _boardgate_defaults(reason: str = "init") -> dict:
         "boardgate_prob_final_preview": None,
         "boardgate_block_preview": "",
         **_mvrx_state_defaults(),
+        **_srx_state_defaults(),
     }
 
 
@@ -7563,7 +7601,8 @@ def reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=15, modo_suave=
             "ia_senal_pendiente": False,
             "ia_prob_senal": None,
             **_boardgate_defaults(reason="reset_full"),
-            **_mvrx_state_defaults()
+            **_mvrx_state_defaults(),
+            **_srx_state_defaults()
         })
         SNAPSHOT_FILAS[bot] = contar_filas_csv(bot)
         OCULTAR_HASTA_NUEVO[bot] = False  # Cambiado para no ocultar
@@ -7627,7 +7666,8 @@ def reiniciar_bot(bot, borrar_csv=False):
         "ia_senal_pendiente": False,
         "ia_prob_senal": None,
         **_boardgate_defaults(reason="reset_bot"),
-        **_mvrx_state_defaults()
+        **_mvrx_state_defaults(),
+        **_srx_state_defaults()
     })
     SNAPSHOT_FILAS[bot] = contar_filas_csv(bot)
     OCULTAR_HASTA_NUEVO[bot] = False  # Cambiado para no ocultar
@@ -11421,7 +11461,7 @@ def mostrar_panel():
                 f"🧪 Embudo: final={emb.get('decision_final','--')} risk={emb.get('risk_mode','--')} gate={emb.get('gate_quality','--')} "
                 f"top1={emb.get('top1_bot') or '--'}({float(emb.get('top1_prob',0.0) or 0.0)*100:.1f}%) "
                 f"top2={emb.get('top2_bot') or '--'} gap={float(emb.get('gap_value',0.0) or 0.0)*100:.1f}pp "
-                f"mvrx={emb.get('mvrx_tier','--')}({float(emb.get('mvrx_score',0.0) or 0.0)*100:.1f}%) "
+                f"src={emb.get('signal_source','MVRX')} mvrx={emb.get('mvrx_tier','--')}({float(emb.get('mvrx_score',0.0) or 0.0)*100:.1f}%) srx={emb.get('srx_tier','--')}({float(emb.get('srx_score',0.0) or 0.0)*100:.1f}%) "
                 f"why={emb.get('decision_reason','--')} wait={emb.get('soft_wait_reason','') or '--'} "
                 f"hard={emb.get('hard_block_reason','') or '--'} mvrx_blk={emb.get('mvrx_block_reason','') or '--'} deg={emb.get('degrade_from','--')}"
             )
@@ -12428,7 +12468,8 @@ def resetear_estado_hud(estado_bots: dict):
             "ia_seniales": 0, "ia_aciertos": 0, "ia_fallos": 0, "ia_senal_pendiente": False,
             "ia_prob_senal": None,
             **_boardgate_defaults(reason="reset_hud"),
-            **_mvrx_state_defaults()
+            **_mvrx_state_defaults(),
+            **_srx_state_defaults()
         })
 
 def limpieza_dura():
@@ -13257,6 +13298,7 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
 
         if xc == 1:
             target_idx = int(xr[0])
+            st["mvrx_target_idx"] = int(target_idx)
             streak = int(mvrx_calc_row_streak_x(mat, target_idx, col))
             patt = mvrx_detect_row_pattern(mat, target_idx, col)
             st['mvrx_streak'] = streak
@@ -13292,6 +13334,7 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
                 reason = 'p2_shorter_streak'
             if pick >= 0 and gr >= float(MVRX_GREEN_RATIO_P2):
                 target_idx = pick
+                st["mvrx_target_idx"] = int(target_idx)
                 streak = int(mvrx_calc_row_streak_x(mat, target_idx, col))
                 if streak >= int(MVRX_BLOCK_STREAK_GE):
                     block = 'streak_ge_block'
@@ -13305,6 +13348,8 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             st['mvrx_reason'] = 'x_count_invalid'
             return st
 
+        if target_idx >= 0:
+            st["mvrx_target_idx"] = int(target_idx)
         if target_idx >= 0 and target_idx != int(cand_idx):
             st['mvrx_block_reason'] = 'target_idx_mismatch'
             st['mvrx_reason'] = f'target={int(target_idx)}!=candidate={int(cand_idx)}'
@@ -13358,6 +13403,173 @@ def mvrx_rank_candidates(candidates: list) -> list:
 def mvrx_select_top_candidate(candidates: list) -> dict | None:
     ranked = mvrx_rank_candidates(candidates)
     return ranked[0] if ranked else None
+
+
+def srx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
+    st = _srx_state_defaults()
+    st["bot"] = bot
+    try:
+        if not bool(SRX_ENABLE):
+            st["srx_block_reason"] = "srx_disabled"
+            return st
+        if not isinstance(board, dict):
+            st["srx_block_reason"] = "board_unavailable"
+            return st
+        mat = mvrx_get_effective_matrix(board)
+        if not mat:
+            st["srx_block_reason"] = "board_empty"
+            return st
+        col = mvrx_get_rightmost_live_col(mat)
+        if col < 0:
+            st["srx_block_reason"] = "no_live_col"
+            return st
+        xr = mvrx_find_x_rows(mat, col)
+        xc = len(xr)
+        gr = float(mvrx_calc_green_ratio(mat, col))
+        st["srx_x_count"] = int(xc)
+        st["srx_green_ratio"] = float(gr)
+
+        bmeta = board.get('board_meta', {}) if isinstance(board, dict) else {}
+        cand_idx = int(bmeta.get('candidate_idx', -1) or -1)
+        if cand_idx < 0:
+            cand_idx = int(board.get('candidate_idx', -1) or -1)
+        st["srx_candidate_idx"] = int(cand_idx)
+
+        if xc < int(SRX_XCOUNT_MIN):
+            st["srx_block_reason"] = "x_count_lt_3"
+            return st
+        if xc > int(SRX_XCOUNT_MAX):
+            st["srx_block_reason"] = "x_count_gt_5"
+            return st
+        if gr < float(SRX_GREEN_RATIO_MIN) or gr > float(SRX_GREEN_RATIO_MAX):
+            st["srx_block_reason"] = "green_ratio_outside_band"
+            return st
+        if cand_idx < 0:
+            st["srx_block_reason"] = "candidate_idx_missing"
+            return st
+        if cand_idx not in set(int(x) for x in xr):
+            st["srx_block_reason"] = "candidate_not_in_x_cluster"
+            return st
+
+        streak = int(mvrx_calc_row_streak_x(mat, int(cand_idx), col))
+        patt = mvrx_detect_row_pattern(mat, int(cand_idx), col)
+        st["srx_streak"] = int(streak)
+        st["srx_pattern"] = str(patt)
+        if streak >= int(SRX_BLOCK_STREAK_GE):
+            st["srx_block_reason"] = "streak_ge_block"
+            return st
+
+        tier = "S2"
+        score = 0.52 + max(0.0, min(0.15, (float(SRX_GREEN_RATIO_MAX) - gr)))
+        if streak in (3, 4, 5):
+            tier = "S1"
+            score += 0.07
+        if bool(SRX_PATTERN_BONUS_ENABLE) and patt in SRX_VALID_PATTERNS:
+            score += 0.04
+        st["srx_ok"] = True
+        st["srx_tier"] = tier
+        st["srx_score"] = float(max(0.0, min(1.0, score)))
+        st["srx_reason"] = "srx_core"
+        st["srx_block_reason"] = ""
+        return st
+    except Exception as e:
+        st["srx_ok"] = False
+        st["srx_block_reason"] = "eval_error"
+        st["srx_reason"] = f"err:{type(e).__name__}"
+        return st
+
+
+def _mvrx_debug_columns() -> list[str]:
+    return [
+        "ts","bot","estado_real","decision_final","top1_bot","mvrx_top1",
+        "mvrx_ok","mvrx_tier","mvrx_score","mvrx_reason","mvrx_block_reason",
+        "mvrx_green_ratio","mvrx_x_count","mvrx_streak","mvrx_pattern","candidate_idx","target_idx",
+        "preferred_bot","dyn_best_bot","allow_real","trigger_ok","confirm_streak","confirm_needed","gap_ok","gate_mode","reliable_mode","warmup_mode",
+        "funnel_state","safe_to_operate","owner_lock_block","cooldown_block","balance_block","hard_block_reason",
+        "root_block_layer","root_block_reason","would_demo_assist_enter","would_demo_assist_mode",
+        "signal_source","signal_tier","srx_ok","srx_tier","srx_score","srx_reason","srx_block_reason"
+    ]
+
+
+def mvrx_debug_log_event(row: dict) -> None:
+    if not bool(MVRX_DEBUG_ENABLE):
+        return
+    try:
+        if bool(MVRX_DEBUG_CSV_ENABLE):
+            cols = _mvrx_debug_columns()
+            write_header = (not os.path.exists(MVRX_DEBUG_CSV_PATH))
+            with open(MVRX_DEBUG_CSV_PATH, "a", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=cols)
+                if write_header:
+                    w.writeheader()
+                w.writerow({c: row.get(c, "") for c in cols})
+        if bool(MVRX_DEBUG_VERBOSE):
+            layer = str(row.get("root_block_layer", "--") or "--")
+            reason = str(row.get("root_block_reason", "--") or "--")
+            bot = str(row.get("bot", "--") or "--")
+            if layer in ("MVRX", "NO_SIGNAL"):
+                agregar_evento(f"🧱 MVRX blk={reason} bot={bot} tier={row.get('mvrx_tier','NONE')} g={float(row.get('mvrx_green_ratio',0.0) or 0.0):.2f} x={int(row.get('mvrx_x_count',0) or 0)}")
+            elif layer == "WARMUP_ASSIST":
+                agregar_evento(f"🧪 DEMO_ASSIST yes bot={bot} tier={row.get('mvrx_tier','NONE')} why={reason}")
+            else:
+                agregar_evento(f"🚪 BLOCK layer={layer} reason={reason}")
+            if bool(row.get("mvrx_top1", False)):
+                agregar_evento(f"📌 TOP1 {row.get('signal_source','MVRX')} {bot} {row.get('mvrx_tier','NONE')} g={float(row.get('mvrx_green_ratio',0.0) or 0.0):.2f} x={int(row.get('mvrx_x_count',0) or 0)} streak={int(row.get('mvrx_streak',0) or 0)} patt={row.get('mvrx_pattern','--') or '--'}")
+    except Exception:
+        pass
+
+
+def mvrx_debug_root_block(top: dict | None, dyn_gate: dict | None, embudo: dict | None, estado_real: str, balance_ok: bool) -> tuple[str, str, bool, str]:
+    top = top if isinstance(top, dict) else {}
+    d = dyn_gate if isinstance(dyn_gate, dict) else {}
+    e = embudo if isinstance(embudo, dict) else {}
+    layer = "NO_SIGNAL"
+    reason = "no_signal"
+    dec = str(e.get("decision_final", "") or "")
+    m_ok = bool(top.get("mvrx_ok", False))
+    s_ok = bool(top.get("srx_ok", False))
+    if not top:
+        layer, reason = "NO_SIGNAL", "no_signal"
+    elif (not m_ok) and (not s_ok):
+        layer, reason = "MVRX", str(top.get("mvrx_block_reason", "no_signal") or "no_signal")
+    elif not bool(d.get("allow_real", False)):
+        if not bool(d.get("gap_ok", True)):
+            layer, reason = "DYN_ROOF", "dyn_gap_fail"
+        elif int(d.get("confirm_streak", 0) or 0) < int(d.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS):
+            layer, reason = "DYN_ROOF", "dyn_confirm_pending"
+        elif not bool(d.get("trigger_ok", False)):
+            layer, reason = "DYN_ROOF", "dyn_trigger_fail"
+        else:
+            layer, reason = "DYN_ROOF", "dyn_block"
+    elif dec == EMBUDO_FINAL_BLOCK_HARD:
+        layer, reason = "FUNNEL", "funnel_block_hard"
+    elif dec == EMBUDO_FINAL_WAIT_SOFT:
+        layer, reason = "FUNNEL", "funnel_wait_soft"
+    elif dec == EMBUDO_FINAL_SHADOW_OK:
+        layer, reason = "FUNNEL", "funnel_shadow_only"
+    elif str(top.get("mvrx_tier", "NONE") or "NONE") == "P3":
+        layer, reason = "SAFE_GUARD", "safe_not_real_tier"
+
+    owner = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+    bot = str(top.get("bot", "") or "")
+    if owner in BOT_NAMES and bot and str(owner) != bot:
+        layer, reason = "OWNER_LOCK", "owner_lock"
+    elif time.time() < float(REAL_COOLDOWN_UNTIL_TS):
+        layer, reason = "COOLDOWN", "cooldown_active"
+    elif not bool(balance_ok):
+        layer, reason = "BALANCE", "balance_low"
+
+    meta = resolver_canary_estado(leer_model_meta() or {}) if callable(resolver_canary_estado) else {}
+    warmup_mode = bool(meta.get("warmup_mode", False))
+    reliable_mode = bool(meta.get("reliable", False)) and (not warmup_mode)
+    would_assist = False
+    would_mode = ""
+    if bool(MVRX_WARMUP_DEMO_ASSIST) and (warmup_mode or (not reliable_mode)) and (layer in ("FUNNEL", "DYN_ROOF", "SAFE_GUARD")) and (m_ok or s_ok):
+        would_assist = True
+        would_mode = "SHADOW_OK" if bool(MVRX_WARMUP_DEMO_ASSIST_SHADOW_ONLY) else "MICRO_OBS"
+        layer = "WARMUP_ASSIST"
+        reason = "warmup_soft_block"
+    return layer, reason, would_assist, would_mode
 
 
 def _candidate_bot_name(c):
@@ -13822,9 +14034,12 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         top2_prob = float(_candidate_prob(top2)) if top2 else 0.0
         gap_value = float(top1_prob - top2_prob)
 
+        signal_source = str(top1.get("signal_source", "MVRX") or "MVRX") if isinstance(top1, dict) else "MVRX"
         mvrx_ok = bool(top1.get("mvrx_ok", False)) if isinstance(top1, dict) else False
         mvrx_tier = str(top1.get("mvrx_tier", "NONE") or "NONE") if isinstance(top1, dict) else "NONE"
-        if not mvrx_ok:
+        srx_ok = bool(top1.get("srx_ok", False)) if isinstance(top1, dict) else False
+        srx_tier = str(top1.get("srx_tier", "NONE") or "NONE") if isinstance(top1, dict) else "NONE"
+        if signal_source == "MVRX" and not mvrx_ok:
             return _registrar_estado_embudo({
                 "decision_final": EMBUDO_FINAL_WAIT_SOFT,
                 "decision_reason": "mvrx_block",
@@ -13838,6 +14053,21 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 "top1_prob": top1_prob,
                 "top2_prob": top2_prob,
                 "degrade_from": "mvrx",
+            })
+        if signal_source == "SRX" and not srx_ok:
+            return _registrar_estado_embudo({
+                "decision_final": EMBUDO_FINAL_WAIT_SOFT,
+                "decision_reason": "srx_block",
+                "gate_quality": "wait",
+                "risk_mode": "WAIT_SOFT",
+                "soft_wait_reason": str(top1.get("srx_block_reason", "srx_block") or "srx_block") if isinstance(top1, dict) else "srx_block",
+                "hard_block_reason": "",
+                "top1_bot": top1_bot,
+                "top2_bot": top2_bot,
+                "gap_value": gap_value,
+                "top1_prob": top1_prob,
+                "top2_prob": top2_prob,
+                "degrade_from": "srx",
             })
 
         dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
@@ -13874,6 +14104,13 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         else:
             soft_wait_reason = "gate_wait"
 
+        # SRX-3+ es complementario observacional en esta fase: shadow only.
+        if signal_source == "SRX":
+            decision = EMBUDO_FINAL_SHADOW_OK
+            reason = "srx_shadow_only"
+            risk_mode = "SHADOW_OK"
+            soft_wait_reason = "srx_shadow_only"
+
         meta = meta_live if isinstance(meta_live, dict) else {}
         n_samples = int(meta.get("n_samples", meta.get("n", 0)) or 0)
         reliable = bool(meta.get("reliable", False))
@@ -13900,7 +14137,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
 
         # Consistencia explícita: no permitir doble ganador entre dyn_gate y embudo.
         best_dyn = str(dgate.get("best_bot", "") or "").strip()
-        if best_dyn and (best_dyn != top1_bot):
+        if signal_source == "MVRX" and best_dyn and (best_dyn != top1_bot):
             if mvrx_ok and mvrx_tier in ("P1", "P2"):
                 reason = f"mvrx_top1_over_dyn:{top1_bot}"
             else:
@@ -13980,6 +14217,12 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "mvrx_score": float(top1.get("mvrx_score", 0.0) or 0.0) if isinstance(top1, dict) else 0.0,
             "mvrx_reason": str(top1.get("mvrx_reason", "") or "") if isinstance(top1, dict) else "",
             "mvrx_block_reason": str(top1.get("mvrx_block_reason", "") or "") if isinstance(top1, dict) else "",
+            "signal_source": signal_source,
+            "signal_tier": str(top1.get("signal_tier", "") or "") if isinstance(top1, dict) else "",
+            "srx_tier": srx_tier,
+            "srx_score": float(top1.get("srx_score", 0.0) or 0.0) if isinstance(top1, dict) else 0.0,
+            "srx_reason": str(top1.get("srx_reason", "") or "") if isinstance(top1, dict) else "",
+            "srx_block_reason": str(top1.get("srx_block_reason", "") or "") if isinstance(top1, dict) else "",
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
@@ -15089,6 +15332,7 @@ async def main():
                             if _b in estado_bots:
                                 estado_bots[_b]["mvrx_top1"] = False
                                 estado_bots[_b]["mvrx_priority_rank"] = 999
+                                estado_bots[_b]["srx_top1"] = False
 
                         for b in BOT_NAMES:
                             st_bot = estado_bots.get(b, {}) if isinstance(estado_bots, dict) else {}
@@ -15112,8 +15356,12 @@ async def main():
 
                                 board = mvrx_build_live_board(b)
                                 mvrx = mvrx_eval_candidate(board, b, prob_live=float(p))
+                                srx = srx_eval_candidate(board, b, prob_live=float(p))
                                 for k, v in mvrx.items():
                                     if k.startswith("mvrx_"):
+                                        st_bot[k] = v
+                                for k, v in srx.items():
+                                    if k.startswith("srx_"):
                                         st_bot[k] = v
                                 mvrx_blk = str(mvrx.get("mvrx_block_reason", "") or "")
                                 if mvrx_blk in ("board_unavailable", "board_empty", "candidate_idx_missing"):
@@ -15125,7 +15373,7 @@ async def main():
                                 if bool(MVRX_SHADOW_ONLY):
                                     mvrx["mvrx_ok"] = True if mvrx.get("mvrx_tier") in ("P1", "P2") else bool(mvrx.get("mvrx_ok", False))
 
-                                if not bool(mvrx.get("mvrx_ok", False)):
+                                if (not bool(mvrx.get("mvrx_ok", False))) and (not bool(srx.get("srx_ok", False))):
                                     continue
 
                                 redundante_tick = bool(st_bot.get("ia_input_redundante", False))
@@ -15136,7 +15384,9 @@ async def main():
                                 ev_lb = float(ev.get("lb", 0.0) or 0.0)
                                 p_post = float(_prob_real_posterior(float(p), float(regime_score), int(ev_n), float(ev_wr), float(ev_lb)))
 
-                                score_mod = float(mvrx.get("mvrx_score", 0.0) or 0.0)
+                                signal_source = "MVRX" if bool(mvrx.get("mvrx_ok", False)) else "SRX"
+                                signal_tier = str(mvrx.get("mvrx_tier", "NONE") or "NONE") if signal_source == "MVRX" else str(srx.get("srx_tier", "NONE") or "NONE")
+                                score_mod = float(mvrx.get("mvrx_score", 0.0) or 0.0) if signal_source == "MVRX" else float(srx.get("srx_score", 0.0) or 0.0)
                                 score_mod += float(REGIME_GATE_WEIGHT_PROB) * float(max(0.0, min(1.0, p_post))) * 0.15
                                 score_mod += float(REGIME_GATE_WEIGHT_REGIME) * float(max(0.0, min(1.0, regime_score))) * 0.10
                                 if redundante_tick:
@@ -15185,6 +15435,14 @@ async def main():
                                     "mvrx_streak": int(mvrx.get("mvrx_streak", 0) or 0),
                                     "mvrx_pattern": str(mvrx.get("mvrx_pattern", "") or ""),
                                     "mvrx_candidate_idx": int(mvrx.get("mvrx_candidate_idx", -1) or -1),
+                                    "mvrx_target_idx": int(mvrx.get("mvrx_target_idx", -1) or -1),
+                                    "signal_source": signal_source,
+                                    "signal_tier": signal_tier,
+                                    "srx_ok": bool(srx.get("srx_ok", False)),
+                                    "srx_tier": str(srx.get("srx_tier", "NONE") or "NONE"),
+                                    "srx_score": float(srx.get("srx_score", 0.0) or 0.0),
+                                    "srx_reason": str(srx.get("srx_reason", "") or ""),
+                                    "srx_block_reason": str(srx.get("srx_block_reason", "") or ""),
                                 }
                                 candidatos.append(cand)
                             except Exception:
@@ -15196,6 +15454,7 @@ async def main():
                             if _b in estado_bots:
                                 estado_bots[_b]["mvrx_top1"] = bool(_i == 1)
                                 estado_bots[_b]["mvrx_priority_rank"] = int(_i)
+                                estado_bots[_b]["srx_top1"] = bool(_i == 1 and str(_c.get("signal_source", "MVRX")) == "SRX")
                         ctt_eval = evaluar_ctt_fase([])[1]
                         if candidatos:
                             ctt_status = str(ctt_eval.get("status", "NEUTRAL"))
@@ -15273,6 +15532,69 @@ async def main():
 
                         embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
                         decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
+
+                        # Debug estructurado MVRX/SRX: razón raíz de bloqueo y carril demo assist (solo observación).
+                        try:
+                            top_dbg = candidatos[0] if (isinstance(candidatos, list) and candidatos and isinstance(candidatos[0], dict)) else {}
+                            owner_dbg = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+                            cooldown_block_dbg = bool(time.time() < float(REAL_COOLDOWN_UNTIL_TS))
+                            balance_block_dbg = bool(saldo_val < costo_ciclo1)
+                            safe_dbg = bool(condiciones_seguras_para(str(top_dbg.get("bot", "") or ""))) if top_dbg else False
+                            layer_dbg, reason_dbg, assist_dbg, assist_mode_dbg = mvrx_debug_root_block(
+                                top_dbg, dyn_gate, embudo, estado_real, (not balance_block_dbg)
+                            )
+                            meta_dbg = resolver_canary_estado(leer_model_meta() or {})
+                            warmup_dbg = bool(meta_dbg.get("warmup_mode", False))
+                            reliable_dbg = bool(meta_dbg.get("reliable", False)) and (not warmup_dbg)
+                            row_dbg = {
+                                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "bot": str(top_dbg.get("bot", "") or ""),
+                                "estado_real": str(estado_real),
+                                "decision_final": str(decision_final),
+                                "top1_bot": str(embudo.get("top1_bot", "") or ""),
+                                "mvrx_top1": bool(top_dbg.get("mvrx_top1", False)),
+                                "mvrx_ok": bool(top_dbg.get("mvrx_ok", False)),
+                                "mvrx_tier": str(top_dbg.get("mvrx_tier", "NONE") or "NONE"),
+                                "mvrx_score": float(top_dbg.get("mvrx_score", 0.0) or 0.0),
+                                "mvrx_reason": str(top_dbg.get("mvrx_reason", "") or ""),
+                                "mvrx_block_reason": str(top_dbg.get("mvrx_block_reason", "") or ""),
+                                "mvrx_green_ratio": float(top_dbg.get("mvrx_green_ratio", 0.0) or 0.0),
+                                "mvrx_x_count": int(top_dbg.get("mvrx_x_count", 0) or 0),
+                                "mvrx_streak": int(top_dbg.get("mvrx_streak", 0) or 0),
+                                "mvrx_pattern": str(top_dbg.get("mvrx_pattern", "") or ""),
+                                "candidate_idx": int(top_dbg.get("mvrx_candidate_idx", -1) or -1),
+                                "target_idx": int(top_dbg.get("mvrx_target_idx", -1) or -1),
+                                "preferred_bot": str(dyn_gate.get("best_bot", "") if isinstance(dyn_gate, dict) else ""),
+                                "dyn_best_bot": str(dyn_gate.get("best_bot", "") if isinstance(dyn_gate, dict) else ""),
+                                "allow_real": bool(dyn_gate.get("allow_real", False)) if isinstance(dyn_gate, dict) else False,
+                                "trigger_ok": bool(dyn_gate.get("trigger_ok", False)) if isinstance(dyn_gate, dict) else False,
+                                "confirm_streak": int(dyn_gate.get("confirm_streak", 0) or 0) if isinstance(dyn_gate, dict) else 0,
+                                "confirm_needed": int(dyn_gate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS) if isinstance(dyn_gate, dict) else int(DYN_ROOF_CONFIRM_TICKS),
+                                "gap_ok": bool(dyn_gate.get("gap_ok", False)) if isinstance(dyn_gate, dict) else False,
+                                "gate_mode": str(dyn_gate.get("gate_mode", "") or "") if isinstance(dyn_gate, dict) else "",
+                                "reliable_mode": bool(reliable_dbg),
+                                "warmup_mode": bool(warmup_dbg),
+                                "funnel_state": str(decision_final),
+                                "safe_to_operate": bool(safe_dbg),
+                                "owner_lock_block": bool(owner_dbg in BOT_NAMES and str(owner_dbg) != str(top_dbg.get("bot", "") or "")),
+                                "cooldown_block": bool(cooldown_block_dbg),
+                                "balance_block": bool(balance_block_dbg),
+                                "hard_block_reason": str(embudo.get("hard_block_reason", "") or ""),
+                                "root_block_layer": str(layer_dbg),
+                                "root_block_reason": str(reason_dbg),
+                                "would_demo_assist_enter": bool(assist_dbg),
+                                "would_demo_assist_mode": str(assist_mode_dbg),
+                                "signal_source": str(top_dbg.get("signal_source", "MVRX") or "MVRX"),
+                                "signal_tier": str(top_dbg.get("signal_tier", "") or ""),
+                                "srx_ok": bool(top_dbg.get("srx_ok", False)),
+                                "srx_tier": str(top_dbg.get("srx_tier", "NONE") or "NONE"),
+                                "srx_score": float(top_dbg.get("srx_score", 0.0) or 0.0),
+                                "srx_reason": str(top_dbg.get("srx_reason", "") or ""),
+                                "srx_block_reason": str(top_dbg.get("srx_block_reason", "") or ""),
+                            }
+                            mvrx_debug_log_event(row_dbg)
+                        except Exception:
+                            pass
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
                             agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
                             candidatos = []
