@@ -9,13 +9,6 @@ from collections import deque
 from typing import Callable
 
 
-def _to_int(value, default=0):
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
-
 def _norm_status(raw: str, normalizer: Callable[[str], str] | None = None) -> str:
     txt = str(raw or "").strip()
     if normalizer is not None:
@@ -64,11 +57,12 @@ def _load_recent_closes(path: str, lookback_cols: int, status_normalizer=None, r
             first = next(rows_iter, None)
             if first is None:
                 return out, meta
-            # reconstruir iterador incluyendo primera fila
+
             def _chain_first(fr, it):
                 yield fr
                 for r in it:
                     yield r
+
             rows_iter = _chain_first(first, rows_iter)
             break
         except Exception:
@@ -78,7 +72,6 @@ def _load_recent_closes(path: str, lookback_cols: int, status_normalizer=None, r
     if rows_iter is None:
         return out, meta
 
-    # Mantener buffer chico de cierres válidos; evita cargar CSV completo en memoria.
     recent = deque(maxlen=max(8, int(lookback_cols)))
     for row in rows_iter:
         meta["rows"] += 1
@@ -91,7 +84,6 @@ def _load_recent_closes(path: str, lookback_cols: int, status_normalizer=None, r
             meta["status_prioritized"] += 1
             recent.append(1 if res == "GANANCIA" else -1)
         elif ts in {"", "NONE", "NULL"}:
-            # fallback legacy: resultado válido pero status vacío
             recent.append(1 if res == "GANANCIA" else -1)
         else:
             continue
@@ -111,10 +103,11 @@ def build_board_state(
     result_normalizer: Callable[[str], str] | None = None,
 ) -> dict:
     lookback_cols = max(4, int(lookback_cols))
+    names = list(bot_names or [])
     matrix: list[list[int]] = []
     row_meta: dict[str, dict] = {}
 
-    for bot in list(bot_names or []):
+    for bot in names:
         path = os.path.join(csv_dir, f"registro_enriquecido_{bot}.csv")
         closes, meta = _load_recent_closes(path, lookback_cols, status_normalizer, result_normalizer)
         row = [0] * lookback_cols
@@ -130,27 +123,28 @@ def build_board_state(
             "status_prioritized": meta.get("status_prioritized", 0),
         }
 
-    candidate_idx = -1
-    if candidate_bot in bot_names:
-        candidate_idx = int(bot_names.index(candidate_bot))
-
-    ready_bots = sum(1 for b in bot_names if row_meta.get(b, {}).get("available", 0) > 0)
-    holes = sum(int(row_meta.get(b, {}).get("holes", 0)) for b in bot_names)
-    total_cells = len(bot_names) * lookback_cols
+    candidate_idx = int(names.index(candidate_bot)) if candidate_bot in names else -1
+    ready_bots = sum(1 for b in names if row_meta.get(b, {}).get("available", 0) > 0)
+    holes = sum(int(row_meta.get(b, {}).get("holes", 0)) for b in names)
+    total_cells = len(names) * lookback_cols
     completeness = 1.0 - (holes / float(max(1, total_cells)))
+
+    board_meta = {
+        "lookback_cols": lookback_cols,
+        "ready_bots": int(ready_bots),
+        "total_bots": len(names),
+        "holes": int(holes),
+        "total_cells": int(total_cells),
+        "completeness": float(max(0.0, min(1.0, completeness))),
+        "row_meta": row_meta,
+        "candidate_bot": candidate_bot,
+        "candidate_idx": int(candidate_idx),
+    }
 
     return {
         "board_matrix": matrix,
-        "board_meta": {
-            "lookback_cols": lookback_cols,
-            "ready_bots": int(ready_bots),
-            "total_bots": len(bot_names),
-            "holes": int(holes),
-            "total_cells": int(total_cells),
-            "completeness": float(max(0.0, min(1.0, completeness))),
-            "row_meta": row_meta,
-            "candidate_bot": candidate_bot,
-            "candidate_idx": int(candidate_idx),
-        },
-        "candidate_row": matrix[candidate_idx] if candidate_idx >= 0 and candidate_idx < len(matrix) else [0] * lookback_cols,
+        "board_meta": board_meta,
+        "candidate_idx": int(candidate_idx),
+        "ready_bots": int(ready_bots),
+        "candidate_row": matrix[candidate_idx] if 0 <= candidate_idx < len(matrix) else [0] * lookback_cols,
     }
