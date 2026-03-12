@@ -5024,7 +5024,7 @@ def _boardgate_shadow_eval(bot: str, prob_live):
                 "regime_tag": "UNKNOWN",
                 "confidence_pattern": 0.0,
                 "model_ready": False,
-                "reason": "no_model_class",
+                "reason": "no_model",
             }
 
         fus = _board_fusion_mod.fuse_technical_with_board(
@@ -9926,7 +9926,7 @@ def maybe_retrain(force: bool = False):
                     grew_rel = bool(prev_n_meta > 0 and int(filas) >= int(round(prev_n_meta * (1.0 + float(TRAIN_REFRESH_MIN_GROWTH)))))
                     stale_by_time = bool(stale_secs >= float(TRAIN_REFRESH_STALE_MIN))
 
-                    if stale_by_time and (grew_abs or grew_rel):
+                    if stale_by_time and (grew_abs or grew_rel or (new_rows >= int(MIN_NEW_ROWS_FOR_TIME))):
                         trigger_reason = f"stale_override:{int(stale_secs)}s,+{new_rows}"
                     else:
                         _log_retrain_gate_once(
@@ -11027,7 +11027,7 @@ def mostrar_panel():
             b_reason = str(board_st.get("boardgate_reason", "init") or "init")
             if b_reason in ("low_data", "init"):
                 board_txt = "Board: low_data" if b_reason == "low_data" else "Board: warmup"
-            elif b_reason in ("no_model", "no_model_class", "joblib_missing"):
+            elif b_reason in ("no_model", "joblib_missing"):
                 board_txt = "Board: no_model"
             elif b_reason.startswith(("err:", "load_err:", "predict_err:")):
                 board_txt = "Board: err"
@@ -11269,6 +11269,7 @@ def mostrar_panel():
             decision_line = f"🧭 Decisión tick: P_diag={p_diag*100:.1f}% | P_model={p_model*100:.1f}% | P_oper={p_oper*100:.1f}% | modo={modo_score} | Bloqueo principal={principal_txt} | Dominante={dominant_tag}"
             print(padding + Fore.CYAN + decision_line)
             _runtime_audit_append(decision_line)
+            print(padding + Fore.CYAN + f"🔎 Dominante: {dominant_tag}")
             if bool(HUD_COMPACT_MODE):
                 print(padding + Fore.CYAN + f"📏 Umbrales: UNREL={unrel_thr_live*100:.0f}% | ROOF={roof_h*100:.1f}% | FLOOR={floor_h*100:.1f}% | CLASSIC={AUTO_REAL_THR_MIN*100:.0f}%")
             else:
