@@ -8471,12 +8471,25 @@ def _normalize_model_meta(meta: dict) -> dict:
         if k in m:
             m[k] = _to_float(m[k])
 
-    # 4) reliable como bool
+    # 4) bools/meta de honestidad
     m["reliable"] = bool(m.get("reliable", False))
+    m["warmup_mode"] = bool(m.get("warmup_mode", m["n_samples"] < int(TRAIN_WARMUP_MIN_ROWS)))
+    m["auc_applicable"] = bool(m.get("auc_applicable", False))
+    m["test_single_class"] = bool(m.get("test_single_class", False))
+    if (not m.get("auc_applicable", False)) and ("auc_reason" not in m):
+        m["auc_reason"] = "test_single_class" if bool(m.get("test_single_class", False)) else "auc_not_available"
 
     # 5) calibration string
     if "calibration" in m and m["calibration"] is None:
         m["calibration"] = "none"
+
+    # 6) backend explícito para evitar confusión de artefacto
+    if not str(m.get("backend", "") or "").strip():
+        fam = str(m.get("model_family", "") or "").lower()
+        if "sklearn" in fam or "logreg" in fam:
+            m["backend"] = "sklearn_logreg"
+        elif "xgboost" in fam or "xgb" in fam:
+            m["backend"] = "xgboost"
 
     return m
 
@@ -9785,6 +9798,9 @@ def _maybe_retrain_fallback_sklearn(force: bool = False):
             "pos": int(np.sum(yb == 1)),
             "neg": int(np.sum(yb == 0)),
             "auc": float(auc),
+            "auc_applicable": True,
+            "test_single_class": False,
+            "auc_reason": "ok",
             "brier": float(brier),
             "threshold": float(THR_DEFAULT),
             "reliable": bool(len(X) >= int(MIN_FIT_ROWS_PROD)),
@@ -10394,6 +10410,9 @@ def maybe_retrain(force: bool = False):
         except Exception:
             pass
 
+        test_single_class = bool((p_test is not None) and (len(np.unique(y_test)) < 2))
+        auc_reason = "ok" if auc_applicable else ("test_single_class" if test_single_class else "auc_not_available")
+
         # 14) TimeSeriesSplit REAL (CV AUC) sobre TRAIN_BASE (diagnóstico)
         cv_auc = None
         try:
@@ -10616,6 +10635,9 @@ def maybe_retrain(force: bool = False):
             "pos": int(np.sum(y == 1)),
             "neg": int(np.sum(y == 0)),
             "auc": float(auc),
+            "auc_applicable": bool(auc_applicable),
+            "test_single_class": bool(test_single_class),
+            "auc_reason": str(auc_reason),
             "f1": float(f1t),
             "brier": float(brier),
             "cv_auc": float(cv_auc) if isinstance(cv_auc, (int, float)) else None,
@@ -10725,7 +10747,10 @@ def maybe_retrain(force: bool = False):
         last_retrain_ts = float(now)
 
         try:
-            msg = f"✅ IA reentrenada | AUC={auc:.3f} F1={f1t:.3f} thr={thr:.2f} calib={calib_kind}"
+            auc_txt = f"{auc:.3f}" if bool(auc_applicable) else "N/A"
+            msg = f"✅ IA reentrenada | AUC={auc_txt} F1={f1t:.3f} thr={thr:.2f} calib={calib_kind}"
+            if (not bool(auc_applicable)) and str(auc_reason):
+                msg += f" | auc_reason={auc_reason}"
             if cv_auc is not None:
                 msg += f" | CV_AUC={cv_auc:.3f}"
             agregar_evento(msg)
@@ -11184,6 +11209,33 @@ def mostrar_panel():
                 else:
                     principal_txt = principal[0]
 
+            # Etiqueta dominante diagnóstica (solo observabilidad; no altera trading).
+            dominant_tag = "ALLOW"
+            try:
+                emb_live = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
+                emb_reason = str(emb_live.get("decision_reason", "") or "")
+                emb_soft = str(emb_live.get("soft_wait_reason", "") or "")
+                board_reason_h = str(estado_bots.get(mejor[0], {}).get("boardgate_reason", "") or "")
+                board_ready_h = bool(estado_bots.get(mejor[0], {}).get("boardgate_ready", False))
+                roof_def = max(0.0, float(roof_h) - float(best_prob))
+
+                if (not roof_ok) and (roof_def <= float(DYN_ROOF_NEAR_TOL)):
+                    dominant_tag = "ROOF_NEAR_MISS"
+                elif warmup_live:
+                    dominant_tag = "WARMUP_LOW_N"
+                elif (not board_ready_h) and board_reason_h in ("mod_missing", "no_model", "joblib_missing"):
+                    dominant_tag = "BOARD_MISSING"
+                elif (not board_ready_h) and board_reason_h == "low_data":
+                    dominant_tag = "BOARD_LOW_DATA"
+                elif (not confirm_ok):
+                    dominant_tag = "CONFIRM_PENDING"
+                elif "sin_candidatos" in emb_reason or "sin_candidatos" in emb_soft:
+                    dominant_tag = "NO_CANDIDATES"
+                elif principal is not None:
+                    dominant_tag = str(principal[0])
+            except Exception:
+                dominant_tag = ("ALLOW" if principal is None else str(principal[0]))
+
             # Histograma compacto del bloqueo dominante para ventana reciente.
             try:
                 principal_key = "ALLOW" if principal is None else str(principal[0])
@@ -11207,7 +11259,7 @@ def mostrar_panel():
                 print(padding + Fore.CYAN + f"🧪 Embudo: {funnel_txt}")
             if owner in BOT_NAMES:
                 principal_txt = f"{principal_txt} (solo nuevas entradas; REAL activo={owner})"
-            decision_line = f"🧭 Decisión tick: P_diag={p_diag*100:.1f}% | P_model={p_model*100:.1f}% | P_oper={p_oper*100:.1f}% | modo={modo_score} | Bloqueo principal={principal_txt}"
+            decision_line = f"🧭 Decisión tick: P_diag={p_diag*100:.1f}% | P_model={p_model*100:.1f}% | P_oper={p_oper*100:.1f}% | modo={modo_score} | Bloqueo principal={principal_txt} | Dominante={dominant_tag}"
             print(padding + Fore.CYAN + decision_line)
             _runtime_audit_append(decision_line)
             if bool(HUD_COMPACT_MODE):
