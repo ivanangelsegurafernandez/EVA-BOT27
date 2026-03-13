@@ -11541,7 +11541,7 @@ def mostrar_panel():
                     dominant_tag = "ROOF_NEAR_MISS"
                 elif warmup_live:
                     dominant_tag = "WARMUP_LOW_N"
-                elif (not board_ready_h) and board_reason_h in ("mod_missing", "no_model", "joblib_missing"):
+                elif (not board_ready_h) and board_reason_h in ("mod_missing", "mod_missing_shadow", "mod_missing_hard", "no_model", "joblib_missing"):
                     dominant_tag = "BOARD_MISSING"
                 elif (not board_ready_h) and board_reason_h == "low_data":
                     dominant_tag = "BOARD_LOW_DATA"
