@@ -13528,6 +13528,22 @@ def _mvrx_pattern_rank(patt: str) -> int:
     return 9
 
 
+def _mvrx_xc2_has_strong_preference(a: tuple, b: tuple, prev_gr: float, prev_gr_thr: float) -> bool:
+    """Preferencia fuerte conservadora para desempates xc==2."""
+    try:
+        sa = int(a[1]); sb = int(b[1])
+        ra = int(a[3]); rb = int(b[3])
+        if (sa - sb) >= 2:
+            return True
+        if (float(prev_gr) >= float(prev_gr_thr)) and (sa in (5, 6)) and (sb not in (5, 6)):
+            return True
+        if (ra < rb) and (rb == 9 or ra <= 2):
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
     st = _mvrx_state_defaults()
     st['mvrx_reason'] = 'no_board'
@@ -13622,6 +13638,7 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         patt = ''
         patt_rank = 9
         streak = 0
+        xc2_evals_map = {}
 
         if xc == 1:
             target_idx = int(xr[0])
@@ -13678,24 +13695,40 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
                 stx = int(mvrx_calc_row_streak_x(mat, int(ri), col))
                 ptx = mvrx_detect_row_pattern(mat, int(ri), col)
                 prk = _mvrx_pattern_rank(ptx)
-                evals.append((int(ri), stx, ptx, prk))
+                e = (int(ri), stx, ptx, prk)
+                evals.append(e)
+                xc2_evals_map[int(ri)] = e
 
             pick = None
             pref = [e for e in evals if e[1] in (5, 6)]
             if prev_gr >= float(MVRX_PREV_GREEN_RATIO_P2) and pref:
                 pref = sorted(pref, key=lambda e: (e[3], -e[1], e[0]))
                 if len(pref) >= 2 and pref[0][1] == pref[1][1] and pref[0][3] == pref[1][3] and pref[0][3] == 9:
-                    st['mvrx_block_reason'] = 'p2_ambiguous'
-                    st['mvrx_reason'] = 'p2_ambiguous'
-                    return st
-                pick = pref[0]
+                    e0, e1 = pref[0], pref[1]
+                    s01 = _mvrx_xc2_has_strong_preference(e0, e1, prev_gr, float(MVRX_PREV_GREEN_RATIO_P2))
+                    s10 = _mvrx_xc2_has_strong_preference(e1, e0, prev_gr, float(MVRX_PREV_GREEN_RATIO_P2))
+                    if (not s01) and (not s10) and int(cand_idx) in (int(e0[0]), int(e1[0])):
+                        pick = e0 if int(e0[0]) == int(cand_idx) else e1
+                    else:
+                        st['mvrx_block_reason'] = 'p2_ambiguous'
+                        st['mvrx_reason'] = 'p2_ambiguous'
+                        return st
+                else:
+                    pick = pref[0]
             else:
                 evals_sorted = sorted(evals, key=lambda e: (e[1], e[3], e[0]))
                 if len(evals_sorted) >= 2 and evals_sorted[0][1] == evals_sorted[1][1] and evals_sorted[0][3] == evals_sorted[1][3] and evals_sorted[0][3] == 9:
-                    st['mvrx_block_reason'] = 'p2_ambiguous'
-                    st['mvrx_reason'] = 'p2_ambiguous'
-                    return st
-                pick = evals_sorted[0] if evals_sorted else None
+                    e0, e1 = evals_sorted[0], evals_sorted[1]
+                    s01 = _mvrx_xc2_has_strong_preference(e0, e1, prev_gr, float(MVRX_PREV_GREEN_RATIO_P2))
+                    s10 = _mvrx_xc2_has_strong_preference(e1, e0, prev_gr, float(MVRX_PREV_GREEN_RATIO_P2))
+                    if (not s01) and (not s10) and int(cand_idx) in (int(e0[0]), int(e1[0])):
+                        pick = e0 if int(e0[0]) == int(cand_idx) else e1
+                    else:
+                        st['mvrx_block_reason'] = 'p2_ambiguous'
+                        st['mvrx_reason'] = 'p2_ambiguous'
+                        return st
+                else:
+                    pick = evals_sorted[0] if evals_sorted else None
 
             if pick is None:
                 st['mvrx_block_reason'] = 'p2_ambiguous'
@@ -13727,14 +13760,28 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         st['mvrx_pattern_rank'] = int(patt_rank)
 
         if target_idx >= 0 and target_idx != int(cand_idx):
-            st['mvrx_target_idx_mismatch'] = True
-            st['mvrx_block_reason'] = 'target_idx_mismatch'
-            st['mvrx_reason'] = f'target={int(target_idx)}!=candidate={int(cand_idx)}'
-            st['mvrx_tier'] = 'NONE'
-            st['mvrx_priority_class'] = 'NONE'
-            st['mvrx_real_eligible'] = False
-            st['mvrx_score'] = 0.0
-            return st
+            if int(xc) == 2 and int(cand_idx) in [int(v) for v in list(xr or [])]:
+                cand_eval = xc2_evals_map.get(int(cand_idx), None)
+                pick_eval = xc2_evals_map.get(int(target_idx), None)
+                if isinstance(cand_eval, tuple) and isinstance(pick_eval, tuple):
+                    pref_target = _mvrx_xc2_has_strong_preference(pick_eval, cand_eval, prev_gr, float(MVRX_PREV_GREEN_RATIO_P2))
+                    pref_cand = _mvrx_xc2_has_strong_preference(cand_eval, pick_eval, prev_gr, float(MVRX_PREV_GREEN_RATIO_P2))
+                    if (not pref_target) and (not pref_cand):
+                        target_idx, streak, patt, patt_rank = int(cand_eval[0]), int(cand_eval[1]), str(cand_eval[2]), int(cand_eval[3])
+                        st['mvrx_target_idx'] = int(target_idx)
+                        st['mvrx_streak'] = int(streak)
+                        st['mvrx_pattern'] = str(patt)
+                        st['mvrx_pattern_rank'] = int(patt_rank)
+
+            if target_idx >= 0 and target_idx != int(cand_idx):
+                st['mvrx_target_idx_mismatch'] = True
+                st['mvrx_block_reason'] = 'target_idx_mismatch'
+                st['mvrx_reason'] = f'target={int(target_idx)}!=candidate={int(cand_idx)}'
+                st['mvrx_tier'] = 'NONE'
+                st['mvrx_priority_class'] = 'NONE'
+                st['mvrx_real_eligible'] = False
+                st['mvrx_score'] = 0.0
+                return st
 
         if block:
             st['mvrx_ok'] = False
