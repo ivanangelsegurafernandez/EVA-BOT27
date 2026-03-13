@@ -272,12 +272,20 @@ MVRX_P3_ENABLE = True
 MVRX_SHADOW_ONLY = False
 MVRX_P3_REAL_DISABLED = True
 MVRX_VALID_PATTERNS = {"RGRGR", "RRRR", "GRGR"}
+MVRX_RELAXED_ENABLE = True
+MVRX_RELAXED_GREEN_RATIO_MIN = 0.72
+MVRX_RELAXED_STREAK2_GREEN_RATIO_MIN = 0.75
+MVRX_RELAXED_STREAK_EARLY = 2
+MVRX_RELAXED_REQUIRE_PATTERN_FOR_STREAK2 = True
+MVRX_RELAXED_MICRO_ONLY = True
+MVRX_RELAXED_SCORE_BONUS_PATTERN = 0.05
 
 # === MVRX Debug / Observabilidad ===
 MVRX_DEBUG_ENABLE = True
 MVRX_DEBUG_VERBOSE = True
 MVRX_DEBUG_CSV_ENABLE = True
 MVRX_DEBUG_CSV_PATH = "mvrx_debug_log.csv"
+MVRX_AUDIT_CSV_PATH = "mvrx_board_audit_log.csv"
 MVRX_WARMUP_DEMO_ASSIST = True
 MVRX_WARMUP_DEMO_ASSIST_SHADOW_ONLY = True
 
@@ -312,6 +320,18 @@ def _mvrx_state_defaults() -> dict:
         "mvrx_pattern_rank": 9,
         "mvrx_prev_green_ratio": 0.0,
         "mvrx_real_eligible": False,
+        "mvrx_board_available": False,
+        "mvrx_board_rows": 0,
+        "mvrx_board_cols": 0,
+        "mvrx_selected_col_idx": -1,
+        "mvrx_selected_col_raw": "",
+        "mvrx_selected_col_is_closed": None,
+        "mvrx_filas_activas_count": 0,
+        "mvrx_target_idx_mismatch": False,
+        "mvrx_mode": "NONE",
+        "mvrx_relaxed_hit": False,
+        "mvrx_relaxed_reason": "",
+        "mvrx_micro_only": False,
     }
 
 
@@ -13194,6 +13214,25 @@ def mvrx_count_x_in_col(board_matrix: list, col_idx: int) -> int:
     return len(mvrx_find_x_rows(board_matrix, col_idx))
 
 
+def mvrx_col_summary(board_matrix: list, col_idx: int) -> tuple[int, int, str]:
+    g = 0
+    r = 0
+    n = 0
+    for row in board_matrix:
+        if not isinstance(row, list) or col_idx < 0 or col_idx >= len(row):
+            continue
+        c = _mvrx_norm_cell(row[col_idx])
+        if c == 'G':
+            g += 1
+        elif c == 'R':
+            r += 1
+        else:
+            n += 1
+    active = int(g + r)
+    raw = f"G:{g}|R:{r}|N:{n}"
+    return active, int(r), raw
+
+
 def mvrx_find_x_rows(board_matrix: list, col_idx: int) -> list:
     out = []
     for i, r in enumerate(board_matrix):
@@ -13268,23 +13307,30 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             return st
 
         mat = mvrx_get_effective_matrix(board)
+        st['mvrx_board_available'] = bool(mat)
+        st['mvrx_board_rows'] = int(len(mat)) if isinstance(mat, list) else 0
+        st['mvrx_board_cols'] = int(max((len(r) for r in mat if isinstance(r, list)), default=0)) if isinstance(mat, list) else 0
         if not mat:
             st['mvrx_block_reason'] = 'board_empty'
             st['mvrx_reason'] = 'board_empty'
             return st
         col = mvrx_get_rightmost_live_col(mat)
+        st['mvrx_selected_col_idx'] = int(col)
         if col < 0:
             st['mvrx_block_reason'] = 'no_live_col'
             st['mvrx_reason'] = 'no_live_col'
             return st
 
+        active_rows, xc, col_raw = mvrx_col_summary(mat, col)
         gr = float(mvrx_calc_green_ratio(mat, col))
         prev_gr = float(mvrx_calc_green_ratio(mat, col - 1)) if col > 0 else 0.0
         xr = mvrx_find_x_rows(mat, col)
-        xc = len(xr)
         st['mvrx_green_ratio'] = gr
         st['mvrx_prev_green_ratio'] = prev_gr
         st['mvrx_x_count'] = int(xc)
+        st['mvrx_filas_activas_count'] = int(active_rows)
+        st['mvrx_selected_col_raw'] = str(col_raw)
+        st['mvrx_selected_col_is_closed'] = True
 
         bmeta = board.get('board_meta', {}) if isinstance(board, dict) else {}
         cand_idx = -1
@@ -13343,12 +13389,39 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
                 tier = 'P1'
                 reason = 'p1_core'
                 score = float(MVRX_P1_BASE_SCORE + (gr - MVRX_GREEN_RATIO_P1) * 0.25)
+                st['mvrx_mode'] = 'STRICT'
+                st['mvrx_micro_only'] = False
+            elif bool(MVRX_RELAXED_ENABLE):
+                relaxed_a = bool(
+                    gr >= float(MVRX_RELAXED_STREAK2_GREEN_RATIO_MIN)
+                    and streak == int(MVRX_RELAXED_STREAK_EARLY)
+                    and ((not bool(MVRX_RELAXED_REQUIRE_PATTERN_FOR_STREAK2)) or (str(patt or '') in MVRX_VALID_PATTERNS))
+                )
+                relaxed_b = bool(
+                    (float(MVRX_RELAXED_GREEN_RATIO_MIN) <= gr < float(MVRX_GREEN_RATIO_P1))
+                    and (int(MVRX_STREAK_MIN_P1) <= streak <= int(MVRX_STREAK_MAX_P1))
+                )
+                if relaxed_a or relaxed_b:
+                    tier = 'P1'
+                    st['mvrx_mode'] = 'RELAXED'
+                    st['mvrx_relaxed_hit'] = True
+                    st['mvrx_relaxed_reason'] = 'relaxed_streak2_pattern' if relaxed_a else 'relaxed_green72_streak36'
+                    st['mvrx_micro_only'] = bool(MVRX_RELAXED_MICRO_ONLY)
+                    if relaxed_a:
+                        score = float(max(MVRX_P3_BASE_SCORE + 0.03, MVRX_P1_BASE_SCORE - 0.12))
+                    else:
+                        score = float(max(MVRX_P3_BASE_SCORE + 0.04, MVRX_P1_BASE_SCORE - 0.10 + max(0.0, gr - float(MVRX_RELAXED_GREEN_RATIO_MIN)) * 0.10))
+                    reason = st['mvrx_relaxed_reason']
             elif bool(MVRX_P3_ENABLE):
                 tier = 'P3'
                 reason = 'p3_explore'
                 score = float(MVRX_P3_BASE_SCORE + max(0.0, gr - MVRX_GREEN_RATIO_P2) * 0.10)
+
             if bool(MVRX_USE_PATTERN) and patt_rank < 9 and tier in ('P1', 'P2', 'P3'):
-                score += float(MVRX_PATTERN_BONUS)
+                bonus = float(MVRX_PATTERN_BONUS)
+                if tier == 'P1' and str(st.get('mvrx_mode', 'NONE') or 'NONE') == 'RELAXED':
+                    bonus = max(0.0, min(float(MVRX_PATTERN_BONUS), float(MVRX_RELAXED_SCORE_BONUS_PATTERN)))
+                score += float(bonus)
                 reason = f'{reason}+pattern'
 
         elif xc == 2:
@@ -13406,6 +13479,7 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         st['mvrx_pattern_rank'] = int(patt_rank)
 
         if target_idx >= 0 and target_idx != int(cand_idx):
+            st['mvrx_target_idx_mismatch'] = True
             st['mvrx_block_reason'] = 'target_idx_mismatch'
             st['mvrx_reason'] = f'target={int(target_idx)}!=candidate={int(cand_idx)}'
             st['mvrx_tier'] = 'NONE'
@@ -13427,7 +13501,11 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         st['mvrx_ok'] = tier in ('P1', 'P2', 'P3')
         st['mvrx_tier'] = tier
         st['mvrx_priority_class'] = tier if tier in ('P1', 'P2', 'P3') else 'NONE'
+        if tier == 'P1' and str(st.get('mvrx_mode', 'NONE') or 'NONE') == 'NONE':
+            st['mvrx_mode'] = 'STRICT'
         st['mvrx_real_eligible'] = bool(tier in ('P1', 'P2'))
+        if not st['mvrx_real_eligible']:
+            st['mvrx_micro_only'] = False
         st['mvrx_score'] = float(max(0.0, min(1.0, score)))
         st['mvrx_reason'] = reason
         st['mvrx_block_reason'] = '' if st['mvrx_ok'] else 'no_tier'
@@ -13444,9 +13522,19 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
 def mvrx_rank_candidates(candidates: list) -> list:
     def keyf(c: dict):
         tier = str(c.get('mvrx_tier', 'NONE') or 'NONE')
-        t_rank = {'P1': 0, 'P2': 1, 'P3': 2}.get(tier, 9)
+        mode = str(c.get('mvrx_mode', 'NONE') or 'NONE')
+        if tier == 'P1' and mode == 'STRICT':
+            t_rank = 0
+        elif tier == 'P1' and mode == 'RELAXED':
+            t_rank = 1
+        elif tier == 'P2':
+            t_rank = 2
+        elif tier == 'P3':
+            t_rank = 3
+        else:
+            t_rank = 9
         pattern_rank = int(c.get('mvrx_pattern_rank', 9) or 9)
-        if t_rank != 0:
+        if t_rank not in (0, 1):
             pattern_rank = 9
         score_final = float(c.get('score_final', c.get('mvrx_score', 0.0)) or 0.0)
         mvrx_score = float(c.get('mvrx_score', 0.0) or 0.0)
@@ -13559,10 +13647,40 @@ def _mvrx_debug_columns() -> list[str]:
         "funnel_state","safe_to_operate","owner_lock_block","cooldown_block","balance_block","hard_block_reason",
         "root_block_layer","root_block_reason","would_demo_assist_enter","would_demo_assist_mode",
         "signal_source","signal_tier","srx_ok","srx_tier","srx_score","srx_reason","srx_block_reason",
-        "top1_mvrx_tier","top1_pattern","top1_pattern_rank","top1_real_eligible",
+        "top1_mvrx_tier","top1_mvrx_mode","top1_relaxed_reason","top1_micro_only","top1_pattern","top1_pattern_rank","top1_real_eligible",
         "ctt_status","ctt_regime","ctt_gate","dyn_allow_real","dyn_trigger_ok","dyn_confirm_ok",
         "embudo_decision","embudo_reason_final","final_block_reason","reason_source"
     ]
+
+
+def mvrx_audit_log_event(row: dict) -> None:
+    if not bool(MVRX_DEBUG_ENABLE):
+        return
+    try:
+        gr = float(row.get("green_ratio", row.get("mvrx_green_ratio", 0.0)) or 0.0)
+        xc = int(row.get("x_count", row.get("mvrx_x_count", 0)) or 0)
+        tier = str(row.get("mvrx_tier", "NONE") or "NONE")
+        b_av = bool(row.get("board_available", False))
+        blk = str(row.get("mvrx_block_reason", "") or "")
+        sin_cands = str(row.get("embudo_reason_final", "") or "")
+        relevant = (gr >= 0.67) or (xc in (1, 2)) or (tier in ("P1", "P2", "P3")) or (not b_av) or ("sin_candidatos" in sin_cands)
+        if not relevant:
+            return
+        cols = [
+            "ts","tick_id","bot","board_available","board_rows","board_cols","selected_col_idx",
+            "selected_col_is_closed","selected_col_raw","filas_activas_count","green_ratio","x_count",
+            "candidate_idx","target_idx","target_idx_mismatch","streak","pattern","mvrx_tier",
+            "mvrx_priority_class","mvrx_mode","mvrx_relaxed_hit","mvrx_relaxed_reason","mvrx_micro_only","mvrx_reason","mvrx_block_reason","ctt_gate","embudo_decision",
+            "embudo_reason_final","final_block_reason"
+        ]
+        write_header = (not os.path.exists(MVRX_AUDIT_CSV_PATH))
+        with open(MVRX_AUDIT_CSV_PATH, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            if write_header:
+                w.writeheader()
+            w.writerow({c: row.get(c, "") for c in cols})
+    except Exception:
+        pass
 
 
 def mvrx_debug_log_event(row: dict) -> None:
@@ -14121,6 +14239,9 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
         "srx_reason": "",
         "srx_block_reason": "",
         "top1_mvrx_tier": "NONE",
+        "top1_mvrx_mode": "NONE",
+        "top1_relaxed_reason": "",
+        "top1_micro_only": False,
         "top1_pattern": "",
         "top1_pattern_rank": 9,
         "top1_real_eligible": False,
@@ -14175,6 +14296,9 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         signal_source = str(top1.get("signal_source", "MVRX") or "MVRX") if isinstance(top1, dict) else "MVRX"
         mvrx_ok = bool(top1.get("mvrx_ok", False)) if isinstance(top1, dict) else False
         mvrx_tier = str(top1.get("mvrx_tier", "NONE") or "NONE") if isinstance(top1, dict) else "NONE"
+        mvrx_mode = str(top1.get("mvrx_mode", "NONE") or "NONE") if isinstance(top1, dict) else "NONE"
+        mvrx_micro_only = bool(top1.get("mvrx_micro_only", False)) if isinstance(top1, dict) else False
+        mvrx_relaxed_reason = str(top1.get("mvrx_relaxed_reason", "") or "") if isinstance(top1, dict) else ""
         srx_ok = bool(top1.get("srx_ok", False)) if isinstance(top1, dict) else False
         srx_tier = str(top1.get("srx_tier", "NONE") or "NONE") if isinstance(top1, dict) else "NONE"
         if signal_source == "MVRX" and not mvrx_ok:
@@ -14321,6 +14445,15 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         except Exception:
             pass
 
+        # Política RELAXED: nunca permitir REAL_NORMAL; como máximo REAL_MICRO.
+        if signal_source == "MVRX" and mvrx_tier == "P1" and mvrx_mode == "RELAXED" and bool(mvrx_micro_only):
+            if decision == EMBUDO_FINAL_REAL_NORMAL:
+                decision = EMBUDO_FINAL_REAL_MICRO
+                risk_mode = "REAL_MICRO"
+                if degrade_from == "none":
+                    degrade_from = "relaxed_micro_only"
+                reason = "relaxed_micro_only"
+
         # Política operativa P3 (flag explícito): exploratoria, nunca REAL.
         if bool(MVRX_P3_REAL_DISABLED) and mvrx_tier == "P3" and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
             decision = EMBUDO_FINAL_SHADOW_OK
@@ -14375,6 +14508,10 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "mvrx_score": float(top1.get("mvrx_score", 0.0) or 0.0) if isinstance(top1, dict) else 0.0,
             "mvrx_reason": str(top1.get("mvrx_reason", "") or "") if isinstance(top1, dict) else "",
             "mvrx_block_reason": str(top1.get("mvrx_block_reason", "") or "") if isinstance(top1, dict) else "",
+            "mvrx_mode": mvrx_mode,
+            "mvrx_relaxed_hit": bool(top1.get("mvrx_relaxed_hit", False)) if isinstance(top1, dict) else False,
+            "mvrx_relaxed_reason": mvrx_relaxed_reason,
+            "mvrx_micro_only": bool(mvrx_micro_only),
             "signal_source": signal_source,
             "signal_tier": str(top1.get("signal_tier", "") or "") if isinstance(top1, dict) else "",
             "srx_tier": srx_tier,
@@ -14382,6 +14519,9 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "srx_reason": str(top1.get("srx_reason", "") or "") if isinstance(top1, dict) else "",
             "srx_block_reason": str(top1.get("srx_block_reason", "") or "") if isinstance(top1, dict) else "",
             "top1_mvrx_tier": mvrx_tier,
+            "top1_mvrx_mode": mvrx_mode,
+            "top1_relaxed_reason": mvrx_relaxed_reason,
+            "top1_micro_only": bool(mvrx_micro_only),
             "top1_pattern": str(top1.get("mvrx_pattern", "") or "") if isinstance(top1, dict) else "",
             "top1_pattern_rank": int(top1.get("mvrx_pattern_rank", 9) or 9) if isinstance(top1, dict) else 9,
             "top1_real_eligible": bool(top1.get("mvrx_real_eligible", False)) if isinstance(top1, dict) else False,
@@ -15532,6 +15672,41 @@ async def main():
                                     if k.startswith("srx_"):
                                         st_bot[k] = v
                                 mvrx_blk = str(mvrx.get("mvrx_block_reason", "") or "")
+                                try:
+                                    st_bot["mvrx_tick_id"] = int(st_bot.get("mvrx_tick_id", 0) or 0) + 1
+                                    mvrx_audit_log_event({
+                                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "tick_id": int(st_bot.get("mvrx_tick_id", 0) or 0),
+                                        "bot": b,
+                                        "board_available": bool(mvrx.get("mvrx_board_available", False)),
+                                        "board_rows": int(mvrx.get("mvrx_board_rows", 0) or 0),
+                                        "board_cols": int(mvrx.get("mvrx_board_cols", 0) or 0),
+                                        "selected_col_idx": int(mvrx.get("mvrx_selected_col_idx", -1) or -1),
+                                        "selected_col_is_closed": mvrx.get("mvrx_selected_col_is_closed", None),
+                                        "selected_col_raw": str(mvrx.get("mvrx_selected_col_raw", "") or ""),
+                                        "filas_activas_count": int(mvrx.get("mvrx_filas_activas_count", 0) or 0),
+                                        "green_ratio": float(mvrx.get("mvrx_green_ratio", 0.0) or 0.0),
+                                        "x_count": int(mvrx.get("mvrx_x_count", 0) or 0),
+                                        "candidate_idx": int(mvrx.get("mvrx_candidate_idx", -1) or -1),
+                                        "target_idx": int(mvrx.get("mvrx_target_idx", -1) or -1),
+                                        "target_idx_mismatch": bool(mvrx.get("mvrx_target_idx_mismatch", False)),
+                                        "streak": int(mvrx.get("mvrx_streak", 0) or 0),
+                                        "pattern": str(mvrx.get("mvrx_pattern", "") or ""),
+                                        "mvrx_tier": str(mvrx.get("mvrx_tier", "NONE") or "NONE"),
+                                        "mvrx_priority_class": str(mvrx.get("mvrx_priority_class", "NONE") or "NONE"),
+                                        "mvrx_mode": str(mvrx.get("mvrx_mode", "NONE") or "NONE"),
+                                        "mvrx_relaxed_hit": bool(mvrx.get("mvrx_relaxed_hit", False)),
+                                        "mvrx_relaxed_reason": str(mvrx.get("mvrx_relaxed_reason", "") or ""),
+                                        "mvrx_micro_only": bool(mvrx.get("mvrx_micro_only", False)),
+                                        "mvrx_reason": str(mvrx.get("mvrx_reason", "") or ""),
+                                        "mvrx_block_reason": str(mvrx_blk),
+                                        "ctt_gate": "",
+                                        "embudo_decision": "",
+                                        "embudo_reason_final": "",
+                                        "final_block_reason": "",
+                                    })
+                                except Exception:
+                                    pass
                                 if mvrx_blk in ("board_unavailable", "board_empty", "candidate_idx_missing"):
                                     try:
                                         agregar_evento(f"🧱 MVRX {b}: {mvrx_blk}")
@@ -15806,6 +15981,10 @@ async def main():
                                 "mvrx_score": float(top_dbg.get("mvrx_score", 0.0) or 0.0),
                                 "mvrx_reason": str(top_dbg.get("mvrx_reason", "") or ""),
                                 "mvrx_block_reason": str(top_dbg.get("mvrx_block_reason", "") or ""),
+                                "mvrx_mode": str(top_dbg.get("mvrx_mode", "NONE") or "NONE"),
+                                "mvrx_relaxed_hit": bool(top_dbg.get("mvrx_relaxed_hit", False)),
+                                "mvrx_relaxed_reason": str(top_dbg.get("mvrx_relaxed_reason", "") or ""),
+                                "mvrx_micro_only": bool(top_dbg.get("mvrx_micro_only", False)),
                                 "mvrx_green_ratio": float(top_dbg.get("mvrx_green_ratio", 0.0) or 0.0),
                                 "mvrx_x_count": int(top_dbg.get("mvrx_x_count", 0) or 0),
                                 "mvrx_streak": int(top_dbg.get("mvrx_streak", 0) or 0),
@@ -15835,6 +16014,9 @@ async def main():
                                 "signal_source": str(top_dbg.get("signal_source", "MVRX") or "MVRX"),
                                 "signal_tier": str(top_dbg.get("signal_tier", "") or ""),
                                 "top1_mvrx_tier": str(top_dbg.get("mvrx_tier", "NONE") or "NONE"),
+                                "top1_mvrx_mode": str(top_dbg.get("mvrx_mode", "NONE") or "NONE"),
+                                "top1_relaxed_reason": str(top_dbg.get("mvrx_relaxed_reason", "") or ""),
+                                "top1_micro_only": bool(top_dbg.get("mvrx_micro_only", False)),
                                 "top1_pattern": str(top_dbg.get("mvrx_pattern", "") or ""),
                                 "top1_pattern_rank": int(top_dbg.get("mvrx_pattern_rank", 9) or 9),
                                 "top1_real_eligible": bool(top_dbg.get("mvrx_real_eligible", False)),
@@ -15853,8 +16035,23 @@ async def main():
                                 "srx_score": float(top_dbg.get("srx_score", 0.0) or 0.0),
                                 "srx_reason": str(top_dbg.get("srx_reason", "") or ""),
                                 "srx_block_reason": str(top_dbg.get("srx_block_reason", "") or ""),
+                                "board_available": bool(top_dbg.get("mvrx_board_available", False)),
+                                "board_rows": int(top_dbg.get("mvrx_board_rows", 0) or 0),
+                                "board_cols": int(top_dbg.get("mvrx_board_cols", 0) or 0),
+                                "selected_col_idx": int(top_dbg.get("mvrx_selected_col_idx", -1) or -1),
+                                "selected_col_is_closed": top_dbg.get("mvrx_selected_col_is_closed", None),
+                                "selected_col_raw": str(top_dbg.get("mvrx_selected_col_raw", "") or ""),
+                                "filas_activas_count": int(top_dbg.get("mvrx_filas_activas_count", 0) or 0),
+                                "green_ratio": float(top_dbg.get("mvrx_green_ratio", 0.0) or 0.0),
+                                "x_count": int(top_dbg.get("mvrx_x_count", 0) or 0),
+                                "candidate_idx": int(top_dbg.get("mvrx_candidate_idx", -1) or -1),
+                                "target_idx": int(top_dbg.get("mvrx_target_idx", -1) or -1),
+                                "target_idx_mismatch": bool(top_dbg.get("mvrx_target_idx_mismatch", False)),
+                                "streak": int(top_dbg.get("mvrx_streak", 0) or 0),
+                                "pattern": str(top_dbg.get("mvrx_pattern", "") or ""),
                             }
                             mvrx_debug_log_event(row_dbg)
+                            mvrx_audit_log_event(row_dbg)
                         except Exception:
                             pass
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
