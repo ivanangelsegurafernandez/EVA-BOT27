@@ -5017,6 +5017,7 @@ def _apply_boardgate_defaults(st: dict, reason: str = "init") -> None:
 
 _BOARDGATE_LOG_REASON_TS = {}
 _BOARDGATE_MODEL_SINGLETON = None
+_MVRX_BOARD_LOG_TS = {"ts": 0.0, "key": ""}
 
 
 def _board_audit_runtime_emit(payload: dict) -> None:
@@ -5244,8 +5245,24 @@ def _boardgate_shadow_eval(bot: str, prob_live):
         pass
 
     if _board_state_mod is None or _board_features_mod is None or _board_fusion_mod is None:
-        st["boardgate_reason"] = "mod_missing"
+        miss_reason = "mod_missing" if bool(BOARDGATE_SHADOW_MODE) else "mod_missing_hard"
+        st["boardgate_reason"] = str(miss_reason)
+        st["board_source_used"] = "none"
+        st["board_source_reason"] = "mod_missing"
+        st["boardgate_ready"] = False
         _boardgate_log_reason(bot, "mod_missing")
+        _board_audit_runtime_emit({
+            "tick_id": int(st.get("tick_id", 0) or 0),
+            "bot": str(bot or ""),
+            "board_source_used": st.get("board_source_used", "none"),
+            "board_source_reason": st.get("board_source_reason", ""),
+            "board_ready_bots": st.get("board_ready_bots", 0),
+            "board_rows": st.get("board_rows", 0),
+            "board_cols": st.get("board_cols", 0),
+            "board_partial": st.get("board_partial", False),
+            "boardgate_ready": st.get("boardgate_ready", False),
+            "boardgate_reason": st.get("boardgate_reason", ""),
+        })
         return
 
     try:
@@ -9334,9 +9351,9 @@ def get_umbral_operativo(meta: dict | None = None) -> float:
     """
     Umbral único de operación IA (HUD, audio, selección).
 
-    Regla dura:
+    Regla operativa conservadora:
     - Si el modelo NO es confiable, si el AUC es bajo, o si hay pocos samples,
-      se bloquea cualquier señal (umbral ~ imposible).
+      se eleva el umbral sin forzar candado extremo permanente.
     """
     base_thr = get_threshold_sugerido(IA_METRIC_THRESHOLD)
     if base_thr < IA_METRIC_THRESHOLD:
@@ -9376,10 +9393,11 @@ def get_umbral_operativo(meta: dict | None = None) -> float:
     except Exception:
         pass
 
-    # 🔒 BLOQUEO DE SEÑALES CUANDO ES EXPERIMENTAL / BAJO DATOS
+    # 🔒 Semáforo ultraconservador (auditoría/UI), NO candado operativo total.
     MIN_AUC_GREEN = 0.55  # “al menos no somos un dado”
     if (not reliable) or (n_samples < MIN_FIT_ROWS_PROD) or (auc < MIN_AUC_GREEN):
-        return 0.99
+        thr_oper = float(max(_umbral_real_operativo_actual(), thr))
+        return float(min(0.95, max(ORACULO_THR_MIN, thr_oper)))
 
     return thr
 # =========================================================
@@ -13333,29 +13351,50 @@ def _umbral_unrel_operativo(best_bot: str | None, best_prob: float | None = None
 def mvrx_build_live_board(bot: str) -> dict:
     if not bool(MVRX_ENABLE):
         return {"__mvrx_board_error": "mvrx_disabled"}
-    global _board_state_mod
+    global _board_state_mod, _MVRX_BOARD_LOG_TS
     try:
         if _board_state_mod is None:
             _board_state_mod = _load_optional_module("board_state")
-        if _board_state_mod is None:
-            return {"__mvrx_board_error": "board_unavailable"}
+
+        fallback_activated = bool(_board_state_mod is None)
         board, source_used, source_reason = _select_operational_board(
             candidate_bot=bot,
             lookback_cols=int(BOARDGATE_LOOKBACK_COLS),
             csv_dir='.',
         )
         if not isinstance(board, dict):
-            return {"__mvrx_board_error": "board_unavailable"}
+            return {"__mvrx_board_error": "board_unavailable", "board_source_used": "none", "board_source_reason": "invalid_board_obj"}
         bmeta = board.get("board_meta", {}) if isinstance(board, dict) else {}
         if isinstance(bmeta, dict):
             bmeta["source_used"] = str(source_used or "none")
             bmeta["source_reason"] = str(source_reason or "")
+            bmeta["fallback_activated"] = bool(fallback_activated)
+            bmeta["rows"] = int(len(board.get("board_matrix", []))) if isinstance(board.get("board_matrix", []), list) else 0
+            bmeta["cols"] = int(max((len(r) for r in board.get("board_matrix", []) if isinstance(r, list)), default=0)) if isinstance(board.get("board_matrix", []), list) else 0
             board["board_meta"] = bmeta
         board["board_source_used"] = str(source_used or "none")
         board["board_source_reason"] = str(source_reason or "")
+        board["board_fallback_activated"] = bool(fallback_activated)
+
+        err = str(board.get("__mvrx_board_error", "") or "")
+        log_key = f"{source_used}|{source_reason}|{err}|fb={int(fallback_activated)}"
+        now = time.time()
+        if (log_key != str(_MVRX_BOARD_LOG_TS.get("key", ""))) or ((now - float(_MVRX_BOARD_LOG_TS.get("ts", 0.0) or 0.0)) >= 45.0):
+            rows = int(len(board.get("board_matrix", []))) if isinstance(board.get("board_matrix", []), list) else 0
+            cols = int(max((len(r) for r in board.get("board_matrix", []) if isinstance(r, list)), default=0)) if isinstance(board.get("board_matrix", []), list) else 0
+            ready = int(((board.get("board_meta", {}) or {}).get("ready_bots", 0)) or 0)
+            msg = (
+                f"🧭 MVRX board src={source_used or 'none'} reason={source_reason or 'na'} "
+                f"fallback={'sí' if fallback_activated else 'no'} ready={ready} rows={rows} cols={cols}"
+            )
+            if err:
+                msg += f" err={err}"
+            agregar_evento(msg)
+            _MVRX_BOARD_LOG_TS = {"ts": now, "key": log_key}
+
         return board
-    except Exception:
-        return {"__mvrx_board_error": "board_unavailable"}
+    except Exception as e:
+        return {"__mvrx_board_error": "board_unavailable", "board_source_used": "none", "board_source_reason": f"exception:{type(e).__name__}"}
 
 
 def mvrx_get_effective_matrix(board: dict) -> list:
