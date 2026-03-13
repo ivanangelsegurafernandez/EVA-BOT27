@@ -248,6 +248,8 @@ BOARDGATE_LOOKBACK_COLS = 16
 BOARDGATE_RIGHT_EDGE_COLS = 4
 BOARDGATE_RIGHT_EDGE_COLS_WIDE = 6
 BOARDGATE_MIN_READY_BOTS = 6
+BOARD_MATRIX_MEMORY_BRIDGE_ENABLE = True
+BOARD_MATRIX_MIN_READY_BOTS_MEMORY = 4
 BOARDGATE_LOG_COOLDOWN_S = 20.0
 BOARDGATE_MODEL_PATH = "boardgate_model.pkl"
 BOARDGATE_SCALER_PATH = "boardgate_scaler.pkl"
@@ -332,6 +334,8 @@ def _mvrx_state_defaults() -> dict:
         "mvrx_relaxed_hit": False,
         "mvrx_relaxed_reason": "",
         "mvrx_micro_only": False,
+        "mvrx_board_source_used": "none",
+        "mvrx_board_source_reason": "",
     }
 
 
@@ -1306,6 +1310,12 @@ estado_bots = {
         "boardgate_reason": "init",
         "boardgate_prob_final_preview": None,
         "boardgate_block_preview": "",
+        "board_source_used": "none",
+        "board_source_reason": "init",
+        "board_ready_bots": 0,
+        "board_rows": 0,
+        "board_cols": 0,
+        "board_partial": False,
         **_mvrx_state_defaults(),
         **_srx_state_defaults(),
     }
@@ -4986,6 +4996,12 @@ def _boardgate_defaults(reason: str = "init") -> dict:
         "boardgate_reason": str(reason or "init"),
         "boardgate_prob_final_preview": None,
         "boardgate_block_preview": "",
+        "board_source_used": "none",
+        "board_source_reason": "init",
+        "board_ready_bots": 0,
+        "board_rows": 0,
+        "board_cols": 0,
+        "board_partial": False,
         **_mvrx_state_defaults(),
         **_srx_state_defaults(),
     }
@@ -5042,6 +5058,121 @@ def _boardgate_log_reason(bot: str, reason: str) -> None:
         pass
 
 
+def _build_board_from_memory(candidate_bot: str | None, lookback_cols: int) -> dict:
+    lookback_cols = max(4, int(lookback_cols or 16))
+    names = list(BOT_NAMES or [])
+    matrix = []
+    row_meta = {}
+    for bot in names:
+        st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+        resultados = st.get("resultados", []) if isinstance(st, dict) else []
+        closes = []
+        if isinstance(resultados, list):
+            for r in resultados[-lookback_cols:]:
+                rr = str(r or "").strip().upper()
+                if rr == "GANANCIA":
+                    closes.append(1)
+                elif rr in ("PÉRDIDA", "PERDIDA"):
+                    closes.append(-1)
+        row = [0] * lookback_cols
+        if closes:
+            row[-len(closes):] = closes[-lookback_cols:]
+        matrix.append(row)
+        row_meta[str(bot)] = {
+            "source": "memory",
+            "available": len(closes),
+            "holes": max(0, lookback_cols - len(closes)),
+        }
+
+    candidate_idx = int(names.index(candidate_bot)) if candidate_bot in names else -1
+    ready_bots = sum(1 for b in names if int(row_meta.get(str(b), {}).get("available", 0) or 0) > 0)
+    board_meta = {
+        "lookback_cols": int(lookback_cols),
+        "ready_bots": int(ready_bots),
+        "total_bots": int(len(names)),
+        "row_meta": row_meta,
+        "candidate_bot": candidate_bot,
+        "candidate_idx": int(candidate_idx),
+        "source_used": "memory",
+    }
+    return {
+        "board_matrix": matrix,
+        "board_meta": board_meta,
+        "candidate_idx": int(candidate_idx),
+        "ready_bots": int(ready_bots),
+        "candidate_row": matrix[candidate_idx] if 0 <= candidate_idx < len(matrix) else [0] * lookback_cols,
+    }
+
+
+def _compose_hybrid_board(csv_board: dict, mem_board: dict, candidate_bot: str | None, lookback_cols: int) -> dict:
+    lookback_cols = max(4, int(lookback_cols or 16))
+    names = list(BOT_NAMES or [])
+    csv_mat = (csv_board or {}).get("board_matrix", []) if isinstance(csv_board, dict) else []
+    mem_mat = (mem_board or {}).get("board_matrix", []) if isinstance(mem_board, dict) else []
+    matrix = []
+    row_meta = {}
+    for i, bot in enumerate(names):
+        row_csv = csv_mat[i] if i < len(csv_mat) and isinstance(csv_mat[i], list) else [0] * lookback_cols
+        row_mem = mem_mat[i] if i < len(mem_mat) and isinstance(mem_mat[i], list) else [0] * lookback_cols
+        has_mem = any(int(x) != 0 for x in row_mem[-lookback_cols:])
+        row = list(row_mem[-lookback_cols:] if has_mem else row_csv[-lookback_cols:])
+        if len(row) < lookback_cols:
+            row = ([0] * (lookback_cols - len(row))) + row
+        matrix.append(row)
+        row_meta[str(bot)] = {
+            "source": "memory" if has_mem else "csv",
+            "available": int(sum(1 for x in row if int(x) != 0)),
+            "holes": int(sum(1 for x in row if int(x) == 0)),
+        }
+    candidate_idx = int(names.index(candidate_bot)) if candidate_bot in names else -1
+    ready_bots = sum(1 for b in names if int(row_meta.get(str(b), {}).get("available", 0) or 0) > 0)
+    board_meta = {
+        "lookback_cols": int(lookback_cols),
+        "ready_bots": int(ready_bots),
+        "total_bots": int(len(names)),
+        "row_meta": row_meta,
+        "candidate_bot": candidate_bot,
+        "candidate_idx": int(candidate_idx),
+        "source_used": "hybrid",
+    }
+    return {
+        "board_matrix": matrix,
+        "board_meta": board_meta,
+        "candidate_idx": int(candidate_idx),
+        "ready_bots": int(ready_bots),
+        "candidate_row": matrix[candidate_idx] if 0 <= candidate_idx < len(matrix) else [0] * lookback_cols,
+    }
+
+
+def _select_operational_board(candidate_bot: str, lookback_cols: int, csv_dir: str = ".") -> tuple[dict, str, str]:
+    board_csv = None
+    if _board_state_mod is not None:
+        board_csv = _board_state_mod.build_board_state(
+            bot_names=BOT_NAMES,
+            candidate_bot=candidate_bot,
+            lookback_cols=int(lookback_cols),
+            csv_dir=csv_dir,
+            status_normalizer=normalizar_trade_status,
+            result_normalizer=normalizar_resultado,
+        )
+    if not bool(BOARD_MATRIX_MEMORY_BRIDGE_ENABLE):
+        return (board_csv if isinstance(board_csv, dict) else {"__mvrx_board_error": "board_unavailable"}, "csv", "bridge_disabled")
+
+    board_mem = _build_board_from_memory(candidate_bot, int(lookback_cols))
+    csv_ready = int(((board_csv or {}).get("board_meta", {}) or {}).get("ready_bots", 0) if isinstance(board_csv, dict) else 0)
+    mem_ready = int(((board_mem or {}).get("board_meta", {}) or {}).get("ready_bots", 0) if isinstance(board_mem, dict) else 0)
+
+    if isinstance(board_csv, dict) and csv_ready >= int(BOARDGATE_MIN_READY_BOTS):
+        return board_csv, "csv", "csv_ready"
+    if mem_ready >= int(BOARD_MATRIX_MIN_READY_BOTS_MEMORY) and isinstance(board_csv, dict):
+        return _compose_hybrid_board(board_csv, board_mem, candidate_bot, int(lookback_cols)), "hybrid", "mem_bridge_low_csv"
+    if mem_ready >= int(BOARD_MATRIX_MIN_READY_BOTS_MEMORY):
+        return board_mem, "memory", "mem_ready"
+    if isinstance(board_csv, dict):
+        return board_csv, "csv", "csv_low_data"
+    return {"__mvrx_board_error": "board_unavailable"}, "none", "board_unavailable"
+
+
 def _boardgate_model_get():
     global _BOARDGATE_MODEL_SINGLETON, _board_model_mod
     if _BOARDGATE_MODEL_SINGLETON is not None:
@@ -5090,17 +5221,22 @@ def _boardgate_shadow_eval(bot: str, prob_live):
         return
 
     try:
-        board = _board_state_mod.build_board_state(
-            bot_names=BOT_NAMES,
+        board, source_used, source_reason = _select_operational_board(
             candidate_bot=bot,
             lookback_cols=int(BOARDGATE_LOOKBACK_COLS),
             csv_dir=".",
-            status_normalizer=normalizar_trade_status,
-            result_normalizer=normalizar_resultado,
         )
         bmeta = board.get("board_meta", {}) if isinstance(board, dict) else {}
         ready_bots = int(bmeta.get("ready_bots", 0) or 0)
-        if ready_bots < int(BOARDGATE_MIN_READY_BOTS):
+        rows = int(len(board.get("board_matrix", []))) if isinstance(board, dict) else 0
+        cols = int(max((len(r) for r in board.get("board_matrix", []) if isinstance(r, list)), default=0)) if isinstance(board, dict) else 0
+        st["board_source_used"] = str(source_used or "none")
+        st["board_source_reason"] = str(source_reason or "init")
+        st["board_ready_bots"] = int(ready_bots)
+        st["board_rows"] = int(rows)
+        st["board_cols"] = int(cols)
+        st["board_partial"] = bool(ready_bots < int(BOARDGATE_MIN_READY_BOTS))
+        if ready_bots < int(BOARD_MATRIX_MIN_READY_BOTS_MEMORY):
             st["boardgate_reason"] = "low_data"
             st["boardgate_ready"] = False
             return
@@ -11143,6 +11279,11 @@ def mostrar_panel():
                     f"BoardReady={ready_txt} | "
                     f"FusionPreview={((float(prev)*100.0) if isinstance(prev,(int,float)) else 0.0):.1f}%"
                 )
+                src_used = str(board_st.get("board_source_used", "none") or "none")
+                src_rsn = str(board_st.get("board_source_reason", "") or "")
+                board_txt += f" | Src={src_used}"
+                if src_rsn:
+                    board_txt += f"[{src_rsn}]"
                 if blk:
                     board_txt += f" ({blk})"
             print(padding + Fore.MAGENTA + f"🧩 {board_txt}")
@@ -13145,16 +13286,20 @@ def mvrx_build_live_board(bot: str) -> dict:
             _board_state_mod = _load_optional_module("board_state")
         if _board_state_mod is None:
             return {"__mvrx_board_error": "board_unavailable"}
-        board = _board_state_mod.build_board_state(
-            bot_names=BOT_NAMES,
+        board, source_used, source_reason = _select_operational_board(
             candidate_bot=bot,
             lookback_cols=int(BOARDGATE_LOOKBACK_COLS),
             csv_dir='.',
-            status_normalizer=normalizar_trade_status,
-            result_normalizer=normalizar_resultado,
         )
         if not isinstance(board, dict):
             return {"__mvrx_board_error": "board_unavailable"}
+        bmeta = board.get("board_meta", {}) if isinstance(board, dict) else {}
+        if isinstance(bmeta, dict):
+            bmeta["source_used"] = str(source_used or "none")
+            bmeta["source_reason"] = str(source_reason or "")
+            board["board_meta"] = bmeta
+        board["board_source_used"] = str(source_used or "none")
+        board["board_source_reason"] = str(source_reason or "")
         return board
     except Exception:
         return {"__mvrx_board_error": "board_unavailable"}
@@ -13306,6 +13451,8 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             st['mvrx_reason'] = board_err
             return st
 
+        st['mvrx_board_source_used'] = str(board.get('board_source_used', (board.get('board_meta', {}) or {}).get('source_used', 'none')) or 'none')
+        st['mvrx_board_source_reason'] = str(board.get('board_source_reason', (board.get('board_meta', {}) or {}).get('source_reason', '')) or '')
         mat = mvrx_get_effective_matrix(board)
         st['mvrx_board_available'] = bool(mat)
         st['mvrx_board_rows'] = int(len(mat)) if isinstance(mat, list) else 0
@@ -13670,6 +13817,7 @@ def mvrx_audit_log_event(row: dict) -> None:
             "ts","tick_id","bot","board_available","board_rows","board_cols","selected_col_idx",
             "selected_col_is_closed","selected_col_raw","filas_activas_count","green_ratio","x_count",
             "candidate_idx","target_idx","target_idx_mismatch","streak","pattern","mvrx_tier",
+            "board_source_used","board_source_reason",
             "mvrx_priority_class","mvrx_mode","mvrx_relaxed_hit","mvrx_relaxed_reason","mvrx_micro_only","mvrx_reason","mvrx_block_reason","ctt_gate","embudo_decision",
             "embudo_reason_final","final_block_reason"
         ]
@@ -15698,6 +15846,8 @@ async def main():
                                         "mvrx_relaxed_hit": bool(mvrx.get("mvrx_relaxed_hit", False)),
                                         "mvrx_relaxed_reason": str(mvrx.get("mvrx_relaxed_reason", "") or ""),
                                         "mvrx_micro_only": bool(mvrx.get("mvrx_micro_only", False)),
+                                        "board_source_used": str(mvrx.get("mvrx_board_source_used", "none") or "none"),
+                                        "board_source_reason": str(mvrx.get("mvrx_board_source_reason", "") or ""),
                                         "mvrx_reason": str(mvrx.get("mvrx_reason", "") or ""),
                                         "mvrx_block_reason": str(mvrx_blk),
                                         "ctt_gate": "",
@@ -15987,6 +16137,8 @@ async def main():
                                 "mvrx_micro_only": bool(top_dbg.get("mvrx_micro_only", False)),
                                 "mvrx_green_ratio": float(top_dbg.get("mvrx_green_ratio", 0.0) or 0.0),
                                 "mvrx_x_count": int(top_dbg.get("mvrx_x_count", 0) or 0),
+                                "board_source_used": str(top_dbg.get("mvrx_board_source_used", "none") or "none"),
+                                "board_source_reason": str(top_dbg.get("mvrx_board_source_reason", "") or ""),
                                 "mvrx_streak": int(top_dbg.get("mvrx_streak", 0) or 0),
                                 "mvrx_pattern": str(top_dbg.get("mvrx_pattern", "") or ""),
                                 "candidate_idx": int(top_dbg.get("mvrx_candidate_idx", -1) or -1),
