@@ -1,0 +1,10 @@
+# MVRX runtime ultra-audit evidence
+
+| tick_id | class | bot | board_source_used | board_source_reason | mvrx_board_available | mvrx_board_rows | mvrx_board_cols | mvrx_selected_col_idx | mvrx_selected_col_raw | mvrx_selected_col_is_closed | mvrx_filas_activas_count | mvrx_green_ratio | mvrx_x_count | mvrx_candidate_idx | mvrx_target_idx | mvrx_target_idx_mismatch | mvrx_streak | mvrx_pattern | mvrx_tier | mvrx_mode | mvrx_priority_class | mvrx_reason | mvrx_block_reason | embudo_decision | embudo_reason_final | final_block_reason |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | C1_xcount0 | b0 | memory | mem_ready | True | 6 | 3 | 2 | G:6|R:0|N:0 | True | 6 | 1.0 | 0 | 0 | -1 | False | 0 |  | NONE | NONE | NONE | x_count_0 | x_count_0 | WAIT_SOFT | sin_candidatos | sin_candidatos |
+| 2 | C2_green_low | b0 | hybrid | mem_bridge_low_csv | True | 6 | 2 | 1 | G:0|R:4|N:2 | True | 4 | 0.0 | 4 | 0 | -1 | False | 0 |  | NONE | NONE | NONE | green_ratio_low | green_ratio_low | WAIT_SOFT | sin_candidatos | sin_candidatos |
+| 3 | C3_candidate_missing | b0 | memory | mem_ready | True | 4 | 2 | 1 | G:3|R:1|N:0 | True | 4 | 0.75 | 1 | -1 | -1 | False | 0 |  | NONE | NONE | NONE | candidate_idx_missing | candidate_idx_missing | WAIT_SOFT | sin_candidatos | sin_candidatos |
+| 4 | C4_p1_expected | b0 | csv | csv_ready | True | 8 | 4 | 3 | G:7|R:1|N:0 | True | 8 | 0.875 | 1 | 0 | 0 | False | 3 | GRR | P1 | STRICT | P1 | p1_core |  | WAIT_SOFT | sin_candidatos | sin_candidatos |
+| 5 | C5_target_mismatch | b0 | csv | csv_ready | True | 8 | 4 | 3 | G:6|R:2|N:0 | True | 8 | 0.75 | 2 | 0 | 1 | True | 1 | GGG | NONE | NONE | NONE | target=1!=candidate=0 | target_idx_mismatch | WAIT_SOFT | sin_candidatos | sin_candidatos |
+| 6 | C6_x_ge_3 | b0 | csv | csv_ready | True | 8 | 2 | 1 | G:5|R:3|N:0 | True | 8 | 0.625 | 3 | 0 | -1 | False | 0 |  | NONE | NONE | NONE | green_ratio_low | green_ratio_low | WAIT_SOFT | sin_candidatos | sin_candidatos |
