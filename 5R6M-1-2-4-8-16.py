@@ -5019,6 +5019,31 @@ _BOARDGATE_LOG_REASON_TS = {}
 _BOARDGATE_MODEL_SINGLETON = None
 
 
+def _board_audit_runtime_emit(payload: dict) -> None:
+    """Instrumentación runtime opcional (sin impacto en decisiones)."""
+    try:
+        if str(os.environ.get("BOARD_AUDIT_RUNTIME", "0")).strip() not in ("1", "true", "TRUE", "on", "ON"):
+            return
+        row = dict(payload or {})
+        row.setdefault("ts", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        cols = [
+            "ts", "tick_id", "bot",
+            "board_source_used", "board_source_reason", "board_ready_bots", "board_rows", "board_cols", "board_partial",
+            "boardgate_ready", "boardgate_reason",
+            "mvrx_board_source_used", "mvrx_board_source_reason", "mvrx_board_available",
+            "mvrx_green_ratio", "mvrx_x_count", "mvrx_tier", "mvrx_reason", "mvrx_block_reason",
+            "embudo_decision", "embudo_reason_final", "final_block_reason",
+        ]
+        path = os.path.join(os.getcwd(), "board_audit_runtime.csv")
+        exists = os.path.exists(path)
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            if not exists:
+                w.writeheader()
+            w.writerow(row)
+    except Exception:
+        pass
+
 def _boardgate_prob_live(bot: str):
     p = _prob_ia_operativa_bot(bot, default=None)
     if isinstance(p, (int, float)):
@@ -5239,6 +5264,18 @@ def _boardgate_shadow_eval(bot: str, prob_live):
         if ready_bots < int(BOARD_MATRIX_MIN_READY_BOTS_MEMORY):
             st["boardgate_reason"] = "low_data"
             st["boardgate_ready"] = False
+            _board_audit_runtime_emit({
+                "tick_id": int(st.get("tick_id", 0) or 0),
+                "bot": str(bot or ""),
+                "board_source_used": st.get("board_source_used", "none"),
+                "board_source_reason": st.get("board_source_reason", ""),
+                "board_ready_bots": st.get("board_ready_bots", 0),
+                "board_rows": st.get("board_rows", 0),
+                "board_cols": st.get("board_cols", 0),
+                "board_partial": st.get("board_partial", False),
+                "boardgate_ready": st.get("boardgate_ready", False),
+                "boardgate_reason": st.get("boardgate_reason", ""),
+            })
             return
 
         feats = _board_features_mod.extract_board_features(
@@ -5278,6 +5315,19 @@ def _boardgate_shadow_eval(bot: str, prob_live):
         st["boardgate_reason"] = str(pred.get("reason", "ok") or "ok")
         st["boardgate_prob_final_preview"] = float(fus.get("preview_prob_final", prob_live if isinstance(prob_live, (int, float)) else 0.0) or 0.0)
         st["boardgate_block_preview"] = str(fus.get("preview_block_reason", "") or "")
+
+        _board_audit_runtime_emit({
+            "tick_id": int(st.get("tick_id", 0) or 0),
+            "bot": str(bot or ""),
+            "board_source_used": st.get("board_source_used", "none"),
+            "board_source_reason": st.get("board_source_reason", ""),
+            "board_ready_bots": st.get("board_ready_bots", 0),
+            "board_rows": st.get("board_rows", 0),
+            "board_cols": st.get("board_cols", 0),
+            "board_partial": st.get("board_partial", False),
+            "boardgate_ready": st.get("boardgate_ready", False),
+            "boardgate_reason": st.get("boardgate_reason", ""),
+        })
 
         rsn = st.get("boardgate_reason", "")
         if str(rsn).startswith(("err:", "load_err:", "predict_err:")):
