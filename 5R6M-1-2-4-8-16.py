@@ -13365,18 +13365,52 @@ def mvrx_get_effective_matrix(board: dict) -> list:
     return mat if isinstance(mat, list) else []
 
 
+def _mvrx_col_metrics(board_matrix: list, col_idx: int) -> dict:
+    g = 0
+    r = 0
+    n = 0
+    for row in board_matrix:
+        if not isinstance(row, list) or col_idx < 0 or col_idx >= len(row):
+            continue
+        c = _mvrx_norm_cell(row[col_idx])
+        if c == 'G':
+            g += 1
+        elif c == 'R':
+            r += 1
+        else:
+            n += 1
+    active = int(g + r)
+    gr = (float(g) / float(active)) if active > 0 else 0.0
+    return {'g': int(g), 'r': int(r), 'n': int(n), 'active': int(active), 'x': int(r), 'gr': float(gr)}
+
+
 def mvrx_get_rightmost_live_col(board_matrix: list) -> int:
     try:
         if not board_matrix:
             return -1
         max_cols = max((len(r) for r in board_matrix if isinstance(r, list)), default=0)
+        selected = -1
         for c in range(max_cols - 1, -1, -1):
             for r in board_matrix:
                 if not isinstance(r, list) or c >= len(r):
                     continue
                 if _mvrx_norm_cell(r[c]) in ('G', 'R'):
-                    return c
-        return -1
+                    selected = int(c)
+                    break
+            if selected >= 0:
+                break
+        if selected <= 0:
+            return int(selected)
+
+        cur = _mvrx_col_metrics(board_matrix, int(selected))
+        prev = _mvrx_col_metrics(board_matrix, int(selected - 1))
+        prev_informative = bool(int(prev.get('active', 0) or 0) >= 2)
+
+        if int(cur.get('active', 0) or 0) <= 1 and prev_informative:
+            return int(selected - 1)
+        if int(cur.get('x', 0) or 0) == 0 and int(prev.get('x', 0) or 0) > 0 and prev_informative:
+            return int(selected - 1)
+        return int(selected)
     except Exception:
         return -1
 
@@ -13551,6 +13585,20 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
                 raw_idx2 = board.get('candidate_idx', None)
                 if raw_idx2 is not None and str(raw_idx2).strip() != '':
                     cand_idx = int(raw_idx2)
+            except Exception:
+                cand_idx = -1
+        if cand_idx < 0:
+            try:
+                cand_bot = str((bmeta.get('candidate_bot', None) if isinstance(bmeta, dict) else None) or board.get('candidate_bot', None) or bot or '').strip()
+                names = [str(x) for x in list(BOT_NAMES or [])]
+                if cand_bot and cand_bot in names:
+                    cand_idx = int(names.index(cand_bot))
+                elif cand_bot and isinstance(bmeta, dict):
+                    row_meta = bmeta.get('row_meta', {}) or {}
+                    if isinstance(row_meta, dict):
+                        keys = [str(k) for k in row_meta.keys()]
+                        if cand_bot in keys and cand_bot in names:
+                            cand_idx = int(names.index(cand_bot))
             except Exception:
                 cand_idx = -1
         st['mvrx_candidate_idx'] = cand_idx
