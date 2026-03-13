@@ -13698,12 +13698,12 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
                 # está listo, pero no hay X aún. Se mantiene en exploración (P3),
                 # sin habilitar REAL.
                 tier = 'P3'
-                reason = 'mem_ready_x0_p3'
+                reason = 'x_count_0_mem_ready_fallback'
                 score = float(MVRX_P3_BASE_SCORE + max(0.0, gr - MVRX_GREEN_RATIO_P2) * 0.08)
                 st['mvrx_mode'] = 'RELAXED'
                 st['mvrx_micro_only'] = True
                 st['mvrx_relaxed_hit'] = True
-                st['mvrx_relaxed_reason'] = 'mem_ready_x0'
+                st['mvrx_relaxed_reason'] = 'x_count_0_mem_ready_fallback'
                 st['mvrx_target_idx'] = int(cand_idx)
                 st['mvrx_streak'] = 0
                 st['mvrx_pattern'] = ''
