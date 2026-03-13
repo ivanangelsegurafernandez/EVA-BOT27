@@ -1925,13 +1925,34 @@ def _incremental_signature_exists(ruta: str, sig: str, feats: list) -> bool:
 
 # Nueva: Validar fila para incremental (blindaje contra basura)
 def validar_fila_incremental(fila_dict, feature_names):
+    def _coerce_incremental_num(v):
+        # Coerción conservadora para basura reparable típica del CSV:
+        # coma decimal, signo unicode y porcentaje textual.
+        if v is None:
+            raise ValueError("none")
+        if isinstance(v, str):
+            s = v.strip().replace("\u2212", "-")
+            if s == "":
+                raise ValueError("blank")
+            pct = s.endswith("%")
+            if pct:
+                s = s[:-1].strip()
+            if ("," in s) and ("." not in s):
+                s = s.replace(",", ".")
+            x = float(s)
+            if pct:
+                x = x / 100.0
+        else:
+            x = float(v)
+        if not np.isfinite(x):
+            raise ValueError("nan_inf")
+        return float(x)
+
     # Asegura numericidad real
     for k in feature_names:
         v = fila_dict.get(k, None)
         try:
-            v = float(v)
-            if not np.isfinite(v):
-                return False, f"{k}=NaN/inf"
+            v = _coerce_incremental_num(v)
         except Exception:
             return False, f"{k}=no numérico"
         fila_dict[k] = v  # normaliza en sitio
