@@ -1931,7 +1931,7 @@ def validar_fila_incremental(fila_dict, feature_names):
         if v is None:
             raise ValueError("none")
         if isinstance(v, str):
-            s = v.strip().replace("\u2212", "-")
+            s = v.strip().replace("\u2212", "-").replace("\xa0", "")
             if s == "":
                 raise ValueError("blank")
             pct = s.endswith("%")
