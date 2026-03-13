@@ -13685,6 +13685,37 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             st['mvrx_reason'] = 'green_ratio_low'
             return st
         if xc == 0:
+            board_src = str(st.get('mvrx_board_source_used', '') or '')
+            board_src_reason = str(st.get('mvrx_board_source_reason', '') or '')
+            mem_ready_x0 = bool(
+                board_src == 'memory'
+                and board_src_reason == 'mem_ready'
+                and gr >= float(MVRX_GREEN_RATIO_P1)
+                and int(active_rows) >= int(BOARD_MATRIX_MIN_READY_BOTS_MEMORY)
+            )
+            if mem_ready_x0 and bool(MVRX_P3_ENABLE):
+                # Fallback conservador: evita "sin_candidatos" cuando el board de memoria
+                # está listo, pero no hay X aún. Se mantiene en exploración (P3),
+                # sin habilitar REAL.
+                tier = 'P3'
+                reason = 'mem_ready_x0_p3'
+                score = float(MVRX_P3_BASE_SCORE + max(0.0, gr - MVRX_GREEN_RATIO_P2) * 0.08)
+                st['mvrx_mode'] = 'RELAXED'
+                st['mvrx_micro_only'] = True
+                st['mvrx_relaxed_hit'] = True
+                st['mvrx_relaxed_reason'] = 'mem_ready_x0'
+                st['mvrx_target_idx'] = int(cand_idx)
+                st['mvrx_streak'] = 0
+                st['mvrx_pattern'] = ''
+                st['mvrx_pattern_rank'] = 9
+                st['mvrx_ok'] = True
+                st['mvrx_tier'] = tier
+                st['mvrx_priority_class'] = tier
+                st['mvrx_real_eligible'] = False
+                st['mvrx_score'] = float(max(0.0, min(1.0, score)))
+                st['mvrx_reason'] = reason
+                st['mvrx_block_reason'] = ''
+                return st
             st['mvrx_block_reason'] = 'x_count_0'
             st['mvrx_reason'] = 'x_count_0'
             return st
