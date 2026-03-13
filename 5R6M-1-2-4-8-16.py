@@ -13593,12 +13593,6 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
                 names = [str(x) for x in list(BOT_NAMES or [])]
                 if cand_bot and cand_bot in names:
                     cand_idx = int(names.index(cand_bot))
-                elif cand_bot and isinstance(bmeta, dict):
-                    row_meta = bmeta.get('row_meta', {}) or {}
-                    if isinstance(row_meta, dict):
-                        keys = [str(k) for k in row_meta.keys()]
-                        if cand_bot in keys and cand_bot in names:
-                            cand_idx = int(names.index(cand_bot))
             except Exception:
                 cand_idx = -1
         st['mvrx_candidate_idx'] = cand_idx
