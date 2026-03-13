@@ -13383,9 +13383,15 @@ def mvrx_get_rightmost_live_col(board_matrix: list) -> int:
 
 def _mvrx_norm_cell(v) -> str:
     try:
+        if isinstance(v, (int, float)):
+            vf = float(v)
+            if vf == -1.0:
+                return 'R'
         t = str(v).strip().upper()
     except Exception:
         return 'N'
+    if t in ('-1', '-1.0'):
+        return 'R'
     if t in ('', '-', '--', 'NONE', 'NULL', 'NAN'):
         return 'N'
     if t in ('✅', '✔', 'CHECK', 'GANANCIA', 'WIN', 'G', 'GREEN', 'VERDE', '1', 'TRUE'):
