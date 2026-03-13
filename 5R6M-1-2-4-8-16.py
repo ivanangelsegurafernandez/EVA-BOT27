@@ -5031,7 +5031,10 @@ def _board_audit_runtime_emit(payload: dict) -> None:
             "board_source_used", "board_source_reason", "board_ready_bots", "board_rows", "board_cols", "board_partial",
             "boardgate_ready", "boardgate_reason",
             "mvrx_board_source_used", "mvrx_board_source_reason", "mvrx_board_available",
-            "mvrx_green_ratio", "mvrx_x_count", "mvrx_tier", "mvrx_reason", "mvrx_block_reason",
+            "mvrx_selected_col_idx", "mvrx_selected_col_raw", "mvrx_selected_col_is_closed",
+            "mvrx_green_ratio", "mvrx_x_count", "mvrx_filas_activas_count",
+            "mvrx_candidate_idx", "mvrx_target_idx", "mvrx_target_idx_mismatch", "mvrx_streak", "mvrx_pattern",
+            "mvrx_tier", "mvrx_mode", "mvrx_priority_class", "mvrx_real_eligible", "mvrx_reason", "mvrx_block_reason",
             "embudo_decision", "embudo_reason_final", "final_block_reason",
         ]
         path = os.path.join(os.getcwd(), "board_audit_runtime.csv")
@@ -13715,6 +13718,38 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         st['mvrx_reason'] = f'err:{type(e).__name__}'
         st['mvrx_block_reason'] = 'eval_error'
         return st
+    finally:
+        try:
+            emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
+            _board_audit_runtime_emit({
+                "tick_id": int((estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}).get("mvrx_tick_id", 0) or 0),
+                "bot": str(bot or ""),
+                "mvrx_board_source_used": st.get("mvrx_board_source_used", "none"),
+                "mvrx_board_source_reason": st.get("mvrx_board_source_reason", ""),
+                "mvrx_board_available": st.get("mvrx_board_available", False),
+                "mvrx_selected_col_idx": st.get("mvrx_selected_col_idx", -1),
+                "mvrx_selected_col_raw": st.get("mvrx_selected_col_raw", ""),
+                "mvrx_selected_col_is_closed": st.get("mvrx_selected_col_is_closed", None),
+                "mvrx_green_ratio": st.get("mvrx_green_ratio", 0.0),
+                "mvrx_x_count": st.get("mvrx_x_count", 0),
+                "mvrx_filas_activas_count": st.get("mvrx_filas_activas_count", 0),
+                "mvrx_candidate_idx": st.get("mvrx_candidate_idx", -1),
+                "mvrx_target_idx": st.get("mvrx_target_idx", -1),
+                "mvrx_target_idx_mismatch": st.get("mvrx_target_idx_mismatch", False),
+                "mvrx_streak": st.get("mvrx_streak", 0),
+                "mvrx_pattern": st.get("mvrx_pattern", ""),
+                "mvrx_tier": st.get("mvrx_tier", "NONE"),
+                "mvrx_mode": st.get("mvrx_mode", "NONE"),
+                "mvrx_priority_class": st.get("mvrx_priority_class", "NONE"),
+                "mvrx_real_eligible": st.get("mvrx_real_eligible", False),
+                "mvrx_reason": st.get("mvrx_reason", ""),
+                "mvrx_block_reason": st.get("mvrx_block_reason", ""),
+                "embudo_decision": emb.get("embudo_decision", ""),
+                "embudo_reason_final": emb.get("embudo_reason_final", ""),
+                "final_block_reason": emb.get("final_block_reason", ""),
+            })
+        except Exception:
+            pass
 
 def mvrx_rank_candidates(candidates: list) -> list:
     def keyf(c: dict):
@@ -16254,6 +16289,39 @@ async def main():
                             }
                             mvrx_debug_log_event(row_dbg)
                             mvrx_audit_log_event(row_dbg)
+                            _board_audit_runtime_emit({
+                                "tick_id": int(top_dbg.get("mvrx_tick_id", 0) or 0),
+                                "bot": str(top_dbg.get("bot", "") or ""),
+                                "board_source_used": str(top_dbg.get("mvrx_board_source_used", "none") or "none"),
+                                "board_source_reason": str(top_dbg.get("mvrx_board_source_reason", "") or ""),
+                                "board_ready_bots": int(top_dbg.get("board_ready_bots", 0) or 0),
+                                "board_rows": int(top_dbg.get("mvrx_board_rows", 0) or 0),
+                                "board_cols": int(top_dbg.get("mvrx_board_cols", 0) or 0),
+                                "board_partial": bool(top_dbg.get("board_partial", False)),
+                                "mvrx_board_source_used": str(top_dbg.get("mvrx_board_source_used", "none") or "none"),
+                                "mvrx_board_source_reason": str(top_dbg.get("mvrx_board_source_reason", "") or ""),
+                                "mvrx_board_available": bool(top_dbg.get("mvrx_board_available", False)),
+                                "mvrx_selected_col_idx": int(top_dbg.get("mvrx_selected_col_idx", -1) or -1),
+                                "mvrx_selected_col_raw": str(top_dbg.get("mvrx_selected_col_raw", "") or ""),
+                                "mvrx_selected_col_is_closed": top_dbg.get("mvrx_selected_col_is_closed", None),
+                                "mvrx_green_ratio": float(top_dbg.get("mvrx_green_ratio", 0.0) or 0.0),
+                                "mvrx_x_count": int(top_dbg.get("mvrx_x_count", 0) or 0),
+                                "mvrx_filas_activas_count": int(top_dbg.get("mvrx_filas_activas_count", 0) or 0),
+                                "mvrx_candidate_idx": int(top_dbg.get("mvrx_candidate_idx", -1) or -1),
+                                "mvrx_target_idx": int(top_dbg.get("mvrx_target_idx", -1) or -1),
+                                "mvrx_target_idx_mismatch": bool(top_dbg.get("mvrx_target_idx_mismatch", False)),
+                                "mvrx_streak": int(top_dbg.get("mvrx_streak", 0) or 0),
+                                "mvrx_pattern": str(top_dbg.get("mvrx_pattern", "") or ""),
+                                "mvrx_tier": str(top_dbg.get("mvrx_tier", "NONE") or "NONE"),
+                                "mvrx_mode": str(top_dbg.get("mvrx_mode", "NONE") or "NONE"),
+                                "mvrx_priority_class": str(top_dbg.get("mvrx_priority_class", "NONE") or "NONE"),
+                                "mvrx_real_eligible": bool(top_dbg.get("mvrx_real_eligible", False)),
+                                "mvrx_reason": str(top_dbg.get("mvrx_reason", "") or ""),
+                                "mvrx_block_reason": str(top_dbg.get("mvrx_block_reason", "") or ""),
+                                "embudo_decision": str(decision_final),
+                                "embudo_reason_final": str(embudo.get("embudo_reason_final", embudo.get("decision_reason", "")) or ""),
+                                "final_block_reason": str(embudo.get("final_block_reason", "") or ""),
+                            })
                         except Exception:
                             pass
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
