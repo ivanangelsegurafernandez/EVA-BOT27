@@ -5245,12 +5245,13 @@ def _boardgate_shadow_eval(bot: str, prob_live):
         pass
 
     if _board_state_mod is None or _board_features_mod is None or _board_fusion_mod is None:
-        miss_reason = "mod_missing" if bool(BOARDGATE_SHADOW_MODE) else "mod_missing_hard"
+        shadow_missing = bool(BOARDGATE_SHADOW_MODE)
+        miss_reason = "mod_missing_shadow" if shadow_missing else "mod_missing_hard"
         st["boardgate_reason"] = str(miss_reason)
         st["board_source_used"] = "none"
         st["board_source_reason"] = "mod_missing"
         st["boardgate_ready"] = False
-        _boardgate_log_reason(bot, "mod_missing")
+        _boardgate_log_reason(bot, str(miss_reason))
         _board_audit_runtime_emit({
             "tick_id": int(st.get("tick_id", 0) or 0),
             "bot": str(bot or ""),
@@ -13362,6 +13363,8 @@ def mvrx_build_live_board(bot: str) -> dict:
             lookback_cols=int(BOARDGATE_LOOKBACK_COLS),
             csv_dir='.',
         )
+        if fallback_activated and (not str(source_reason or '').strip()):
+            source_reason = 'state_missing_fallback'
         if not isinstance(board, dict):
             return {"__mvrx_board_error": "board_unavailable", "board_source_used": "none", "board_source_reason": "invalid_board_obj"}
         bmeta = board.get("board_meta", {}) if isinstance(board, dict) else {}
