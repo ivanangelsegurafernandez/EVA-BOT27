@@ -278,6 +278,7 @@ MVRX_DEBUG_ENABLE = True
 MVRX_DEBUG_VERBOSE = True
 MVRX_DEBUG_CSV_ENABLE = True
 MVRX_DEBUG_CSV_PATH = "mvrx_debug_log.csv"
+MVRX_AUDIT_CSV_PATH = "mvrx_board_audit_log.csv"
 MVRX_WARMUP_DEMO_ASSIST = True
 MVRX_WARMUP_DEMO_ASSIST_SHADOW_ONLY = True
 
@@ -312,6 +313,14 @@ def _mvrx_state_defaults() -> dict:
         "mvrx_pattern_rank": 9,
         "mvrx_prev_green_ratio": 0.0,
         "mvrx_real_eligible": False,
+        "mvrx_board_available": False,
+        "mvrx_board_rows": 0,
+        "mvrx_board_cols": 0,
+        "mvrx_selected_col_idx": -1,
+        "mvrx_selected_col_raw": "",
+        "mvrx_selected_col_is_closed": None,
+        "mvrx_filas_activas_count": 0,
+        "mvrx_target_idx_mismatch": False,
     }
 
 
@@ -13194,6 +13203,25 @@ def mvrx_count_x_in_col(board_matrix: list, col_idx: int) -> int:
     return len(mvrx_find_x_rows(board_matrix, col_idx))
 
 
+def mvrx_col_summary(board_matrix: list, col_idx: int) -> tuple[int, int, str]:
+    g = 0
+    r = 0
+    n = 0
+    for row in board_matrix:
+        if not isinstance(row, list) or col_idx < 0 or col_idx >= len(row):
+            continue
+        c = _mvrx_norm_cell(row[col_idx])
+        if c == 'G':
+            g += 1
+        elif c == 'R':
+            r += 1
+        else:
+            n += 1
+    active = int(g + r)
+    raw = f"G:{g}|R:{r}|N:{n}"
+    return active, int(r), raw
+
+
 def mvrx_find_x_rows(board_matrix: list, col_idx: int) -> list:
     out = []
     for i, r in enumerate(board_matrix):
@@ -13268,23 +13296,30 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
             return st
 
         mat = mvrx_get_effective_matrix(board)
+        st['mvrx_board_available'] = bool(mat)
+        st['mvrx_board_rows'] = int(len(mat)) if isinstance(mat, list) else 0
+        st['mvrx_board_cols'] = int(max((len(r) for r in mat if isinstance(r, list)), default=0)) if isinstance(mat, list) else 0
         if not mat:
             st['mvrx_block_reason'] = 'board_empty'
             st['mvrx_reason'] = 'board_empty'
             return st
         col = mvrx_get_rightmost_live_col(mat)
+        st['mvrx_selected_col_idx'] = int(col)
         if col < 0:
             st['mvrx_block_reason'] = 'no_live_col'
             st['mvrx_reason'] = 'no_live_col'
             return st
 
+        active_rows, xc, col_raw = mvrx_col_summary(mat, col)
         gr = float(mvrx_calc_green_ratio(mat, col))
         prev_gr = float(mvrx_calc_green_ratio(mat, col - 1)) if col > 0 else 0.0
         xr = mvrx_find_x_rows(mat, col)
-        xc = len(xr)
         st['mvrx_green_ratio'] = gr
         st['mvrx_prev_green_ratio'] = prev_gr
         st['mvrx_x_count'] = int(xc)
+        st['mvrx_filas_activas_count'] = int(active_rows)
+        st['mvrx_selected_col_raw'] = str(col_raw)
+        st['mvrx_selected_col_is_closed'] = True
 
         bmeta = board.get('board_meta', {}) if isinstance(board, dict) else {}
         cand_idx = -1
@@ -13406,6 +13441,7 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
         st['mvrx_pattern_rank'] = int(patt_rank)
 
         if target_idx >= 0 and target_idx != int(cand_idx):
+            st['mvrx_target_idx_mismatch'] = True
             st['mvrx_block_reason'] = 'target_idx_mismatch'
             st['mvrx_reason'] = f'target={int(target_idx)}!=candidate={int(cand_idx)}'
             st['mvrx_tier'] = 'NONE'
@@ -13563,6 +13599,36 @@ def _mvrx_debug_columns() -> list[str]:
         "ctt_status","ctt_regime","ctt_gate","dyn_allow_real","dyn_trigger_ok","dyn_confirm_ok",
         "embudo_decision","embudo_reason_final","final_block_reason","reason_source"
     ]
+
+
+def mvrx_audit_log_event(row: dict) -> None:
+    if not bool(MVRX_DEBUG_ENABLE):
+        return
+    try:
+        gr = float(row.get("green_ratio", row.get("mvrx_green_ratio", 0.0)) or 0.0)
+        xc = int(row.get("x_count", row.get("mvrx_x_count", 0)) or 0)
+        tier = str(row.get("mvrx_tier", "NONE") or "NONE")
+        b_av = bool(row.get("board_available", False))
+        blk = str(row.get("mvrx_block_reason", "") or "")
+        sin_cands = str(row.get("embudo_reason_final", "") or "")
+        relevant = (gr >= 0.67) or (xc in (1, 2)) or (tier in ("P1", "P2", "P3")) or (not b_av) or ("sin_candidatos" in sin_cands)
+        if not relevant:
+            return
+        cols = [
+            "ts","tick_id","bot","board_available","board_rows","board_cols","selected_col_idx",
+            "selected_col_is_closed","selected_col_raw","filas_activas_count","green_ratio","x_count",
+            "candidate_idx","target_idx","target_idx_mismatch","streak","pattern","mvrx_tier",
+            "mvrx_priority_class","mvrx_reason","mvrx_block_reason","ctt_gate","embudo_decision",
+            "embudo_reason_final","final_block_reason"
+        ]
+        write_header = (not os.path.exists(MVRX_AUDIT_CSV_PATH))
+        with open(MVRX_AUDIT_CSV_PATH, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            if write_header:
+                w.writeheader()
+            w.writerow({c: row.get(c, "") for c in cols})
+    except Exception:
+        pass
 
 
 def mvrx_debug_log_event(row: dict) -> None:
@@ -15532,6 +15598,37 @@ async def main():
                                     if k.startswith("srx_"):
                                         st_bot[k] = v
                                 mvrx_blk = str(mvrx.get("mvrx_block_reason", "") or "")
+                                try:
+                                    st_bot["mvrx_tick_id"] = int(st_bot.get("mvrx_tick_id", 0) or 0) + 1
+                                    mvrx_audit_log_event({
+                                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                        "tick_id": int(st_bot.get("mvrx_tick_id", 0) or 0),
+                                        "bot": b,
+                                        "board_available": bool(mvrx.get("mvrx_board_available", False)),
+                                        "board_rows": int(mvrx.get("mvrx_board_rows", 0) or 0),
+                                        "board_cols": int(mvrx.get("mvrx_board_cols", 0) or 0),
+                                        "selected_col_idx": int(mvrx.get("mvrx_selected_col_idx", -1) or -1),
+                                        "selected_col_is_closed": mvrx.get("mvrx_selected_col_is_closed", None),
+                                        "selected_col_raw": str(mvrx.get("mvrx_selected_col_raw", "") or ""),
+                                        "filas_activas_count": int(mvrx.get("mvrx_filas_activas_count", 0) or 0),
+                                        "green_ratio": float(mvrx.get("mvrx_green_ratio", 0.0) or 0.0),
+                                        "x_count": int(mvrx.get("mvrx_x_count", 0) or 0),
+                                        "candidate_idx": int(mvrx.get("mvrx_candidate_idx", -1) or -1),
+                                        "target_idx": int(mvrx.get("mvrx_target_idx", -1) or -1),
+                                        "target_idx_mismatch": bool(mvrx.get("mvrx_target_idx_mismatch", False)),
+                                        "streak": int(mvrx.get("mvrx_streak", 0) or 0),
+                                        "pattern": str(mvrx.get("mvrx_pattern", "") or ""),
+                                        "mvrx_tier": str(mvrx.get("mvrx_tier", "NONE") or "NONE"),
+                                        "mvrx_priority_class": str(mvrx.get("mvrx_priority_class", "NONE") or "NONE"),
+                                        "mvrx_reason": str(mvrx.get("mvrx_reason", "") or ""),
+                                        "mvrx_block_reason": str(mvrx_blk),
+                                        "ctt_gate": "",
+                                        "embudo_decision": "",
+                                        "embudo_reason_final": "",
+                                        "final_block_reason": "",
+                                    })
+                                except Exception:
+                                    pass
                                 if mvrx_blk in ("board_unavailable", "board_empty", "candidate_idx_missing"):
                                     try:
                                         agregar_evento(f"🧱 MVRX {b}: {mvrx_blk}")
@@ -15853,8 +15950,23 @@ async def main():
                                 "srx_score": float(top_dbg.get("srx_score", 0.0) or 0.0),
                                 "srx_reason": str(top_dbg.get("srx_reason", "") or ""),
                                 "srx_block_reason": str(top_dbg.get("srx_block_reason", "") or ""),
+                                "board_available": bool(top_dbg.get("mvrx_board_available", False)),
+                                "board_rows": int(top_dbg.get("mvrx_board_rows", 0) or 0),
+                                "board_cols": int(top_dbg.get("mvrx_board_cols", 0) or 0),
+                                "selected_col_idx": int(top_dbg.get("mvrx_selected_col_idx", -1) or -1),
+                                "selected_col_is_closed": top_dbg.get("mvrx_selected_col_is_closed", None),
+                                "selected_col_raw": str(top_dbg.get("mvrx_selected_col_raw", "") or ""),
+                                "filas_activas_count": int(top_dbg.get("mvrx_filas_activas_count", 0) or 0),
+                                "green_ratio": float(top_dbg.get("mvrx_green_ratio", 0.0) or 0.0),
+                                "x_count": int(top_dbg.get("mvrx_x_count", 0) or 0),
+                                "candidate_idx": int(top_dbg.get("mvrx_candidate_idx", -1) or -1),
+                                "target_idx": int(top_dbg.get("mvrx_target_idx", -1) or -1),
+                                "target_idx_mismatch": bool(top_dbg.get("mvrx_target_idx_mismatch", False)),
+                                "streak": int(top_dbg.get("mvrx_streak", 0) or 0),
+                                "pattern": str(top_dbg.get("mvrx_pattern", "") or ""),
                             }
                             mvrx_debug_log_event(row_dbg)
+                            mvrx_audit_log_event(row_dbg)
                         except Exception:
                             pass
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
