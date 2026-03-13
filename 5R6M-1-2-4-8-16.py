@@ -13395,7 +13395,7 @@ def mvrx_eval_candidate(board: dict, bot: str, prob_live=None) -> dict:
                 relaxed_a = bool(
                     gr >= float(MVRX_RELAXED_STREAK2_GREEN_RATIO_MIN)
                     and streak == int(MVRX_RELAXED_STREAK_EARLY)
-                    and ((not bool(MVRX_RELAXED_REQUIRE_PATTERN_FOR_STREAK2)) or (patt_rank < 9))
+                    and ((not bool(MVRX_RELAXED_REQUIRE_PATTERN_FOR_STREAK2)) or (str(patt or '') in MVRX_VALID_PATTERNS))
                 )
                 relaxed_b = bool(
                     (float(MVRX_RELAXED_GREEN_RATIO_MIN) <= gr < float(MVRX_GREEN_RATIO_P1))
@@ -14446,7 +14446,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             pass
 
         # Política RELAXED: nunca permitir REAL_NORMAL; como máximo REAL_MICRO.
-        if signal_source == "MVRX" and mvrx_tier == "P1" and mvrx_mode == "RELAXED" and bool(MVRX_RELAXED_MICRO_ONLY):
+        if signal_source == "MVRX" and mvrx_tier == "P1" and mvrx_mode == "RELAXED" and bool(mvrx_micro_only):
             if decision == EMBUDO_FINAL_REAL_NORMAL:
                 decision = EMBUDO_FINAL_REAL_MICRO
                 risk_mode = "REAL_MICRO"
