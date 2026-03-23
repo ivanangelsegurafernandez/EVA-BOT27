@@ -349,7 +349,7 @@ AUTO_REAL_UNREL_MICRO_RELAX_LOG_COOLDOWN_S = 45.0
 # aunque el modelo siga en warmup/reliable=false.
 AUTO_REAL_UNRELIABLE_ALLOW_STRONG_GATE = True
 AUTO_REAL_UNRELIABLE_GATE_MIN_PROB = IA_ACTIVACION_REAL_THR_POST_N15
-AUTO_REAL_MICRO_EARLY_CONFIRM_ENABLE = True
+AUTO_REAL_MICRO_EARLY_CONFIRM_ENABLE = bool(LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE)
 AUTO_REAL_MICRO_EARLY_CONFIRM_MARGIN = 0.02
 AUTO_REAL_MICRO_EARLY_CONFIRM_DEFICIT_MAX = 1
 
@@ -442,7 +442,18 @@ sonido_disparado = False
 # - Este bloque NO reemplaza todavía la lógica de entrada actual.
 # - Sirve para dejar la integración preparada y revisable.
 # - Los candados existentes (hard_guard/confirm/trigger/roof) se mantienen.
-PATTERN_V1_ENABLE = True
+#
+# CUARENTENA ESTRUCTURAL (FASE LIMPIEZA):
+# - Aísla capas heredadas/experimentales sin borrarlas.
+# - Permite reactivar cada subsistema por bandera para compatibilidad.
+LEGACY_QUARANTINE_ENABLE = True
+LEGACY_ENABLE_PATTERN_V1 = not LEGACY_QUARANTINE_ENABLE
+LEGACY_ENABLE_PATTERN_COLUMNS = True
+LEGACY_ENABLE_SHADOW_MICRO = not LEGACY_QUARANTINE_ENABLE
+LEGACY_ENABLE_MICRO_STRONG_FALLBACK = not LEGACY_QUARANTINE_ENABLE
+LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE = not LEGACY_QUARANTINE_ENABLE
+
+PATTERN_V1_ENABLE = bool(LEGACY_ENABLE_PATTERN_V1)
 PATTERN_V1_SCORE_THR = 6.0
 PATTERN_V1_BONUS_DUAL = 1.0
 PATTERN_V1_PENAL_TARDIA = 2.0
@@ -458,7 +469,7 @@ PATTERN_REBOTE_LOOKBACK = 12
 PATTERN_REBOTE_MIN = 0.65
 PATTERN_REBOTE_MIN_SAMPLES = 3
 PATTERN_STRONG_STREAK_BLOCK = 2
-PATTERN_ENABLE = True
+PATTERN_ENABLE = bool(LEGACY_ENABLE_PATTERN_COLUMNS)
 PATTERN_COL_BONUS_CONTINUIDAD = 0.60
 PATTERN_COL_BONUS_REBOTE = 0.80
 PATTERN_COL_PENAL_SATURACION = 1.20
@@ -505,7 +516,7 @@ REAL_MICRO_ALLOW_SOFT_HIGH_PROB = True
 REAL_MICRO_SOFT_MIN_PROB = 0.58
 REAL_MICRO_SOFT_MIN_SUCESO = 18.0
 REAL_MICRO_SOFT_MIN_WR = 0.47
-REAL_SHADOW_MICRO_ENABLE = True
+REAL_SHADOW_MICRO_ENABLE = bool(LEGACY_ENABLE_SHADOW_MICRO)
 REAL_SHADOW_MICRO_MIN_PROB = 0.56
 REAL_SHADOW_MICRO_MAX_ENTRIES = 6
 REAL_SHADOW_MICRO_WINDOW_S = 300
@@ -513,7 +524,7 @@ REAL_SHADOW_MICRO_TOP_K = 1
 REAL_SHADOW_MICRO_LOG_COOLDOWN_S = 20.0
 _REAL_SHADOW_MICRO_OPEN_TS = deque(maxlen=64)
 _REAL_SHADOW_MICRO_LAST_LOG_TS = 0.0
-REAL_MICRO_STRONG_GATE_FALLBACK_ENABLE = True
+REAL_MICRO_STRONG_GATE_FALLBACK_ENABLE = bool(LEGACY_ENABLE_MICRO_STRONG_FALLBACK)
 REAL_MICRO_STRONG_GATE_MIN_PROB = 0.60
 EMBUDO_FINAL_BLOCK_HARD = "BLOCK_HARD"
 EMBUDO_FINAL_WAIT_SOFT = "WAIT_SOFT"
@@ -14684,6 +14695,19 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
     return EMBUDO_DECISION_STATE
 
 
+def _degradar_si_modelo_ia_inmaduro(decision: str, risk_mode: str, degrade_from: str, reason: str, warmup_mode: bool, model_family: str, ia_model_mature: bool) -> tuple[str, str, str, str]:
+    """Degrada decisión a SHADOW cuando el modelo IA no está maduro."""
+    if ia_model_mature or decision not in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
+        return decision, risk_mode, degrade_from, reason
+    decision = EMBUDO_FINAL_SHADOW_OK
+    risk_mode = "SHADOW_OK"
+    if warmup_mode:
+        return decision, risk_mode, "ia_immature_warmup", "ia_immature_warmup->shadow"
+    if model_family == "sklearn_logreg_fallback":
+        return decision, risk_mode, "ia_immature_fallback", "ia_fallback->shadow"
+    return decision, risk_mode, "ia_immature_unreliable", "ia_unreliable->shadow"
+
+
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
     """Embudo unificado: selección -> calidad blanda -> modulación -> estado final."""
     out = _registrar_estado_embudo({
@@ -14784,57 +14808,15 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 degrade_from = "unreliable"
                 reason = "unreliable->shadow"
 
-        if (not ia_model_mature) and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
-            decision = EMBUDO_FINAL_SHADOW_OK
-            risk_mode = "SHADOW_OK"
-            if warmup_mode:
-                degrade_from = "ia_immature_warmup"
-                reason = "ia_immature_warmup->shadow"
-            elif model_family == "sklearn_logreg_fallback":
-                degrade_from = "ia_immature_fallback"
-                reason = "ia_fallback->shadow"
-            else:
-                degrade_from = "ia_immature_unreliable"
-                reason = "ia_unreliable->shadow"
-
-        if (not ia_model_mature) and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
-            decision = EMBUDO_FINAL_SHADOW_OK
-            risk_mode = "SHADOW_OK"
-            if warmup_mode:
-                degrade_from = "ia_immature_warmup"
-                reason = "ia_immature_warmup->shadow"
-            elif model_family == "sklearn_logreg_fallback":
-                degrade_from = "ia_immature_fallback"
-                reason = "ia_fallback->shadow"
-            else:
-                degrade_from = "ia_immature_unreliable"
-                reason = "ia_unreliable->shadow"
-
-        if (not ia_model_mature) and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
-            decision = EMBUDO_FINAL_SHADOW_OK
-            risk_mode = "SHADOW_OK"
-            if warmup_mode:
-                degrade_from = "ia_immature_warmup"
-                reason = "ia_immature_warmup->shadow"
-            elif model_family == "sklearn_logreg_fallback":
-                degrade_from = "ia_immature_fallback"
-                reason = "ia_fallback->shadow"
-            else:
-                degrade_from = "ia_immature_unreliable"
-                reason = "ia_unreliable->shadow"
-
-        if (not ia_model_mature) and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
-            decision = EMBUDO_FINAL_SHADOW_OK
-            risk_mode = "SHADOW_OK"
-            if warmup_mode:
-                degrade_from = "ia_immature_warmup"
-                reason = "ia_immature_warmup->shadow"
-            elif model_family == "sklearn_logreg_fallback":
-                degrade_from = "ia_immature_fallback"
-                reason = "ia_fallback->shadow"
-            else:
-                degrade_from = "ia_immature_unreliable"
-                reason = "ia_unreliable->shadow"
+        decision, risk_mode, degrade_from, reason = _degradar_si_modelo_ia_inmaduro(
+            decision=decision,
+            risk_mode=risk_mode,
+            degrade_from=degrade_from,
+            reason=reason,
+            warmup_mode=warmup_mode,
+            model_family=model_family,
+            ia_model_mature=ia_model_mature,
+        )
 
         # Prudencia extra en Martingala avanzada C2..C{MAX_CICLOS}: exigir contexto vivo.
         try:
@@ -16221,20 +16203,6 @@ async def main():
 
                                 # 6) Prob REAL posterior (modelo + régimen + evidencia + bound)
                                 p_post = _prob_real_posterior(float(p), float(regime_score), int(ev_n), float(ev_wr), float(ev_lb))
-
-                                # Guardas por bot (alineadas al HUD): evitar promoción cuando hay
-                                # desalineación severa entre probabilidad y performance real reciente.
-                                if (ev_n >= int(EVIDENCE_MIN_N_SOFT)) and (ev_wr < float(IA_PROMO_MIN_WR_POR_BOT)):
-                                    agregar_evento(
-                                        f"🧱 Guarda WR bot: {b} bloqueado (WR={ev_wr*100:.1f}% < {IA_PROMO_MIN_WR_POR_BOT*100:.1f}%, n={ev_n})."
-                                    )
-                                    continue
-                                overconf_gap = float(p_post) - float(ev_wr)
-                                if (ev_n >= int(EVIDENCE_MIN_N_SOFT)) and (overconf_gap > float(IA_PROMO_MAX_OVERCONF_GAP)):
-                                    agregar_evento(
-                                        f"🧯 Guarda calibración: {b} bloqueado (p_real-WR={overconf_gap*100:.1f}pp > {IA_PROMO_MAX_OVERCONF_GAP*100:.1f}pp)."
-                                    )
-                                    continue
 
                                 # Guardas por bot (alineadas al HUD): evitar promoción cuando hay
                                 # desalineación severa entre probabilidad y performance real reciente.
