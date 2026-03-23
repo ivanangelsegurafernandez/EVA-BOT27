@@ -41,19 +41,11 @@ from contextlib import contextmanager
 import sys
 import shutil
 import joblib
-import numpy as np
-import pandas as pd
 import importlib
 import traceback
 
 import math
 import hashlib
-from sklearn.model_selection import train_test_split, TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score, f1_score, fbeta_score, brier_score_loss
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import LogisticRegression
-from sklearn.isotonic import IsotonicRegression
 
 import warnings
 warnings.filterwarnings(
@@ -78,9 +70,125 @@ def _load_optional_module(name: str):
     except Exception:
         return None
 
+np = _load_optional_module("numpy")
+pd = _load_optional_module("pandas")
+NUMPY_OK = np is not None
+PANDAS_OK = pd is not None
+
+if not NUMPY_OK:
+    class _NPErrStateCompat:
+        def __enter__(self):
+            return None
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _NumpyCompat:
+        """Shim mínimo para evitar fallo de arranque cuando numpy no está instalado."""
+        nan = float("nan")
+        inf = float("inf")
+        integer = int
+        floating = float
+        ndarray = list
+
+        @staticmethod
+        def errstate(**_kwargs):
+            return _NPErrStateCompat()
+
+        @staticmethod
+        def asarray(values):
+            return list(values) if isinstance(values, (list, tuple, deque)) else [values]
+
+        @staticmethod
+        def isfinite(v):
+            try:
+                return math.isfinite(float(v))
+            except Exception:
+                return False
+
+        def __getattr__(self, _name):
+            def _fallback(*_args, **_kwargs):
+                return 0.0
+            return _fallback
+
+    np = _NumpyCompat()
+
+if not PANDAS_OK:
+    class _PandasSeriesCompat(list):
+        empty = True
+
+        def dropna(self):
+            return self
+
+    class _PandasDataFrameCompat(dict):
+        empty = True
+
+    class _PandasCompat:
+        """Shim mínimo para preservar bootstrap cuando pandas no está disponible."""
+        DataFrame = _PandasDataFrameCompat
+        Series = _PandasSeriesCompat
+
+        @staticmethod
+        def read_csv(*_args, **_kwargs):
+            return _PandasDataFrameCompat()
+
+        @staticmethod
+        def concat(*_args, **_kwargs):
+            return _PandasDataFrameCompat()
+
+        @staticmethod
+        def isna(*_args, **_kwargs):
+            return False
+
+        @staticmethod
+        def notna(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def to_datetime(*_args, **_kwargs):
+            return _PandasSeriesCompat()
+
+        @staticmethod
+        def to_numeric(*_args, **_kwargs):
+            return _PandasSeriesCompat()
+
+    pd = _PandasCompat()
+
+_sk_model_selection = _load_optional_module("sklearn.model_selection")
+_sk_preprocessing = _load_optional_module("sklearn.preprocessing")
+_sk_metrics = _load_optional_module("sklearn.metrics")
+_sk_calibration = _load_optional_module("sklearn.calibration")
+_sk_linear_model = _load_optional_module("sklearn.linear_model")
+_sk_isotonic = _load_optional_module("sklearn.isotonic")
+
+train_test_split = getattr(_sk_model_selection, "train_test_split", None)
+TimeSeriesSplit = getattr(_sk_model_selection, "TimeSeriesSplit", None)
+StandardScaler = getattr(_sk_preprocessing, "StandardScaler", None)
+roc_auc_score = getattr(_sk_metrics, "roc_auc_score", None)
+f1_score = getattr(_sk_metrics, "f1_score", None)
+fbeta_score = getattr(_sk_metrics, "fbeta_score", None)
+brier_score_loss = getattr(_sk_metrics, "brier_score_loss", None)
+CalibratedClassifierCV = getattr(_sk_calibration, "CalibratedClassifierCV", None)
+LogisticRegression = getattr(_sk_linear_model, "LogisticRegression", None)
+IsotonicRegression = getattr(_sk_isotonic, "IsotonicRegression", None)
+
+SKLEARN_OK = all([
+    train_test_split is not None,
+    TimeSeriesSplit is not None,
+    StandardScaler is not None,
+    roc_auc_score is not None,
+    f1_score is not None,
+    fbeta_score is not None,
+    brier_score_loss is not None,
+    CalibratedClassifierCV is not None,
+    LogisticRegression is not None,
+    IsotonicRegression is not None,
+])
+
 
 def _safe_mean_np(values, default=None):
     """Media robusta: evita RuntimeWarning en slices vacíos y NaN-only."""
+    if not NUMPY_OK:
+        return default
     try:
         arr = np.asarray(values)
         if arr.size <= 0:
