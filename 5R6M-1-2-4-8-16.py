@@ -349,6 +349,13 @@ AUTO_REAL_UNREL_MICRO_RELAX_LOG_COOLDOWN_S = 45.0
 # aunque el modelo siga en warmup/reliable=false.
 AUTO_REAL_UNRELIABLE_ALLOW_STRONG_GATE = True
 AUTO_REAL_UNRELIABLE_GATE_MIN_PROB = IA_ACTIVACION_REAL_THR_POST_N15
+# Bootstrap temprano de banderas LEGACY para evitar uso antes de definición.
+LEGACY_QUARANTINE_ENABLE = True
+LEGACY_ENABLE_PATTERN_V1 = not LEGACY_QUARANTINE_ENABLE
+LEGACY_ENABLE_PATTERN_COLUMNS = False
+LEGACY_ENABLE_SHADOW_MICRO = not LEGACY_QUARANTINE_ENABLE
+LEGACY_ENABLE_MICRO_STRONG_FALLBACK = not LEGACY_QUARANTINE_ENABLE
+LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE = not LEGACY_QUARANTINE_ENABLE
 AUTO_REAL_MICRO_EARLY_CONFIRM_ENABLE = bool(LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE)
 AUTO_REAL_MICRO_EARLY_CONFIRM_MARGIN = 0.02
 AUTO_REAL_MICRO_EARLY_CONFIRM_DEFICIT_MAX = 1
@@ -441,12 +448,7 @@ sonido_disparado = False
 # MRV es el motor estructural activo de contexto operativo.
 # La capa heredada (pattern/micro/shadow) queda en cuarentena para compatibilidad/telemetría.
 # DYN_ROOF se conserva como guardrail mínimo (anti-ráfaga/cooldown/gap), sin gobernar el contexto principal.
-LEGACY_QUARANTINE_ENABLE = True
-LEGACY_ENABLE_PATTERN_V1 = not LEGACY_QUARANTINE_ENABLE
-LEGACY_ENABLE_PATTERN_COLUMNS = False
-LEGACY_ENABLE_SHADOW_MICRO = not LEGACY_QUARANTINE_ENABLE
-LEGACY_ENABLE_MICRO_STRONG_FALLBACK = not LEGACY_QUARANTINE_ENABLE
-LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE = not LEGACY_QUARANTINE_ENABLE
+# Banderas LEGACY tomadas del bootstrap temprano de BLOQUE 2.
 
 PATTERN_V1_ENABLE = False  # CUARENTENA: sin efecto operativo
 PATTERN_V1_SCORE_THR = 6.0
@@ -14805,6 +14807,69 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         warmup_mode = bool(meta.get("warmup_mode", n_samples < int(TRAIN_WARMUP_MIN_ROWS)))
         model_family = str(meta.get("model_family", "") or "").strip().lower()
         ia_model_mature = bool((not warmup_mode) and reliable and (model_family != "sklearn_logreg_fallback"))
+
+        hard_guard_state = _estado_guardrail_ia_fuerte(force=False)
+        hard_guard_hard_block = bool(hard_guard_state.get("hard_block", False))
+        if hard_guard_hard_block and (not reliable) and (auc < 0.50) and (n_samples < int(TRAIN_WARMUP_MIN_ROWS)):
+            return _registrar_estado_embudo({
+                "decision_final": EMBUDO_FINAL_BLOCK_HARD,
+                "decision_reason": "guardrail_hard",
+                "gate_quality": "block",
+                "risk_mode": "BLOCK_HARD",
+                "hard_block_reason": "guardrail_hard",
+                "soft_wait_reason": "",
+                "top1_bot": top1_bot,
+                "top2_bot": top2_bot,
+                "gap_value": gap_value,
+                "top1_prob": top1_prob,
+                "top2_prob": top2_prob,
+                "degrade_from": "hard_guard",
+                "ia_real_backed": 0,
+                "real_source": "OPERATIVO_NO_IA",
+                "ia_model_mature": int(ia_model_mature),
+            })
+
+        decision = EMBUDO_FINAL_WAIT_SOFT
+        risk_mode = "WAIT_SOFT"
+        reason = "mrv_wait"
+        wait_reason = "mrv_wait"
+        quality = "wait"
+
+        ia_floor = float(max(get_umbral_operativo(), AUTO_REAL_UNRELIABLE_GATE_MIN_PROB))
+        ia_ok = bool(top1_prob >= ia_floor)
+        mrv_ok = bool(
+            (mrv_score >= float(MRV_SCORE_REAL_OK_MIN))
+            and (mrv_rupt <= float(MRV_RUPTURA_HARD_MAX))
+            and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
+            and (mrv_estado in ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA"))
+        )
+        # Fallback MRV explícito: no bloquear totalmente cuando la historia aún es insuficiente.
+        if (not mrv_ok) and (mrv_fallback_reason in ("low_history", "default")):
+            mrv_ok = bool(
+                (top1_prob >= float(max(0.66, ia_floor + 0.03)))
+                and (mrv_rupt <= 0.55)
+                and (mrv_vida >= 0.8)
+            )
+        guardrail_ok = bool(gap_ok and anti_rafaga_ok and (not cooldown_active))
+
+        if ia_ok and mrv_ok and guardrail_ok:
+            decision = EMBUDO_FINAL_REAL_OK
+            risk_mode = "REAL_OK"
+            reason = "mrv_ia_guard_ok"
+            wait_reason = ""
+            quality = "strong"
+        else:
+            if not ia_ok:
+                wait_reason = "ia_floor"
+            elif not mrv_ok:
+                wait_reason = "mrv_context"
+            elif cooldown_active:
+                wait_reason = "cooldown"
+            elif not gap_ok:
+                wait_reason = "gap_guard"
+            elif not anti_rafaga_ok:
+                wait_reason = "anti_rafaga"
+            reason = wait_reason
 
         decision, risk_mode, degrade_from, reason = _degradar_si_modelo_ia_inmaduro(
             decision=decision,
