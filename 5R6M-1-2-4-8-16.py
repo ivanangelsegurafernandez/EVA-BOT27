@@ -437,29 +437,24 @@ MODAL_ACTIVO = False
 sonido_disparado = False
 # === FIN BLOQUE 2 ===
 
-# === BLOQUE 2.5 — PLAN OPERATIVO PATRÓN V1 (RESUMEN EJECUTIVO) ===
-# IMPORTANTE:
-# - Este bloque NO reemplaza todavía la lógica de entrada actual.
-# - Sirve para dejar la integración preparada y revisable.
-# - Los candados existentes (hard_guard/confirm/trigger/roof) se mantienen.
-#
-# CUARENTENA ESTRUCTURAL (FASE LIMPIEZA):
-# - Aísla capas heredadas/experimentales sin borrarlas.
-# - Permite reactivar cada subsistema por bandera para compatibilidad.
+# === BLOQUE 2.5 — MRV (MOTOR DE RÉGIMEN VERDE) + CUARENTENA LEGACY ===
+# MRV es el motor estructural activo de contexto operativo.
+# La capa heredada (pattern/micro/shadow) queda en cuarentena para compatibilidad/telemetría.
+# DYN_ROOF se conserva como guardrail mínimo (anti-ráfaga/cooldown/gap), sin gobernar el contexto principal.
 LEGACY_QUARANTINE_ENABLE = True
 LEGACY_ENABLE_PATTERN_V1 = not LEGACY_QUARANTINE_ENABLE
-LEGACY_ENABLE_PATTERN_COLUMNS = True
+LEGACY_ENABLE_PATTERN_COLUMNS = False
 LEGACY_ENABLE_SHADOW_MICRO = not LEGACY_QUARANTINE_ENABLE
 LEGACY_ENABLE_MICRO_STRONG_FALLBACK = not LEGACY_QUARANTINE_ENABLE
 LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE = not LEGACY_QUARANTINE_ENABLE
 
-PATTERN_V1_ENABLE = bool(LEGACY_ENABLE_PATTERN_V1)
+PATTERN_V1_ENABLE = False  # CUARENTENA: sin efecto operativo
 PATTERN_V1_SCORE_THR = 6.0
 PATTERN_V1_BONUS_DUAL = 1.0
 PATTERN_V1_PENAL_TARDIA = 2.0
 PATTERN_V1_REQUIRE_CONFIRM_FULL = True   # confirm=2/2
 PATTERN_V1_REQUIRE_TRIGGER_OK = True     # trigger_ok=sí
-PATTERN_V1_USE_HYBRID_RANKING = True    # ranking híbrido operativo (prob + pattern + evidencia)
+PATTERN_V1_USE_HYBRID_RANKING = False   # CUARENTENA: sin impacto operativo en ranking
 PATTERN_V1_LOG_COOLDOWN_S = 25.0
 PATTERN_V1_HYBRID_PTS_TO_PROB = 0.03  # 1 punto pattern = 3pp sobre score probabilístico
 PATTERN_COL_WINDOW = 40
@@ -469,7 +464,7 @@ PATTERN_REBOTE_LOOKBACK = 12
 PATTERN_REBOTE_MIN = 0.65
 PATTERN_REBOTE_MIN_SAMPLES = 3
 PATTERN_STRONG_STREAK_BLOCK = 2
-PATTERN_ENABLE = bool(LEGACY_ENABLE_PATTERN_COLUMNS)
+PATTERN_ENABLE = False  # CUARENTENA: telemetría sin efecto en decisión
 PATTERN_COL_BONUS_CONTINUIDAD = 0.60
 PATTERN_COL_BONUS_REBOTE = 0.80
 PATTERN_COL_PENAL_SATURACION = 1.20
@@ -527,14 +522,182 @@ _REAL_SHADOW_MICRO_LAST_LOG_TS = 0.0
 REAL_MICRO_STRONG_GATE_FALLBACK_ENABLE = bool(LEGACY_ENABLE_MICRO_STRONG_FALLBACK)
 REAL_MICRO_STRONG_GATE_MIN_PROB = 0.60
 EMBUDO_FINAL_BLOCK_HARD = "BLOCK_HARD"
+EMBUDO_FINAL_WAIT = "WAIT"
 EMBUDO_FINAL_WAIT_SOFT = "WAIT_SOFT"
-EMBUDO_FINAL_REAL_MICRO = "REAL_MICRO"
-EMBUDO_FINAL_REAL_NORMAL = "REAL_NORMAL"
-EMBUDO_FINAL_SHADOW_OK = "SHADOW_OK"
+EMBUDO_FINAL_REAL_OK = "REAL_OK"
+# Aliases de compatibilidad (sin fragmentar la decisión final).
+EMBUDO_FINAL_REAL_MICRO = EMBUDO_FINAL_REAL_OK
+EMBUDO_FINAL_REAL_NORMAL = EMBUDO_FINAL_REAL_OK
+EMBUDO_FINAL_SHADOW_OK = EMBUDO_FINAL_WAIT_SOFT
 IA_PROB_POLARIZE_ENABLE = True
 IA_PROB_POLARIZE_FACTOR_RELIABLE = 1.25
 IA_PROB_POLARIZE_FACTOR_UNRELIABLE = 2.05
 IA_PROB_POLARIZE_CENTER = 0.50
+
+# === MRV: Motor de Régimen Verde (motor estructural) ===
+MRV_ENABLE = True
+MRV_WINDOW_SHORT = 8
+MRV_WINDOW_MED = 16
+MRV_MIN_HISTORY = 6
+MRV_FALLBACK_VIDA = 2.5
+MRV_SCORE_REAL_OK_MIN = 0.55
+MRV_RUPTURA_HARD_MAX = 0.68
+MRV_VIDA_MIN_REAL = 1.0
+MRV_ESTADOS = ["ESPERA", "PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "AGOTAMIENTO"]
+MRV_ESTADO_TO_NUM = {"ESPERA": 0.0, "PRE_ZONA": 1.0, "ZONA_CONFIRMADA": 2.0, "ZONA_MADURA": 3.0, "AGOTAMIENTO": 4.0}
+MRV_FEATURE_NAMES = [
+    "mrv_p_inicio", "mrv_p_continuidad", "mrv_p_ruptura_inmediata", "mrv_p_agotamiento_progresivo",
+    "mrv_score_zona", "mrv_vida_util_restante", "mrv_estado_num",
+    "mrv_densidad_corta", "mrv_densidad_media", "mrv_compacidad", "mrv_fragmentacion",
+]
+
+
+def _mrv_default_payload(now_ts: float | None = None, reason: str = "default") -> dict:
+    ts = float(time.time() if now_ts is None else now_ts)
+    return {
+        "mrv_p_inicio": 0.20,
+        "mrv_p_continuidad": 0.35,
+        "mrv_p_ruptura_inmediata": 0.40,
+        "mrv_p_agotamiento_progresivo": 0.45,
+        "mrv_score_zona": 0.30,
+        "mrv_vida_util_restante": float(MRV_FALLBACK_VIDA),
+        "mrv_estado": "ESPERA",
+        "mrv_estado_num": float(MRV_ESTADO_TO_NUM.get("ESPERA", 0.0)),
+        "mrv_last_update_ts": ts,
+        "mrv_densidad_corta": 0.50,
+        "mrv_densidad_media": 0.50,
+        "mrv_compacidad": 0.50,
+        "mrv_fragmentacion": 0.50,
+        "mrv_fallback_reason": str(reason),
+    }
+
+
+def _mrv_historico_bot(bot: str) -> dict:
+    """MRV histórico: usa solo historial cerrado del bot (sin look-ahead)."""
+    st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+    rr = list(st.get("resultados", []) or [])
+    vals = []
+    for x in rr[-max(4, int(MRV_WINDOW_MED)):]:
+        sx = str(x).upper()
+        vals.append(1.0 if sx in ("GANANCIA", "WIN", "G") else 0.0)
+    if not vals:
+        return {
+            "n": 0,
+            "dens_short": 0.5,
+            "dens_med": 0.5,
+            "alternancia": 0.5,
+            "fragmentacion": 0.5,
+            "stability": 0.5,
+        }
+    arr = np.asarray(vals, dtype=float)
+    n = int(arr.size)
+    ws = int(max(2, min(n, int(MRV_WINDOW_SHORT))))
+    wm = int(max(ws, min(n, int(MRV_WINDOW_MED))))
+    short = arr[-ws:]
+    med = arr[-wm:]
+    dens_short = float(np.mean(short))
+    dens_med = float(np.mean(med))
+    if n >= 2:
+        dif = np.abs(np.diff(arr))
+        alternancia = float(np.mean(dif))
+        fragmentacion = float(np.clip(alternancia, 0.0, 1.0))
+        stability = float(1.0 - fragmentacion)
+    else:
+        alternancia = 0.5
+        fragmentacion = 0.5
+        stability = 0.5
+    return {
+        "n": n,
+        "dens_short": dens_short,
+        "dens_med": dens_med,
+        "alternancia": alternancia,
+        "fragmentacion": fragmentacion,
+        "stability": stability,
+    }
+
+
+def _mrv_online_bot(bot: str, row: dict | None = None) -> dict:
+    """MRV online: borde derecho + histórico cerrado + contexto comparativo entre bots."""
+    now = float(time.time())
+    if not bool(MRV_ENABLE):
+        return _mrv_default_payload(now_ts=now, reason="mrv_disabled")
+    try:
+        hist = _mrv_historico_bot(bot)
+        n = int(hist.get("n", 0) or 0)
+        if n < int(MRV_MIN_HISTORY):
+            out = _mrv_default_payload(now_ts=now, reason="low_history")
+            out["mrv_densidad_corta"] = float(hist.get("dens_short", 0.5) or 0.5)
+            out["mrv_densidad_media"] = float(hist.get("dens_med", 0.5) or 0.5)
+            out["mrv_fragmentacion"] = float(hist.get("fragmentacion", 0.5) or 0.5)
+            out["mrv_compacidad"] = float(1.0 - out["mrv_fragmentacion"])
+            return out
+
+        dens_s = float(hist.get("dens_short", 0.5) or 0.5)
+        dens_m = float(hist.get("dens_med", 0.5) or 0.5)
+        frag = float(hist.get("fragmentacion", 0.5) or 0.5)
+        comp = float(np.clip(1.0 - frag, 0.0, 1.0))
+        stability = float(hist.get("stability", 0.5) or 0.5)
+
+        d = row if isinstance(row, dict) else {}
+        racha = float(d.get("racha_actual", 0.0) or 0.0)
+        rebote = float(d.get("es_rebote", 0.0) or 0.0)
+        vol = float(d.get("volatilidad", 0.5) or 0.5)
+        slope = float(d.get("slope_5m", 0.0) or 0.0)
+        p_ia = float(estado_bots.get(bot, {}).get("prob_ia_oper", estado_bots.get(bot, {}).get("prob_ia", 0.5)) or 0.5)
+
+        peers = []
+        for b in BOT_NAMES:
+            stp = estado_bots.get(b, {}) if isinstance(estado_bots, dict) else {}
+            peers.append(float(stp.get("mrv_score_zona", 0.3) or 0.3))
+        peers_mean = float(np.mean(peers)) if peers else 0.3
+        rel_ctx = float(np.clip(0.5 + (peers_mean - 0.3), 0.0, 1.0))
+
+        p_inicio = float(np.clip(0.35 * (1.0 - dens_m) + 0.20 * max(0.0, rebote) + 0.20 * max(0.0, slope) + 0.10 * (1.0 - vol) + 0.15 * comp, 0.0, 1.0))
+        p_cont = float(np.clip(0.40 * dens_s + 0.20 * dens_m + 0.15 * comp + 0.10 * max(0.0, slope) + 0.10 * max(0.0, racha / 6.0) + 0.05 * rel_ctx, 0.0, 1.0))
+        p_rupt = float(np.clip(0.35 * frag + 0.25 * vol + 0.20 * max(0.0, -slope) + 0.20 * max(0.0, -racha / 6.0), 0.0, 1.0))
+        p_agot = float(np.clip(0.30 * max(0.0, dens_m - dens_s) + 0.25 * max(0.0, racha / 8.0) + 0.20 * (1.0 - stability) + 0.25 * p_rupt, 0.0, 1.0))
+        score = float(np.clip(0.45 * p_cont + 0.20 * p_inicio + 0.15 * comp + 0.10 * p_ia + 0.10 * (1.0 - p_rupt), 0.0, 1.0))
+        dur_total = float(np.clip(1.0 + 8.0 * p_cont + 2.0 * p_inicio - 4.0 * p_agot, 1.0, 12.0))
+        vida_restante = float(np.clip(dur_total * max(0.1, (1.0 - max(p_rupt, p_agot))), 0.5, 12.0))
+
+        if score < 0.40:
+            estado = "ESPERA"
+        elif p_inicio >= 0.55 and p_cont < 0.55:
+            estado = "PRE_ZONA"
+        elif p_cont >= 0.68 and score >= 0.68 and p_rupt < 0.45:
+            estado = "ZONA_MADURA"
+        elif p_cont >= 0.55 and score >= 0.55:
+            estado = "ZONA_CONFIRMADA"
+        else:
+            estado = "AGOTAMIENTO" if (p_agot >= 0.55 or p_rupt >= 0.60) else "PRE_ZONA"
+
+        return {
+            "mrv_p_inicio": p_inicio,
+            "mrv_p_continuidad": p_cont,
+            "mrv_p_ruptura_inmediata": p_rupt,
+            "mrv_p_agotamiento_progresivo": p_agot,
+            "mrv_score_zona": score,
+            "mrv_vida_util_restante": vida_restante,
+            "mrv_estado": estado,
+            "mrv_estado_num": float(MRV_ESTADO_TO_NUM.get(estado, 0.0)),
+            "mrv_last_update_ts": now,
+            "mrv_densidad_corta": dens_s,
+            "mrv_densidad_media": dens_m,
+            "mrv_compacidad": comp,
+            "mrv_fragmentacion": frag,
+            "mrv_fallback_reason": "",
+        }
+    except Exception:
+        return _mrv_default_payload(now_ts=now, reason="calc_error")
+
+
+def _mrv_update_bot_state(bot: str, row: dict | None = None) -> dict:
+    payload = _mrv_online_bot(bot, row=row)
+    try:
+        estado_bots.get(bot, {}).update(payload)
+    except Exception:
+        pass
+    return payload
 
 
 def _validar_pattern_v1_config() -> None:
@@ -650,58 +813,8 @@ def _resolver_estado_real(meta_live: dict | None = None) -> str:
 
 
 def _micro_pattern_gate_ok(bot: str, ctx: dict | None = None) -> tuple[bool, str]:
-    """Filtro principal en MICRO: patrón dual + estructura + recencia mínima."""
-    try:
-        if not bool(REAL_MICRO_REQUIRE_PATTERN):
-            return True, "off"
-        st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
-        c = ctx if isinstance(ctx, dict) else _ultimo_contexto_operativo_bot(bot)
-        q3, q2 = _pattern_v1_thresholds_proxy()
-        p_score, p_bonus, p_penal, p_total = pattern_score_operativo_v1(c or {}, q3, q2)
-        strict_ok = True
-        why = f"pat={p_total:.1f}"
-        if float(p_total) < float(REAL_MICRO_PATTERN_MIN_TOTAL):
-            strict_ok = False
-            why = f"pat<{REAL_MICRO_PATTERN_MIN_TOTAL:.1f}"
-        if strict_ok and bool(REAL_MICRO_REQUIRE_DUAL) and float(p_bonus) <= 0.0:
-            strict_ok = False
-            why = "dual=no"
-        if strict_ok and bool(REAL_MICRO_REQUIRE_STRUCTURE):
-            breakout_ok = bool(float((c or {}).get("breakout", 0.0) or 0.0) >= float(q3.get("breakout", 1e9)))
-            cruce_ok = bool(float((c or {}).get("cruce_sma", 0.0) or 0.0) >= float(q3.get("cruce_sma", 1e9)))
-            if not (breakout_ok or cruce_ok):
-                strict_ok = False
-                why = "struct=no"
-
-        g = int(st.get("ganancias", 0) or 0)
-        d = int(st.get("perdidas", 0) or 0)
-        n = int(max(0, g + d))
-        wr = float((g + 1.0) / (n + 2.0))
-        if strict_ok and n >= int(REAL_MICRO_MIN_TRADES) and wr < float(REAL_MICRO_MIN_WR):
-            strict_ok = False
-            why = f"wr<{REAL_MICRO_MIN_WR*100:.0f}%"
-        if strict_ok and float(p_penal) > 0.0:
-            strict_ok = False
-            why = "late=veto"
-        if strict_ok:
-            return True, why
-
-        # Fallback suave: permite fluir entradas cuando la calidad viva es alta
-        # aunque el patrón dual/estructura no complete en ese tick.
-        if bool(REAL_MICRO_ALLOW_SOFT_HIGH_PROB):
-            p_oper = float(st.get("prob_ia_oper", st.get("prob_ia", 0.0)) or 0.0)
-            suceso = float(st.get("ia_suceso_idx", 0.0) or 0.0)
-            if (
-                p_oper >= float(REAL_MICRO_SOFT_MIN_PROB)
-                and suceso >= float(REAL_MICRO_SOFT_MIN_SUCESO)
-                and wr >= float(REAL_MICRO_SOFT_MIN_WR)
-                and float(p_penal) <= float(PATTERN_V1_PENAL_TARDIA)
-            ):
-                return True, f"soft:p={p_oper*100:.1f}%/s={suceso:.1f}"
-
-        return False, why
-    except Exception:
-        return False, "pattern_err"
+    """CUARENTENA FUNCIONAL: gate heredado de patrón sin efecto operativo."""
+    return True, "quarantine_off"
 
 
 def _shadow_micro_quota_status(now_ts: float | None = None) -> tuple[int, int, float]:
@@ -720,80 +833,13 @@ def _shadow_micro_quota_status(now_ts: float | None = None) -> tuple[int, int, f
 
 
 def _shadow_micro_gate_ok(candidatos: list, dyn_gate: dict | None = None) -> tuple[bool, str]:
-    """Bypass seguro para permitir micro-REAL temporal aun en SHADOW."""
-    global _REAL_SHADOW_MICRO_LAST_LOG_TS
-    try:
-        if not bool(REAL_SHADOW_MICRO_ENABLE):
-            return False, "off"
-        if not candidatos:
-            return False, "sin_candidatos"
-        if not bool(_todos_bots_con_n_minimo_real()):
-            return False, "n_min_real"
-
-        dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
-        confirm_need = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
-        confirm_ok = int(dgate.get("confirm_streak", 0) or 0) >= confirm_need
-        trigger_ok = bool(dgate.get("trigger_ok", False))
-        allow_gate = bool(dgate.get("allow_real", False))
-
-        best = candidatos[0]
-        best_bot = str(best[1])
-        p_best = float(best[2] or 0.0)
-        if best_bot != str(dgate.get("best_bot", best_bot)):
-            return False, "best_mismatch"
-        if p_best < float(REAL_SHADOW_MICRO_MIN_PROB):
-            return False, f"p<{REAL_SHADOW_MICRO_MIN_PROB*100:.0f}%"
-        if not (confirm_ok and trigger_ok and allow_gate):
-            return False, "gate_debil"
-
-        hg = _estado_guardrail_ia_fuerte(force=False)
-        if bool(hg.get("hard_block", False)):
-            return False, "hard_guard"
-
-        left, used, window_s = _shadow_micro_quota_status()
-        if left <= 0:
-            return False, f"quota:{used}/{max(1, int(REAL_SHADOW_MICRO_MAX_ENTRIES))}/{int(window_s//60)}m"
-
-        now = time.time()
-        if (now - float(_REAL_SHADOW_MICRO_LAST_LOG_TS or 0.0)) >= float(REAL_SHADOW_MICRO_LOG_COOLDOWN_S):
-            _REAL_SHADOW_MICRO_LAST_LOG_TS = float(now)
-            agregar_evento(
-                f"🟢 REAL=SHADOW→MICRO temporal: {best_bot} p={p_best*100:.1f}% "
-                f"confirm={int(dgate.get('confirm_streak', 0))}/{confirm_need} trigger_ok=sí "
-                f"quota={used}/{max(1, int(REAL_SHADOW_MICRO_MAX_ENTRIES))}"
-            )
-        return True, "ok"
-    except Exception:
-        return False, "shadow_micro_err"
+    """CUARENTENA FUNCIONAL: bypass SHADOW/MICRO heredado desactivado."""
+    return False, "quarantine_off"
 
 
 def _micro_strong_gate_fallback_ok(candidatos: list, dyn_gate: dict | None = None) -> tuple[bool, str]:
-    """Fallback moderado para MICRO cuando el patrón no completa pero la compuerta está sólida."""
-    try:
-        if not bool(REAL_MICRO_STRONG_GATE_FALLBACK_ENABLE):
-            return False, "off"
-        if not candidatos:
-            return False, "sin_candidatos"
-        dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
-        top = candidatos[0]
-        best_bot = str(top[1])
-        p_best = float(top[2] or 0.0)
-        confirm_need = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
-        confirm_ok = int(dgate.get("confirm_streak", 0) or 0) >= confirm_need
-        trigger_ok = bool(dgate.get("trigger_ok", False))
-        allow_gate = bool(dgate.get("allow_real", False))
-        if best_bot != str(dgate.get("best_bot", best_bot)):
-            return False, "best_mismatch"
-        if p_best < float(REAL_MICRO_STRONG_GATE_MIN_PROB):
-            return False, f"p<{REAL_MICRO_STRONG_GATE_MIN_PROB*100:.0f}%"
-        if not (confirm_ok and trigger_ok and allow_gate):
-            return False, "gate_debil"
-        hg = _estado_guardrail_ia_fuerte(force=False)
-        if bool(hg.get("hard_block", False)):
-            return False, "hard_guard"
-        return True, f"p={p_best*100:.1f}%"
-    except Exception:
-        return False, "micro_fallback_err"
+    """CUARENTENA FUNCIONAL: fallback fuerte heredado desactivado."""
+    return False, "quarantine_off"
 
 
 _validar_pattern_v1_config()
@@ -1244,6 +1290,20 @@ estado_bots = {
         "ia_pattern_col_bonus": 0.0,
         "ia_pattern_col_penal": 0.0,
         "ia_pattern_col_delta": 0.0,
+        # MRV (Motor de Régimen Verde)
+        "mrv_p_inicio": 0.20,
+        "mrv_p_continuidad": 0.35,
+        "mrv_p_ruptura_inmediata": 0.40,
+        "mrv_p_agotamiento_progresivo": 0.45,
+        "mrv_score_zona": 0.30,
+        "mrv_vida_util_restante": float(MRV_FALLBACK_VIDA),
+        "mrv_estado": "ESPERA",
+        "mrv_estado_num": 0.0,
+        "mrv_last_update_ts": 0.0,
+        "mrv_densidad_corta": 0.50,
+        "mrv_densidad_media": 0.50,
+        "mrv_compacidad": 0.50,
+        "mrv_fragmentacion": 0.50,
     }
     for bot in BOT_NAMES
 }
@@ -1470,6 +1530,9 @@ INCREMENTAL_META_FLAGS = ["row_has_proxy_features", "row_train_eligible"]
 for _c in INCREMENTAL_CLOSE_COLS:
     if _c not in INCREMENTAL_FEATURES_V2:
         INCREMENTAL_FEATURES_V2.append(_c)
+for _mrv_f in MRV_FEATURE_NAMES:
+    if _mrv_f not in INCREMENTAL_FEATURES_V2:
+        INCREMENTAL_FEATURES_V2.append(_mrv_f)
 # === LOCK ESTRICTO (solo para escrituras sensibles como incremental.csv) ===
 @contextmanager
 def file_lock_required(path: str, timeout: float = 6.0, stale_after: float = 30.0):
@@ -3358,6 +3421,13 @@ def _enriquecer_scalping_features_row(fila_dict: dict) -> dict:
         else:
             out["micro_trend_persist"] = float(np.clip(racha / 10.0, -1.0, 1.0))
             proxy_used.add("micro_trend_persist")
+
+    # MRV defaults seguros para compatibilidad de incremental/modelos nuevos-viejos.
+    mrv_def = _mrv_default_payload(reason="row_enrich_default")
+    for mk in MRV_FEATURE_NAMES:
+        if _missing(mk):
+            out[mk] = float(mrv_def.get(mk, 0.0) or 0.0)
+            proxy_used.add(mk)
 
     core_scalping_ready = _core_scalping_ready_from_row(out)
     if len(close_vals) < 20 and (not core_scalping_ready):
@@ -6802,6 +6872,14 @@ def _add_derived_for_model(d: dict):
         rsi_rev = 0.0
     d["rev_x_breakout"] = rsi_rev * brk
 
+    # Compatibilidad MRV: garantizar presencia estable si el modelo/feature-set lo espera.
+    mrv_def = _mrv_default_payload(reason="derived_default")
+    for mk in MRV_FEATURE_NAMES:
+        try:
+            d[mk] = float(d.get(mk, mrv_def.get(mk, 0.0)) or 0.0)
+        except Exception:
+            d[mk] = float(mrv_def.get(mk, 0.0) or 0.0)
+
     return d
 
 def leer_ultima_fila_features_para_pred(bot: str) -> dict | None:
@@ -6966,6 +7044,12 @@ def leer_ultima_fila_features_para_pred(bot: str) -> dict | None:
         if pe_raw is None:
             return None
         row["puntaje_estrategia"] = float(max(0.0, min(float(pe_raw), 1.0)))
+
+    # MRV online por bot (sin fuga temporal: solo borde derecho + histórico cerrado).
+    try:
+        row.update(_mrv_update_bot_state(bot, row=row))
+    except Exception:
+        row.update(_mrv_default_payload(reason="pred_row_mrv_fail"))
 
     # Derived extras (por si el modelo los espera)
     row = _add_derived_for_model(row)
@@ -12572,6 +12656,16 @@ def mostrar_panel():
             ref_racha = ultimo_bot_real if ultimo_bot_real in BOT_NAMES else "--"
             elegido_tick = mejor[0] if isinstance(mejor, tuple) and len(mejor) >= 1 else "--"
             print(padding + Fore.CYAN + f"🧾 Contexto racha: ref={ref_racha} | elegido_tick={elegido_tick} | token_real={owner_txt}")
+            try:
+                top1_mrv = str(emb.get("top1_bot") or "")
+                st_mrv = estado_bots.get(top1_mrv, {}) if top1_mrv else {}
+                print(
+                    padding + Fore.CYAN +
+                    f"🟩 MRV: estado={st_mrv.get('mrv_estado','--')} score={float(st_mrv.get('mrv_score_zona',0.0) or 0.0):.2f} "
+                    f"rupt={float(st_mrv.get('mrv_p_ruptura_inmediata',0.0) or 0.0)*100:.0f}% vida={float(st_mrv.get('mrv_vida_util_restante',0.0) or 0.0):.1f}"
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -13404,7 +13498,7 @@ def condiciones_seguras_para(bot: str) -> bool:
     top1 = str(emb.get("top1_bot") or "")
     if top1 and bot != top1:
         return False
-    return (n >= ORACULO_N_MIN) and (prob >= thr) and (dec in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO))
+    return (n >= ORACULO_N_MIN) and (prob >= thr) and (dec == EMBUDO_FINAL_REAL_OK)
 
 # forzar_real_manual
 def forzar_real_manual(bot: str, ciclo: int):
@@ -13516,13 +13610,10 @@ def evaluar_semaforo():
         return "🔴", "BLOQUEO", f"{emb.get('hard_block_reason') or reason}"
     if dec == EMBUDO_FINAL_WAIT_SOFT:
         return "🟡", "EN ESPERA", f"{emb.get('soft_wait_reason') or reason}"
-    if dec == EMBUDO_FINAL_SHADOW_OK:
-        return "🔵", "SHADOW", f"{reason} (no ejecuta REAL)"
-    if dec in (EMBUDO_FINAL_REAL_MICRO, EMBUDO_FINAL_REAL_NORMAL):
+    if dec == EMBUDO_FINAL_REAL_OK:
         if (not top1) or (prob < thr):
             return "🟡", "EN ESPERA", f"Top1 no operativo ({top1 or '--'} p={prob:.0%}<{int(thr*100)}%)."
-        modo = "MICRO" if dec == EMBUDO_FINAL_REAL_MICRO else "NORMAL"
-        return "🟢", "SEÑAL LISTA", f"{top1} • ProbOper={prob:.0%} • n={n} • modo={modo}"
+        return "🟢", "SEÑAL LISTA", f"{top1} • ProbOper={prob:.0%} • n={n} • modo=REAL_OK"
 
     return "🟡", "EN ESPERA", f"Sin decisión embudo ({reason})."
 
@@ -14538,54 +14629,10 @@ def _actualizar_compuerta_techo_dinamico() -> dict:
             and (float(p_best) >= float(floor_eff - DYN_ROOF_TRIGGER_FORCE_MARGIN))
         )
 
+        # CUARENTENA FUNCIONAL: desactivar disparadores heredados de patrón/micro-soft.
         trigger_pattern = False
         trigger_soft = False
         trigger_ok_micro_soft = False
-        if modo_relajado_n15 and (not reliable_mode):
-            try:
-                ctx_best = _ultimo_contexto_operativo_bot(str(best_bot))
-                ok_pat, _why_pat = _micro_pattern_gate_ok(str(best_bot), ctx_best)
-                trigger_pattern = bool(ok_pat and (float(p_best) >= float(floor_eff)))
-
-                if bool(DYN_ROOF_UNRELIABLE_TRIGGER_SOFT_ENABLE):
-                    q3p, q2p = _pattern_v1_thresholds_proxy()
-                    _ps, _pb, _pp, _pt = pattern_score_operativo_v1(ctx_best or {}, q3p, q2p)
-                    suceso_idx_best = float(estado_bots.get(str(best_bot), {}).get("ia_suceso_idx", 0.0) or 0.0)
-                    near_roof_soft = bool(float(p_best) >= float(max(float(floor_eff), float(roof_eff - DYN_ROOF_UNRELIABLE_TRIGGER_SOFT_MARGIN))))
-                    confirm_soft = bool(int(confirm_streak) >= max(1, int(confirm_need) - 1))
-                    trigger_soft = bool(
-                        near_roof_soft
-                        and confirm_soft
-                        and ((suceso_idx_best >= float(DYN_ROOF_UNRELIABLE_TRIGGER_SOFT_MIN_SUCESO)) or (float(_pt) >= float(DYN_ROOF_UNRELIABLE_TRIGGER_SOFT_MIN_PATTERN)))
-                    )
-            except Exception:
-                trigger_pattern = False
-                trigger_soft = False
-        if modo_relajado_n15 and reliable_mode and bool(DYN_ROOF_RELIABLE_TRIGGER_SOFT_ENABLE):
-            try:
-                ctx_best_rel = _ultimo_contexto_operativo_bot(str(best_bot))
-                q3p_rel, q2p_rel = _pattern_v1_thresholds_proxy()
-                _ps_rel, _pb_rel, _pp_rel, _pt_rel = pattern_score_operativo_v1(ctx_best_rel or {}, q3p_rel, q2p_rel)
-                suceso_idx_best_rel = float(estado_bots.get(str(best_bot), {}).get("ia_suceso_idx", 0.0) or 0.0)
-                pat_state_rel = str(estado_bots.get(str(best_bot), {}).get("ia_pattern_col_state", "BLOQUEADO") or "BLOQUEADO")
-                near_roof_soft_rel = bool(
-                    float(p_best) >= float(max(float(floor_eff), float(roof_eff - DYN_ROOF_RELIABLE_TRIGGER_SOFT_MARGIN)))
-                )
-                confirm_soft_rel = bool(int(confirm_streak) >= max(1, int(confirm_need) - 1))
-                context_soft_rel = bool(
-                    (suceso_idx_best_rel >= float(DYN_ROOF_RELIABLE_TRIGGER_SOFT_MIN_SUCESO))
-                    or (float(_pt_rel) >= float(DYN_ROOF_RELIABLE_TRIGGER_SOFT_MIN_PATTERN))
-                    or (pat_state_rel == "CONTINUIDAD")
-                )
-                trigger_ok_micro_soft = bool(
-                    (n_samples_meta >= 300)
-                    and near_roof_soft_rel
-                    and confirm_soft_rel
-                    and bool(gap_ok)
-                    and context_soft_rel
-                )
-            except Exception:
-                trigger_ok_micro_soft = False
 
         if mode_c_active:
             trigger_ok = bool(suceso_ok)
@@ -14696,24 +14743,24 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
 
 
 def _degradar_si_modelo_ia_inmaduro(decision: str, risk_mode: str, degrade_from: str, reason: str, warmup_mode: bool, model_family: str, ia_model_mature: bool) -> tuple[str, str, str, str]:
-    """Degrada decisión a SHADOW cuando el modelo IA no está maduro."""
-    if ia_model_mature or decision not in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
+    """Degrada decisión a WAIT cuando el modelo IA no está maduro."""
+    if ia_model_mature or decision != EMBUDO_FINAL_REAL_OK:
         return decision, risk_mode, degrade_from, reason
-    decision = EMBUDO_FINAL_SHADOW_OK
-    risk_mode = "SHADOW_OK"
+    decision = EMBUDO_FINAL_WAIT_SOFT
+    risk_mode = "WAIT_SOFT"
     if warmup_mode:
-        return decision, risk_mode, "ia_immature_warmup", "ia_immature_warmup->shadow"
+        return decision, risk_mode, "ia_immature_warmup", "ia_immature_warmup->wait"
     if model_family == "sklearn_logreg_fallback":
-        return decision, risk_mode, "ia_immature_fallback", "ia_fallback->shadow"
-    return decision, risk_mode, "ia_immature_unreliable", "ia_unreliable->shadow"
+        return decision, risk_mode, "ia_immature_fallback", "ia_fallback->wait"
+    return decision, risk_mode, "ia_immature_unreliable", "ia_unreliable->wait"
 
 
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
-    """Embudo unificado: selección -> calidad blanda -> modulación -> estado final."""
+    """Embudo final mínimo: MRV + IA + guardrails reales."""
     out = _registrar_estado_embudo({
         "decision_final": EMBUDO_FINAL_WAIT_SOFT,
         "decision_reason": "sin_candidatos",
-        "gate_quality": "weak",
+        "gate_quality": "wait",
         "risk_mode": "WAIT_SOFT",
         "soft_wait_reason": "sin_candidatos",
         "hard_block_reason": "",
@@ -14739,211 +14786,102 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         top2_prob = float(top2[2] or 0.0) if top2 else 0.0
         gap_value = float(top1_prob - top2_prob)
 
+        st_top = estado_bots.get(top1_bot, {}) if isinstance(estado_bots, dict) else {}
+        mrv_score = float(st_top.get("mrv_score_zona", 0.0) or 0.0)
+        mrv_rupt = float(st_top.get("mrv_p_ruptura_inmediata", 1.0) or 1.0)
+        mrv_vida = float(st_top.get("mrv_vida_util_restante", 0.0) or 0.0)
+        mrv_estado = str(st_top.get("mrv_estado", "ESPERA") or "ESPERA")
+        mrv_fallback_reason = str(st_top.get("mrv_fallback_reason", "") or "")
+
         dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
-        allow_real = bool(dgate.get("allow_real", False))
-        trigger_ok = bool(dgate.get("trigger_ok", False))
-        gap_ok = bool(dgate.get("gap_ok", False))
-        floor_eff = float(dgate.get("floor_eff", 0.0) or 0.0)
-        confirm_need = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
-        confirm_streak = int(dgate.get("confirm_streak", 0) or 0)
-        confirm_ok = bool(confirm_streak >= confirm_need)
-
-        quality = "weak"
-        if allow_real and trigger_ok and confirm_ok:
-            quality = "strong"
-        elif (allow_real and trigger_ok) or (allow_real and confirm_ok):
-            quality = "medium"
-        elif allow_real or trigger_ok or confirm_streak > 0:
-            quality = "weak"
-        else:
-            quality = "wait"
-
-        decision = EMBUDO_FINAL_WAIT_SOFT
-        reason = f"gate:{quality}"
-        risk_mode = "WAIT_SOFT"
-        soft_wait_reason = ""
-
-        if quality == "strong":
-            decision = EMBUDO_FINAL_REAL_NORMAL
-            risk_mode = "REAL_NORMAL"
-        elif quality == "medium":
-            decision = EMBUDO_FINAL_REAL_MICRO
-            risk_mode = "REAL_MICRO"
-        elif quality == "weak":
-            decision = EMBUDO_FINAL_SHADOW_OK
-            risk_mode = "SHADOW_OK"
-        else:
-            soft_wait_reason = "gate_wait"
+        gap_ok = bool(dgate.get("gap_ok", True))
+        anti_rafaga_ok = bool(dgate.get("crossed_up", True) or dgate.get("trigger_force", False) or dgate.get("trigger_ok", False))
+        cooldown_active = bool(time.time() < float(REAL_COOLDOWN_UNTIL_TS))
 
         meta = meta_live if isinstance(meta_live, dict) else {}
         n_samples = int(meta.get("n_samples", meta.get("n", 0)) or 0)
         reliable = bool(meta.get("reliable", False))
-        canary = bool(meta.get("canary_mode", False))
         auc = float(meta.get("auc", 0.0) or 0.0)
         warmup_mode = bool(meta.get("warmup_mode", n_samples < int(TRAIN_WARMUP_MIN_ROWS)))
         model_family = str(meta.get("model_family", "") or "").strip().lower()
         ia_model_mature = bool((not warmup_mode) and reliable and (model_family != "sklearn_logreg_fallback"))
-        degrade_from = "none"
 
-        if canary and decision == EMBUDO_FINAL_REAL_NORMAL:
-            decision = EMBUDO_FINAL_REAL_MICRO
-            risk_mode = "REAL_MICRO"
-            degrade_from = "canary"
-            reason = "canary->micro"
+        hard_guard_state = _estado_guardrail_ia_fuerte(force=False)
+        hard_guard_hard_block = bool(hard_guard_state.get("hard_block", False))
+        if hard_guard_hard_block and (not reliable) and (auc < 0.50) and (n_samples < int(TRAIN_WARMUP_MIN_ROWS)):
+            return _registrar_estado_embudo({
+                "decision_final": EMBUDO_FINAL_BLOCK_HARD,
+                "decision_reason": "guardrail_hard",
+                "gate_quality": "block",
+                "risk_mode": "BLOCK_HARD",
+                "hard_block_reason": "guardrail_hard",
+                "soft_wait_reason": "",
+                "top1_bot": top1_bot,
+                "top2_bot": top2_bot,
+                "gap_value": gap_value,
+                "top1_prob": top1_prob,
+                "top2_prob": top2_prob,
+                "degrade_from": "hard_guard",
+                "ia_real_backed": 0,
+                "real_source": "OPERATIVO_NO_IA",
+                "ia_model_mature": int(ia_model_mature),
+            })
 
-        if bool(AUTO_REAL_BLOCK_WHEN_WARMUP) and warmup_mode and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
-            decision = EMBUDO_FINAL_SHADOW_OK
-            risk_mode = "SHADOW_OK"
-            degrade_from = "warmup"
-            reason = "warmup->shadow"
-        if not reliable:
-            if decision == EMBUDO_FINAL_REAL_NORMAL:
-                decision = EMBUDO_FINAL_REAL_MICRO
-                risk_mode = "REAL_MICRO"
-                degrade_from = "unreliable"
-                reason = "unreliable->micro"
-            elif decision == EMBUDO_FINAL_REAL_MICRO:
-                decision = EMBUDO_FINAL_SHADOW_OK
-                risk_mode = "SHADOW_OK"
-                degrade_from = "unreliable"
-                reason = "unreliable->shadow"
+        decision = EMBUDO_FINAL_WAIT_SOFT
+        risk_mode = "WAIT_SOFT"
+        reason = "mrv_wait"
+        wait_reason = "mrv_wait"
+        quality = "wait"
+
+        ia_floor = float(max(get_umbral_operativo(), AUTO_REAL_UNRELIABLE_GATE_MIN_PROB))
+        ia_ok = bool(top1_prob >= ia_floor)
+        mrv_ok = bool(
+            (mrv_score >= float(MRV_SCORE_REAL_OK_MIN))
+            and (mrv_rupt <= float(MRV_RUPTURA_HARD_MAX))
+            and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
+            and (mrv_estado in ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA"))
+        )
+        # Fallback MRV explícito: no bloquear totalmente cuando la historia aún es insuficiente.
+        if (not mrv_ok) and (mrv_fallback_reason in ("low_history", "default")):
+            mrv_ok = bool(
+                (top1_prob >= float(max(0.66, ia_floor + 0.03)))
+                and (mrv_rupt <= 0.55)
+                and (mrv_vida >= 0.8)
+            )
+        guardrail_ok = bool(gap_ok and anti_rafaga_ok and (not cooldown_active))
+
+        if ia_ok and mrv_ok and guardrail_ok:
+            decision = EMBUDO_FINAL_REAL_OK
+            risk_mode = "REAL_OK"
+            reason = "mrv_ia_guard_ok"
+            wait_reason = ""
+            quality = "strong"
+        else:
+            if not ia_ok:
+                wait_reason = "ia_floor"
+            elif not mrv_ok:
+                wait_reason = "mrv_context"
+            elif cooldown_active:
+                wait_reason = "cooldown"
+            elif not gap_ok:
+                wait_reason = "gap_guard"
+            elif not anti_rafaga_ok:
+                wait_reason = "anti_rafaga"
+            reason = wait_reason
 
         decision, risk_mode, degrade_from, reason = _degradar_si_modelo_ia_inmaduro(
             decision=decision,
             risk_mode=risk_mode,
-            degrade_from=degrade_from,
+            degrade_from="none",
             reason=reason,
             warmup_mode=warmup_mode,
             model_family=model_family,
             ia_model_mature=ia_model_mature,
         )
+        if decision != EMBUDO_FINAL_REAL_OK and not wait_reason:
+            wait_reason = reason
 
-        # Prudencia extra en Martingala avanzada C2..C{MAX_CICLOS}: exigir contexto vivo.
-        try:
-            ciclo_adv = int(ciclo_martingala_siguiente())
-        except Exception:
-            ciclo_adv = 1
-        if ciclo_adv > 1 and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
-            confirm_bot = str(dgate.get("confirm_bot", DYN_ROOF_STATE.get("confirm_bot", "")) or "")
-            confirm_streak_adv = int(dgate.get("confirm_streak", DYN_ROOF_STATE.get("confirm_streak", 0)) or 0)
-            trigger_adv = bool(dgate.get("trigger_ok", False))
-            allow_adv = bool(dgate.get("allow_real", False))
-            if (not allow_adv) or (not trigger_adv) or (confirm_streak_adv < max(1, confirm_need)) or (confirm_bot and confirm_bot != top1_bot):
-                decision = EMBUDO_FINAL_WAIT_SOFT
-                risk_mode = "WAIT_SOFT"
-                soft_wait_reason = "marti_contexto_degradado"
-                degrade_from = "marti_context"
-                reason = f"marti_C{ciclo_adv}_contexto"
-
-        # Consistencia explícita: no permitir doble ganador entre dyn_gate y embudo.
-        best_dyn = str(dgate.get("best_bot", "") or "").strip()
-        if best_dyn and (best_dyn != top1_bot):
-            decision = EMBUDO_FINAL_WAIT_SOFT
-            risk_mode = "WAIT_SOFT"
-            soft_wait_reason = "best_bot_mismatch"
-            reason = f"best_bot_mismatch:{best_dyn}!={top1_bot}"
-
-        # Modulador Pattern V1: aporta contexto/calidad, no veto principal.
-        try:
-            ctx_top = _ultimo_contexto_operativo_bot(top1_bot)
-            ok_pat, why_pat = _micro_pattern_gate_ok(top1_bot, ctx_top)
-            if not ok_pat and decision == EMBUDO_FINAL_REAL_NORMAL:
-                decision = EMBUDO_FINAL_REAL_MICRO
-                risk_mode = "REAL_MICRO"
-                degrade_from = "pattern_v1"
-                reason = f"pattern->{why_pat}"
-            elif (not ok_pat) and decision == EMBUDO_FINAL_REAL_MICRO:
-                decision = EMBUDO_FINAL_SHADOW_OK
-                risk_mode = "SHADOW_OK"
-                degrade_from = "pattern_v1"
-                reason = f"pattern_shadow:{why_pat}"
-        except Exception:
-            pass
-
-        # CTT (fase previa): completamente neutralizado en decisión operativa.
-        hard_guard_state = _estado_guardrail_ia_fuerte(force=False)
-        hard_guard_hard_block = bool(hard_guard_state.get("hard_block", False))
-        cooldown_active = bool(time.time() < float(REAL_COOLDOWN_UNTIL_TS))
-
-        if hard_guard_hard_block and (not reliable) and (auc < 0.50) and (n_samples < int(TRAIN_WARMUP_MIN_ROWS)):
-            decision = EMBUDO_FINAL_BLOCK_HARD
-            risk_mode = "BLOCK_HARD"
-            reason = "guardrail_hard"
-            out_hard = "guardrail_hard"
-        else:
-            out_hard = ""
-
-        if cooldown_active and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
-            decision = EMBUDO_FINAL_WAIT_SOFT
-            risk_mode = "WAIT_SOFT"
-            soft_wait_reason = "cooldown"
-            reason = "cooldown"
-
-        confirm_deficit = int(max(0, int(confirm_need) - int(confirm_streak)))
-        near_prob_floor = float(max(float(floor_eff), float(AUTO_REAL_UNRELIABLE_GATE_MIN_PROB) - float(AUTO_REAL_MICRO_EARLY_CONFIRM_MARGIN)))
-        denied_by_early_confirm_only = bool(
-            decision in (EMBUDO_FINAL_WAIT_SOFT, EMBUDO_FINAL_SHADOW_OK)
-            and (not allow_real)
-            and trigger_ok
-            and gap_ok
-            and (confirm_streak < confirm_need)
-            and (soft_wait_reason not in ("marti_contexto_degradado", "best_bot_mismatch", "cooldown"))
-        )
-        if (
-            bool(AUTO_REAL_MICRO_EARLY_CONFIRM_ENABLE)
-            and (estado_real in ("SHADOW", "MICRO"))
-            and bool(top1_bot)
-            and denied_by_early_confirm_only
-            and (confirm_deficit <= int(AUTO_REAL_MICRO_EARLY_CONFIRM_DEFICIT_MAX))
-            and (int(confirm_streak) >= max(0, int(confirm_need) - 1))
-            and (top1_prob >= near_prob_floor)
-            and (not cooldown_active)
-            and (not hard_guard_hard_block)
-        ):
-            decision = EMBUDO_FINAL_REAL_MICRO
-            risk_mode = "REAL_MICRO"
-            reason = "oper_override_micro_early_confirm"
-            soft_wait_reason = ""
-            degrade_from = "oper_override_micro_early_confirm"
-
-        trigger_ok_micro_soft = bool(
-            bool(dgate.get("trigger_ok_micro_soft", False))
-            and (decision in (EMBUDO_FINAL_WAIT_SOFT, EMBUDO_FINAL_SHADOW_OK))
-            and (estado_real in ("MICRO", "SHADOW"))
-            and (not cooldown_active)
-            and (not hard_guard_hard_block)
-            and (soft_wait_reason not in ("marti_contexto_degradado", "best_bot_mismatch", "cooldown"))
-        )
-        if trigger_ok_micro_soft:
-            decision = EMBUDO_FINAL_REAL_MICRO
-            risk_mode = "REAL_MICRO"
-            reason = "micro_soft_context_ok"
-            soft_wait_reason = ""
-            if degrade_from == "none":
-                degrade_from = "micro_soft_context_ok"
-
-        if estado_real == "SHADOW" and decision in (EMBUDO_FINAL_WAIT_SOFT, EMBUDO_FINAL_SHADOW_OK):
-            ok_shadow_micro, why_shadow_micro = _shadow_micro_gate_ok(candidatos, dgate)
-            if ok_shadow_micro:
-                decision = EMBUDO_FINAL_REAL_MICRO
-                risk_mode = "REAL_MICRO"
-                reason = "shadow_micro_gate"
-                soft_wait_reason = ""
-                if degrade_from == "none":
-                    degrade_from = "shadow_micro_gate"
-
-        if estado_real == "SHADOW" and decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO):
-            decision = EMBUDO_FINAL_REAL_MICRO if decision == EMBUDO_FINAL_REAL_NORMAL else decision
-            risk_mode = "REAL_MICRO"
-            if degrade_from == "none":
-                degrade_from = "shadow_mode"
-        if estado_real == "MICRO" and decision == EMBUDO_FINAL_REAL_NORMAL:
-            decision = EMBUDO_FINAL_REAL_MICRO
-            risk_mode = "REAL_MICRO"
-            if degrade_from == "none":
-                degrade_from = "micro_mode"
-
-        ia_real_backed = int(decision in (EMBUDO_FINAL_REAL_NORMAL, EMBUDO_FINAL_REAL_MICRO) and ia_model_mature)
+        ia_real_backed = int(decision == EMBUDO_FINAL_REAL_OK and ia_model_mature)
         real_source = "IA" if ia_real_backed else "OPERATIVO_NO_IA"
 
         return _registrar_estado_embudo({
@@ -14951,8 +14889,8 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "decision_reason": reason,
             "gate_quality": quality,
             "risk_mode": risk_mode,
-            "hard_block_reason": out_hard,
-            "soft_wait_reason": soft_wait_reason,
+            "hard_block_reason": "",
+            "soft_wait_reason": wait_reason,
             "top1_bot": top1_bot,
             "top2_bot": top2_bot,
             "gap_value": gap_value,
@@ -16230,11 +16168,8 @@ async def main():
                                 pat_bonus_col, pat_penal_col, pat_delta_col = aplicar_ajuste_patron_score(pat_state)
                                 k_pts_pat = float(PATTERN_V1_HYBRID_PTS_TO_PROB)
                                 thr_post_ctx = float(thr_post)
-                                if bool(PATTERN_ENABLE):
-                                    if float(pat_delta_col) < 0.0:
-                                        thr_post_ctx = min(0.99, float(thr_post_ctx) + abs(float(pat_delta_col)) * k_pts_pat)
-                                    elif float(pat_delta_col) > 0.0:
-                                        thr_post_ctx = max(0.0, float(thr_post_ctx) - min(0.02, float(pat_delta_col) * k_pts_pat))
+                                if False:  # CUARENTENA FUNCIONAL pattern columns
+                                    pass
                                 estado_bots[b]["ia_pattern_col_state"] = str(pat_state.get("pattern_state", "BLOQUEADO"))
                                 estado_bots[b]["ia_pattern_col_ratio"] = pat_state.get("green_ratio_col_actual", None)
                                 estado_bots[b]["ia_pattern_rebote_hist"] = pat_state.get("rebote_rate_hist", None)
@@ -16274,7 +16209,7 @@ async def main():
                                 pattern_bonus_b = 0.0
                                 pattern_penal_b = 0.0
                                 score_hibrido = float(score_final)
-                                if bool(PATTERN_V1_ENABLE) and bool(PATTERN_V1_USE_HYBRID_RANKING):
+                                if False:  # CUARENTENA FUNCIONAL pattern v1
                                     q3_proxy, q2_proxy = _pattern_v1_thresholds_proxy()
                                     pattern_score_b, pattern_bonus_b, pattern_penal_b, pattern_total_b = pattern_score_operativo_v1(ctx, q3_proxy, q2_proxy)
                                     # Ajuste en escala probabilística (evita mezclar puntos de pattern con prob 0..1)
@@ -16309,7 +16244,7 @@ async def main():
                                 continue
 
                             candidatos.sort(key=lambda x: x[0], reverse=True)
-                            if bool(PATTERN_V1_ENABLE) and bool(PATTERN_V1_USE_HYBRID_RANKING) and candidatos and raw_rank_scores:
+                            if False and candidatos and raw_rank_scores:  # CUARENTENA FUNCIONAL pattern v1
                                 try:
                                     raw_rank_scores.sort(key=lambda x: x[0], reverse=True)
                                     top_raw = str(raw_rank_scores[0][1])
@@ -16359,12 +16294,8 @@ async def main():
                         except Exception:
                             estado_real = "SHADOW"
 
-                        if candidatos and estado_real == "SHADOW":
+                        if candidatos:
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
-                            candidatos = candidatos[:max(1, int(REAL_SHADOW_MICRO_TOP_K))]
-                        elif candidatos and estado_real == "MICRO":
-                            candidatos.sort(key=lambda x: float(x[2]), reverse=True)
-                            candidatos = candidatos[:max(1, int(REAL_MICRO_TOP_K))]
 
                         embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
                         decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
@@ -16374,10 +16305,7 @@ async def main():
                         elif decision_final == EMBUDO_FINAL_WAIT_SOFT:
                             agregar_evento(f"⏳ EMBUDO WAIT: {embudo.get('soft_wait_reason') or embudo.get('decision_reason')}")
                             candidatos = []
-                        elif decision_final == EMBUDO_FINAL_SHADOW_OK:
-                            agregar_evento(f"🕶️ EMBUDO SHADOW_OK: {embudo.get('decision_reason')}")
-                            candidatos = []
-                        elif decision_final == EMBUDO_FINAL_REAL_MICRO:
+                        elif decision_final == EMBUDO_FINAL_REAL_OK:
                             candidatos = candidatos[:1]
 
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
@@ -16423,7 +16351,7 @@ async def main():
                             embudo_live = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
                             dec_live = str(embudo_live.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
                             risk_live = str(embudo_live.get("risk_mode", "WAIT_SOFT"))
-                            if dec_live in (EMBUDO_FINAL_REAL_MICRO, EMBUDO_FINAL_REAL_NORMAL):
+                            if dec_live == EMBUDO_FINAL_REAL_OK:
                                 agregar_evento(
                                     f"🧭 EMBUDO listo: {dec_live} | risk={risk_live} | gate={embudo_live.get('gate_quality','--')} "
                                     f"| top1={embudo_live.get('top1_bot') or '--'}"
@@ -16457,11 +16385,8 @@ async def main():
 
                                     ok_real = escribir_orden_real(mejor_bot, ciclo_auto)
                                     if ok_real:
-                                        if estado_real == "SHADOW":
-                                            try:
-                                                _REAL_SHADOW_MICRO_OPEN_TS.append(float(time.time()))
-                                            except Exception:
-                                                pass
+                                        if False:
+                                            pass
                                         estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                         estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                         activo_real = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else mejor_bot
