@@ -1291,6 +1291,11 @@ DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 saldo_real = "--"
 SALDO_INICIAL = None
 META = None
+META_OBJETIVO_PCT = 0.15  # política vigente: meta operativa +15%
+SALDO_STATUS = "UNKNOWN"  # KNOWN | UNKNOWN
+SALDO_STATUS_REASON = "BOOTSTRAP_PENDING"
+SALDO_STATUS_DETAIL = ""
+SALDO_STATUS_TS = 0.0
 meta_mostrada = False
 eventos_recentes = deque(maxlen=8)
 reinicio_forzado = asyncio.Event()
@@ -12399,21 +12404,26 @@ def mostrar_panel():
     except Exception:
         pass
 
-    # Saldo actual (archivo Deriv o saldo_real en memoria)
+    # Saldo actual (estado estructurado)
     try:
         valor = obtener_valor_saldo()
-        if valor is None:
-            valor = float(saldo_real)
-        saldo_str = f"{float(valor):.2f}"
+        saldo_known = (valor is not None) and (str(SALDO_STATUS).upper() == "KNOWN")
+        if saldo_known:
+            saldo_str = f"{float(valor):.2f}"
+            saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str}"
+        else:
+            reason_txt = _saldo_status_text(SALDO_STATUS_REASON)
+            detail_txt = f" ({SALDO_STATUS_DETAIL})" if str(SALDO_STATUS_DETAIL or "").strip() else ""
+            saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: -- [{reason_txt}{detail_txt}]"
     except Exception:
         valor = None
-        saldo_str = "--"
+        saldo_line = "💰 SALDO EN CUENTA REAL DERIV: -- [SALDO NO DISPONIBLE]"
 
-    print(padding + Fore.GREEN + f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str}")
+    print(padding + Fore.GREEN + saldo_line)
 
     # Saldo inicial y meta
     try:
-        if SALDO_INICIAL is None and isinstance(valor, (int, float)):
+        if SALDO_INICIAL is None and isinstance(valor, (int, float)) and str(SALDO_STATUS).upper() == "KNOWN":
             inicializar_saldo_real(float(valor))
         inicial_str = f"{float(SALDO_INICIAL):.2f}" if SALDO_INICIAL is not None else "--"
     except Exception:
@@ -13508,9 +13518,7 @@ def mostrar_advertencia_meta():
                         fut.result(timeout=15)
                     valor = obtener_valor_saldo()
                     if valor is not None:
-                        SALDO_INICIAL = round(valor, 2)
-                        META = round(SALDO_INICIAL * 1.20, 2)
-                        inicializar_saldo_real(SALDO_INICIAL)
+                        inicializar_saldo_real(float(valor))
                 except Exception as e:
                     print(f"⚠️ Error reiniciando meta: {e}")
                 pausado = False
@@ -13679,7 +13687,9 @@ def forzar_real_manual(bot: str, ciclo: int):
 
         requerido = float(MARTI_ESCALADO[ciclo - 1])
         val = obtener_valor_saldo()
-        if val is None or val < requerido:
+        if val is None:
+            agregar_evento(f"⚠️ Saldo no disponible para validar ciclo #{ciclo} en {bot}: {_saldo_status_text(SALDO_STATUS_REASON)}.")
+        elif val < requerido:
             agregar_evento(f"⚠️ Saldo < requerido para ciclo #{ciclo} en {bot} (pide {requerido}). Intentando igual.")
 
         # escribir_orden_real(...) ya dejó token+HUD sincronizados; evitamos doble token_sync.
@@ -13701,15 +13711,16 @@ def evaluar_semaforo():
     n = int(estado_bots.get(top1, {}).get("tamano_muestra", 0) or 0) if top1 else 0
 
     owner = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
-    try:
-        saldo_val = float(obtener_valor_saldo() or 0.0)
-    except Exception:
-        saldo_val = 0.0
+    saldo_val = obtener_valor_saldo()
     costo = float(sum(MARTI_ESCALADO[:max(1, int(MAX_CICLOS))]))
     costo_c1 = float(MARTI_ESCALADO[0]) if MARTI_ESCALADO else 0.0
 
     if owner and owner not in (None, "none"):
         return "🟡", "AVISO", f"Token en uso por {owner}."
+    if saldo_val is None:
+        reason_txt = _saldo_status_text(SALDO_STATUS_REASON)
+        detail_txt = f" ({SALDO_STATUS_DETAIL})" if str(SALDO_STATUS_DETAIL or "").strip() else ""
+        return "🟡", "SALDO DESCONOCIDO", f"{reason_txt}{detail_txt}."
     if saldo_val < costo_c1:
         falta = costo_c1 - saldo_val
         return "🟡", "AVISO", f"Saldo < C1 ({costo_c1:.2f}). Faltan {falta:.2f} USD."
@@ -15549,13 +15560,54 @@ async def cargar_datos_bot(bot, token_actual):
     except Exception as e:
         print(f"⚠️ Error cargando datos para {bot}: {e}")
 
+def _saldo_status_text(reason: str | None = None) -> str:
+    r = str(reason if reason is not None else SALDO_STATUS_REASON).strip().upper()
+    mapping = {
+        "OK": "SALDO DISPONIBLE",
+        "BOOTSTRAP_PENDING": "SALDO NO DISPONIBLE",
+        "TOKEN_REAL_MISSING": "TOKEN REAL AUSENTE",
+        "WEBSOCKET_UNAVAILABLE": "WEBSOCKET NO DISPONIBLE",
+        "AUTH_FAILED": "AUTH BALANCE FALLIDA",
+        "BALANCE_FAILED": "BALANCE FALLIDO",
+        "BALANCE_NOT_READ": "BALANCE NO LEÍDO",
+        "BALANCE_PARSE_FAILED": "BALANCE INVÁLIDO",
+        "EXCEPTION": "ERROR DE LECTURA DE SALDO",
+    }
+    return mapping.get(r, f"SALDO NO DISPONIBLE ({r})")
+
+
+def _set_saldo_status(status: str, reason: str, detail: str = "", announce: bool = False):
+    global SALDO_STATUS, SALDO_STATUS_REASON, SALDO_STATUS_DETAIL, SALDO_STATUS_TS, saldo_real
+    status = str(status).strip().upper()
+    reason = str(reason).strip().upper()
+    detail = str(detail or "").strip()
+    changed = (
+        SALDO_STATUS != status
+        or SALDO_STATUS_REASON != reason
+        or SALDO_STATUS_DETAIL != detail
+    )
+    SALDO_STATUS = status
+    SALDO_STATUS_REASON = reason
+    SALDO_STATUS_DETAIL = detail
+    SALDO_STATUS_TS = float(time.time())
+    if status != "KNOWN":
+        saldo_real = "--"
+    if announce and changed:
+        msg = f"💳 {_saldo_status_text(reason)}"
+        if detail:
+            msg += f": {detail}"
+        agregar_evento(msg)
+
+
 # Obtener saldo real
 async def obtener_saldo_real():
     global saldo_real, ULTIMA_ACT_SALDO
     token_demo, token_real = leer_tokens_usuario()
     if not token_real:
+        _set_saldo_status("UNKNOWN", "TOKEN_REAL_MISSING", announce=True)
         return
     if not WEBSOCKETS_OK:
+        _set_saldo_status("UNKNOWN", "WEBSOCKET_UNAVAILABLE", announce=True)
         return
     try:
         async with websockets.connect(DERIV_WS_URL) as ws:
@@ -15563,19 +15615,32 @@ async def obtener_saldo_real():
             await ws.send(auth_msg)
             resp = json.loads(await ws.recv())
             if "error" in resp:
-                print(f"⚠️ Error en auth: {resp['error']['message']}")
+                detail = str((resp.get("error") or {}).get("message") or "auth rechazado")
+                _set_saldo_status("UNKNOWN", "AUTH_FAILED", detail=detail, announce=True)
                 return
             bal_msg = json.dumps({"balance": 1, "subscribe": 1})
             await ws.send(bal_msg)
             resp = json.loads(await ws.recv())
             if "error" in resp:
-                print(f"⚠️ Error en balance: {resp['error']['message']}")
+                detail = str((resp.get("error") or {}).get("message") or "balance rechazado")
+                _set_saldo_status("UNKNOWN", "BALANCE_FAILED", detail=detail, announce=True)
                 return
-            if "balance" in resp:
-                saldo_real = f"{resp['balance']['balance']:.2f}"
+            balance_obj = resp.get("balance")
+            if isinstance(balance_obj, dict) and ("balance" in balance_obj):
+                try:
+                    val = float(balance_obj.get("balance"))
+                except Exception:
+                    _set_saldo_status("UNKNOWN", "BALANCE_PARSE_FAILED", detail="valor no numérico", announce=True)
+                    return
+                saldo_real = f"{val:.2f}"
                 ULTIMA_ACT_SALDO = time.time()
+                _set_saldo_status("KNOWN", "OK", announce=False)
+                if SALDO_INICIAL is None:
+                    inicializar_saldo_real(val)
+                return
+            _set_saldo_status("UNKNOWN", "BALANCE_NOT_READ", detail="respuesta sin campo balance", announce=True)
     except Exception as e:
-        print(f"⚠️ Error obteniendo saldo: {e}")
+        _set_saldo_status("UNKNOWN", "EXCEPTION", detail=str(e), announce=True)
 
 async def refresh_saldo_real(forzado=False):
     global ULTIMA_ACT_SALDO
@@ -15583,7 +15648,9 @@ async def refresh_saldo_real(forzado=False):
         await obtener_saldo_real()
 
 def obtener_valor_saldo():
-    global saldo_real
+    global saldo_real, SALDO_STATUS
+    if str(SALDO_STATUS).upper() != "KNOWN":
+        return None
     try:
         return float(saldo_real)
     except:
@@ -15592,7 +15659,7 @@ def obtener_valor_saldo():
 def inicializar_saldo_real(valor):
     global SALDO_INICIAL, META
     SALDO_INICIAL = round(valor, 2)
-    META = round(SALDO_INICIAL * 1.20, 2)
+    META = round(SALDO_INICIAL * (1.0 + float(META_OBJETIVO_PCT)), 2)
 
 # Escuchar teclas
 def escuchar_teclas():
@@ -15819,6 +15886,10 @@ def _boot_health_check():
             msgs.append("⚠️ Dependencia faltante: websockets (sin WS/saldo, resto del HUD sigue).")
         if not PYGAME_OK:
             msgs.append("⚠️ Dependencia faltante: pygame (audio desactivado, ejecución continúa).")
+        if str(SALDO_STATUS).upper() != "KNOWN":
+            reason_txt = _saldo_status_text(SALDO_STATUS_REASON)
+            detail_txt = f" ({SALDO_STATUS_DETAIL})" if str(SALDO_STATUS_DETAIL or "").strip() else ""
+            msgs.append(f"⚠️ Estado de saldo al arranque: {reason_txt}{detail_txt}.")
         csv_presentes = [b for b in BOT_NAMES if os.path.exists(f"registro_enriquecido_{b}.csv")]
         if not csv_presentes:
             msgs.append("⚠️ No hay CSV enriquecidos de bots todavía; esperando generación de datos.")
@@ -16114,11 +16185,8 @@ async def main():
                             umbral_ia_real = max(float(REAL_TRIGGER_MIN), float(get_umbral_real_calibrado()))
                             dyn_gate = None
 
-                        # Saldo informativo: no bloquear por colchón completo, solo por ciclo ejecutable.
-                        try:
-                            saldo_val = float(obtener_valor_saldo() or 0.0)
-                        except Exception:
-                            saldo_val = 0.0
+                        # Saldo informativo: distinguir saldo desconocido de saldo insuficiente real.
+                        saldo_val = obtener_valor_saldo()
                         costo_ciclo1 = float(MARTI_ESCALADO[0])
                         costo_plan = float(sum(MARTI_ESCALADO[:max(1, int(MAX_CICLOS))]))
 
@@ -16383,7 +16451,7 @@ async def main():
                             # Selección automática: tomar la mejor señal elegible >= umbral REAL vigente.
 
                         # Si hay señal y el saldo no cubre el plan completo, solo avisar (no bloquear).
-                        if candidatos and saldo_val < costo_plan:
+                        if candidatos and (saldo_val is not None) and saldo_val < costo_plan:
                             ahora_warn = time.time()
                             last_warn = float(DYN_ROOF_STATE.get("last_low_balance_warn_ts", 0.0) or 0.0)
                             if (ahora_warn - last_warn) >= float(DYN_ROOF_LOW_BAL_WARN_COOLDOWN_S):
