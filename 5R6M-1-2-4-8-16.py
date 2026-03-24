@@ -12819,6 +12819,7 @@ def mostrar_panel(force: bool = False):
                 f"🧬 PFLEX: fam={emb.get('perfil_comun_flex_family','--')} "
                 f"score={float(emb.get('perfil_comun_flex_score',0.0) or 0.0):.2f} "
                 f"fam_score={float(emb.get('perfil_comun_flex_family_score',0.0) or 0.0):.2f} "
+                f"ia_floor={float(emb.get('perfil_comun_flex_ia_floor',0.0) or 0.0):.3f} "
                 f"ok={int(emb.get('perfil_comun_flex_ok',0) or 0)} "
                 f"valid40={int(emb.get('perfil_comun_flex_valid40',0) or 0)} "
                 f"rescC={int(emb.get('perfil_comun_flex_modec_rescue',0) or 0)}"
@@ -15165,7 +15166,24 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 and (mrv_vida >= 0.60)
                 and (mrv_estado in ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA"))
             )
-        ia_floor_flex = float(max(float(PERFIL_COMUN_FLEX_IA_MIN_ABS), ia_floor_eff + float(PERFIL_COMUN_FLEX_IA_EDGE_RELAX)))
+        gate_mode_live = str(dgate.get("gate_mode", "") or "")
+        confirm_streak_live = int(dgate.get("confirm_streak", 0) or 0)
+        confirm_need_live = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
+        trigger_ok_live = bool(dgate.get("trigger_ok", False))
+        valid40_live = int(flex_eval.get("valid_40", 0) or 0)
+        short_sample_flex = bool(
+            (valid40_live >= int(PERFIL_COMUN_FLEX_MIN_VALID))
+            and (valid40_live <= int(PERFIL_COMUN_FLEX_SHORT_VALID_MAX))
+        )
+        mode_c_pending = bool(
+            (gate_mode_live == "C")
+            and (confirm_streak_live < confirm_need_live)
+            and (not trigger_ok_live)
+        )
+        ia_floor_flex_base = float(max(float(PERFIL_COMUN_FLEX_IA_MIN_ABS), ia_floor_eff + float(PERFIL_COMUN_FLEX_IA_EDGE_RELAX)))
+        ia_floor_flex = float(ia_floor_flex_base)
+        if bool(PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE) and short_sample_flex and mode_c_pending:
+            ia_floor_flex = float(PERFIL_COMUN_FLEX_IA_MIN_ABS)
         ia_ok_flex = bool(top1_prob >= ia_floor_flex)
         mrv_ok_flex = bool(
             bool(flex_eval.get("ok", False))
@@ -15184,20 +15202,6 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 or (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
             )
         guardrail_ok = bool(guard_gap_ok and guard_anti_rafaga_ok and (not cooldown_active))
-        gate_mode_live = str(dgate.get("gate_mode", "") or "")
-        confirm_streak_live = int(dgate.get("confirm_streak", 0) or 0)
-        confirm_need_live = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
-        trigger_ok_live = bool(dgate.get("trigger_ok", False))
-        valid40_live = int(flex_eval.get("valid_40", 0) or 0)
-        short_sample_flex = bool(
-            (valid40_live >= int(PERFIL_COMUN_FLEX_MIN_VALID))
-            and (valid40_live <= int(PERFIL_COMUN_FLEX_SHORT_VALID_MAX))
-        )
-        mode_c_pending = bool(
-            (gate_mode_live == "C")
-            and (confirm_streak_live < confirm_need_live)
-            and (not trigger_ok_live)
-        )
         guardrail_ok_flex = bool(
             guardrail_ok
             or (
@@ -15291,6 +15295,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "perfil_comun_flex_score": float(flex_eval.get("score", 0.0) or 0.0),
             "perfil_comun_flex_family": str(flex_eval.get("family_label", "INVALIDA") or "INVALIDA"),
             "perfil_comun_flex_family_score": float(flex_eval.get("score_family", 0.0) or 0.0),
+            "perfil_comun_flex_ia_floor": float(ia_floor_flex),
             "perfil_comun_flex_valid40": int(flex_eval.get("valid_40", 0) or 0),
             "perfil_comun_flex_modec_rescue": int(bool(guardrail_ok_flex and (not guardrail_ok))),
         })
