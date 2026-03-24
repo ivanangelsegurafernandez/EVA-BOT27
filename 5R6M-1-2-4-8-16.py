@@ -41,19 +41,11 @@ from contextlib import contextmanager
 import sys
 import shutil
 import joblib
-import numpy as np
-import pandas as pd
 import importlib
 import traceback
 
 import math
 import hashlib
-from sklearn.model_selection import train_test_split, TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score, f1_score, fbeta_score, brier_score_loss
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.linear_model import LogisticRegression
-from sklearn.isotonic import IsotonicRegression
 
 import warnings
 warnings.filterwarnings(
@@ -78,9 +70,125 @@ def _load_optional_module(name: str):
     except Exception:
         return None
 
+np = _load_optional_module("numpy")
+pd = _load_optional_module("pandas")
+NUMPY_OK = np is not None
+PANDAS_OK = pd is not None
+
+if not NUMPY_OK:
+    class _NPErrStateCompat:
+        def __enter__(self):
+            return None
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _NumpyCompat:
+        """Shim mínimo para evitar fallo de arranque cuando numpy no está instalado."""
+        nan = float("nan")
+        inf = float("inf")
+        integer = int
+        floating = float
+        ndarray = list
+
+        @staticmethod
+        def errstate(**_kwargs):
+            return _NPErrStateCompat()
+
+        @staticmethod
+        def asarray(values):
+            return list(values) if isinstance(values, (list, tuple, deque)) else [values]
+
+        @staticmethod
+        def isfinite(v):
+            try:
+                return math.isfinite(float(v))
+            except Exception:
+                return False
+
+        def __getattr__(self, _name):
+            def _fallback(*_args, **_kwargs):
+                return 0.0
+            return _fallback
+
+    np = _NumpyCompat()
+
+if not PANDAS_OK:
+    class _PandasSeriesCompat(list):
+        empty = True
+
+        def dropna(self):
+            return self
+
+    class _PandasDataFrameCompat(dict):
+        empty = True
+
+    class _PandasCompat:
+        """Shim mínimo para preservar bootstrap cuando pandas no está disponible."""
+        DataFrame = _PandasDataFrameCompat
+        Series = _PandasSeriesCompat
+
+        @staticmethod
+        def read_csv(*_args, **_kwargs):
+            return _PandasDataFrameCompat()
+
+        @staticmethod
+        def concat(*_args, **_kwargs):
+            return _PandasDataFrameCompat()
+
+        @staticmethod
+        def isna(*_args, **_kwargs):
+            return False
+
+        @staticmethod
+        def notna(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def to_datetime(*_args, **_kwargs):
+            return _PandasSeriesCompat()
+
+        @staticmethod
+        def to_numeric(*_args, **_kwargs):
+            return _PandasSeriesCompat()
+
+    pd = _PandasCompat()
+
+_sk_model_selection = _load_optional_module("sklearn.model_selection")
+_sk_preprocessing = _load_optional_module("sklearn.preprocessing")
+_sk_metrics = _load_optional_module("sklearn.metrics")
+_sk_calibration = _load_optional_module("sklearn.calibration")
+_sk_linear_model = _load_optional_module("sklearn.linear_model")
+_sk_isotonic = _load_optional_module("sklearn.isotonic")
+
+train_test_split = getattr(_sk_model_selection, "train_test_split", None)
+TimeSeriesSplit = getattr(_sk_model_selection, "TimeSeriesSplit", None)
+StandardScaler = getattr(_sk_preprocessing, "StandardScaler", None)
+roc_auc_score = getattr(_sk_metrics, "roc_auc_score", None)
+f1_score = getattr(_sk_metrics, "f1_score", None)
+fbeta_score = getattr(_sk_metrics, "fbeta_score", None)
+brier_score_loss = getattr(_sk_metrics, "brier_score_loss", None)
+CalibratedClassifierCV = getattr(_sk_calibration, "CalibratedClassifierCV", None)
+LogisticRegression = getattr(_sk_linear_model, "LogisticRegression", None)
+IsotonicRegression = getattr(_sk_isotonic, "IsotonicRegression", None)
+
+SKLEARN_OK = all([
+    train_test_split is not None,
+    TimeSeriesSplit is not None,
+    StandardScaler is not None,
+    roc_auc_score is not None,
+    f1_score is not None,
+    fbeta_score is not None,
+    brier_score_loss is not None,
+    CalibratedClassifierCV is not None,
+    LogisticRegression is not None,
+    IsotonicRegression is not None,
+])
+
 
 def _safe_mean_np(values, default=None):
     """Media robusta: evita RuntimeWarning en slices vacíos y NaN-only."""
+    if not NUMPY_OK:
+        return default
     try:
         arr = np.asarray(values)
         if arr.size <= 0:
@@ -328,7 +436,7 @@ IA_WARMUP_LOW_EVIDENCE_CAP_POST_N15 = 0.85
 
 AUTO_REAL_ALLOW_UNRELIABLE_POST_N15 = True
 AUTO_REAL_UNRELIABLE_MIN_N = 0
-AUTO_REAL_UNRELIABLE_MIN_PROB = 0.54  # modo unreliable conservador: exige mejor discriminación antes de REAL
+AUTO_REAL_UNRELIABLE_MIN_PROB = 0.535  # ajuste moderado: reduce bloqueos por borde (ej. 53.8 vs 54.0)
 AUTO_REAL_UNRELIABLE_MIN_AUC = 0.52   # unreliable conservador: evita activaciones con AUC marginal débil
 AUTO_REAL_BLOCK_WHEN_WARMUP = False   # no bloquear REAL por warmup (perfil prueba protegida)
 # Ajuste mínimo anti-congelamiento lateral: permite bajar el umbral UNREL
@@ -348,7 +456,7 @@ AUTO_REAL_UNREL_MICRO_RELAX_LOG_COOLDOWN_S = 45.0
 # Bypass controlado: si la compuerta REAL ya está sólida en vivo, permitir AUTO
 # aunque el modelo siga en warmup/reliable=false.
 AUTO_REAL_UNRELIABLE_ALLOW_STRONG_GATE = True
-AUTO_REAL_UNRELIABLE_GATE_MIN_PROB = IA_ACTIVACION_REAL_THR_POST_N15
+AUTO_REAL_UNRELIABLE_GATE_MIN_PROB = 0.535
 # Bootstrap temprano de banderas LEGACY para evitar uso antes de definición.
 LEGACY_QUARANTINE_ENABLE = True
 LEGACY_ENABLE_PATTERN_V1 = not LEGACY_QUARANTINE_ENABLE
@@ -500,8 +608,9 @@ PATTERN_V1_Q2_PROXY = {
     "volatilidad": 0.049,
 }
 PATTERN_V1_LAST_LOG_TS = {}
-# Fase operativa REAL por madurez: SHADOW -> MICRO -> NORMAL
-REAL_PILOT_MODE_ENABLE = True
+# Fase operativa REAL heredada (SHADOW -> MICRO -> NORMAL):
+# desactivada como cerebro operativo; queda solo para telemetría/compatibilidad.
+REAL_PILOT_MODE_ENABLE = False
 REAL_MICRO_REQUIRE_PATTERN = False
 REAL_MICRO_PATTERN_MIN_TOTAL = 4.0
 REAL_MICRO_REQUIRE_DUAL = False
@@ -542,9 +651,10 @@ MRV_WINDOW_SHORT = 8
 MRV_WINDOW_MED = 16
 MRV_MIN_HISTORY = 6
 MRV_FALLBACK_VIDA = 2.5
-MRV_SCORE_REAL_OK_MIN = 0.55
+MRV_SCORE_REAL_OK_MIN = 0.52
 MRV_RUPTURA_HARD_MAX = 0.68
-MRV_VIDA_MIN_REAL = 1.0
+MRV_VIDA_MIN_REAL = 0.80
+IA_FLOOR_EDGE_TOL = 0.003  # tolerancia de borde para evitar bloqueos por redondeo marginal.
 MRV_ESTADOS = ["ESPERA", "PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "AGOTAMIENTO"]
 MRV_ESTADO_TO_NUM = {"ESPERA": 0.0, "PRE_ZONA": 1.0, "ZONA_CONFIRMADA": 2.0, "ZONA_MADURA": 3.0, "AGOTAMIENTO": 4.0}
 MRV_FEATURE_NAMES = [
@@ -661,6 +771,11 @@ def _mrv_online_bot(bot: str, row: dict | None = None) -> dict:
         score = float(np.clip(0.45 * p_cont + 0.20 * p_inicio + 0.15 * comp + 0.10 * p_ia + 0.10 * (1.0 - p_rupt), 0.0, 1.0))
         dur_total = float(np.clip(1.0 + 8.0 * p_cont + 2.0 * p_inicio - 4.0 * p_agot, 1.0, 12.0))
         vida_restante = float(np.clip(dur_total * max(0.1, (1.0 - max(p_rupt, p_agot))), 0.5, 12.0))
+        # Anti-congelamiento MRV: con historia suficiente, evitar estado artificialmente muerto.
+        if n >= int(max(MRV_MIN_HISTORY, 12)):
+            if p_rupt < 0.75:
+                score = float(max(score, 0.18))
+            vida_restante = float(max(vida_restante, 0.80))
 
         if score < 0.40:
             estado = "ESPERA"
@@ -672,6 +787,8 @@ def _mrv_online_bot(bot: str, row: dict | None = None) -> dict:
             estado = "ZONA_CONFIRMADA"
         else:
             estado = "AGOTAMIENTO" if (p_agot >= 0.55 or p_rupt >= 0.60) else "PRE_ZONA"
+        if n >= int(max(MRV_MIN_HISTORY, 12)) and estado == "ESPERA" and score >= 0.34 and p_rupt < 0.70:
+            estado = "PRE_ZONA"
 
         return {
             "mrv_p_inicio": p_inicio,
@@ -795,7 +912,7 @@ def _pattern_v1_log_bot(bot: str, pattern_score: float, bonus_dual: float, penal
 
 
 def _resolver_estado_real(meta_live: dict | None = None) -> str:
-    """Estado operativo REAL: SHADOW, MICRO, NORMAL."""
+    """Estado heredado SHADOW/MICRO/NORMAL (solo telemetría, no decisión principal)."""
     try:
         if not bool(REAL_PILOT_MODE_ENABLE):
             return "NORMAL"
@@ -811,7 +928,7 @@ def _resolver_estado_real(meta_live: dict | None = None) -> str:
             return "MICRO"
         return "SHADOW"
     except Exception:
-        return "SHADOW"
+        return "NORMAL" if (not bool(REAL_PILOT_MODE_ENABLE)) else "SHADOW"
 
 
 def _micro_pattern_gate_ok(bot: str, ctx: dict | None = None) -> tuple[bool, str]:
@@ -1183,6 +1300,11 @@ DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 saldo_real = "--"
 SALDO_INICIAL = None
 META = None
+META_OBJETIVO_PCT = 0.15  # política vigente: meta operativa +15%
+SALDO_STATUS = "UNKNOWN"  # KNOWN | UNKNOWN
+SALDO_STATUS_REASON = "BOOTSTRAP_PENDING"
+SALDO_STATUS_DETAIL = ""
+SALDO_STATUS_TS = 0.0
 meta_mostrada = False
 eventos_recentes = deque(maxlen=8)
 reinicio_forzado = asyncio.Event()
@@ -1194,6 +1316,9 @@ reinicio_manual = False
 LIMPIEZA_PANEL_HASTA = 0
 ULTIMA_ACT_SALDO = 0
 REFRESCO_SALDO = 12
+HUD_RENDER_MIN_INTERVAL_S = 1.20
+HUD_LAST_RENDER_TS = 0.0
+HUD_LAST_RENDER_SIG = ""
 MAX_CICLOS = len(MARTI_ESCALADO)
 huellas_usadas = {bot: set() for bot in BOT_NAMES}
 SNAPSHOT_FILAS = {bot: 0 for bot in BOT_NAMES}
@@ -12251,7 +12376,7 @@ def _fmt_prob_pct(p):
         return "--"
 
 # Mostrar panel
-def mostrar_panel():
+def mostrar_panel(force: bool = False):
     # === IA: actualizar Prob IA antes de render (NO afecta lógica de trading) ===
     try:
         actualizar_prob_ia_todos()
@@ -12261,10 +12386,18 @@ def mostrar_panel():
     """
     HUD principal: muestra estado de los bots, saldos, IA y eventos recientes.
     """
-    global meta_mostrada
+    global meta_mostrada, HUD_LAST_RENDER_TS, HUD_LAST_RENDER_SIG
+
+    now_render = float(time.time())
+    render_sig = f"{ETAPA_ACTUAL}|{ETAPA_DETALLE}|{int(meta_mostrada)}|{int(pausado)}"
+    # Evitar redraw duplicado/seguido del mismo estado dentro del mismo tick.
+    if (not force) and (now_render - float(HUD_LAST_RENDER_TS)) < float(HUD_RENDER_MIN_INTERVAL_S) and render_sig == str(HUD_LAST_RENDER_SIG):
+        return
+    HUD_LAST_RENDER_TS = now_render
+    HUD_LAST_RENDER_SIG = render_sig
 
     # Respetar ventana de limpieza (para mensajes especiales)
-    if time.time() < LIMPIEZA_PANEL_HASTA:
+    if now_render < LIMPIEZA_PANEL_HASTA:
         limpiar_consola()
         return
 
@@ -12291,21 +12424,26 @@ def mostrar_panel():
     except Exception:
         pass
 
-    # Saldo actual (archivo Deriv o saldo_real en memoria)
+    # Saldo actual (estado estructurado)
     try:
         valor = obtener_valor_saldo()
-        if valor is None:
-            valor = float(saldo_real)
-        saldo_str = f"{float(valor):.2f}"
+        saldo_known = (valor is not None) and (str(SALDO_STATUS).upper() == "KNOWN")
+        if saldo_known:
+            saldo_str = f"{float(valor):.2f}"
+            saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str}"
+        else:
+            reason_txt = _saldo_status_text(SALDO_STATUS_REASON)
+            detail_txt = f" ({SALDO_STATUS_DETAIL})" if str(SALDO_STATUS_DETAIL or "").strip() else ""
+            saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: -- [{reason_txt}{detail_txt}]"
     except Exception:
         valor = None
-        saldo_str = "--"
+        saldo_line = "💰 SALDO EN CUENTA REAL DERIV: -- [SALDO NO DISPONIBLE]"
 
-    print(padding + Fore.GREEN + f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str}")
+    print(padding + Fore.GREEN + saldo_line)
 
     # Saldo inicial y meta
     try:
-        if SALDO_INICIAL is None and isinstance(valor, (int, float)):
+        if SALDO_INICIAL is None and isinstance(valor, (int, float)) and str(SALDO_STATUS).upper() == "KNOWN":
             inicializar_saldo_real(float(valor))
         inicial_str = f"{float(SALDO_INICIAL):.2f}" if SALDO_INICIAL is not None else "--"
     except Exception:
@@ -13400,9 +13538,7 @@ def mostrar_advertencia_meta():
                         fut.result(timeout=15)
                     valor = obtener_valor_saldo()
                     if valor is not None:
-                        SALDO_INICIAL = round(valor, 2)
-                        META = round(SALDO_INICIAL * 1.20, 2)
-                        inicializar_saldo_real(SALDO_INICIAL)
+                        inicializar_saldo_real(float(valor))
                 except Exception as e:
                     print(f"⚠️ Error reiniciando meta: {e}")
                 pausado = False
@@ -13571,7 +13707,9 @@ def forzar_real_manual(bot: str, ciclo: int):
 
         requerido = float(MARTI_ESCALADO[ciclo - 1])
         val = obtener_valor_saldo()
-        if val is None or val < requerido:
+        if val is None:
+            agregar_evento(f"⚠️ Saldo no disponible para validar ciclo #{ciclo} en {bot}: {_saldo_status_text(SALDO_STATUS_REASON)}.")
+        elif val < requerido:
             agregar_evento(f"⚠️ Saldo < requerido para ciclo #{ciclo} en {bot} (pide {requerido}). Intentando igual.")
 
         # escribir_orden_real(...) ya dejó token+HUD sincronizados; evitamos doble token_sync.
@@ -13593,15 +13731,16 @@ def evaluar_semaforo():
     n = int(estado_bots.get(top1, {}).get("tamano_muestra", 0) or 0) if top1 else 0
 
     owner = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
-    try:
-        saldo_val = float(obtener_valor_saldo() or 0.0)
-    except Exception:
-        saldo_val = 0.0
+    saldo_val = obtener_valor_saldo()
     costo = float(sum(MARTI_ESCALADO[:max(1, int(MAX_CICLOS))]))
     costo_c1 = float(MARTI_ESCALADO[0]) if MARTI_ESCALADO else 0.0
 
     if owner and owner not in (None, "none"):
         return "🟡", "AVISO", f"Token en uso por {owner}."
+    if saldo_val is None:
+        reason_txt = _saldo_status_text(SALDO_STATUS_REASON)
+        detail_txt = f" ({SALDO_STATUS_DETAIL})" if str(SALDO_STATUS_DETAIL or "").strip() else ""
+        return "🟡", "SALDO DESCONOCIDO", f"{reason_txt}{detail_txt}."
     if saldo_val < costo_c1:
         falta = costo_c1 - saldo_val
         return "🟡", "AVISO", f"Saldo < C1 ({costo_c1:.2f}). Faltan {falta:.2f} USD."
@@ -14031,6 +14170,8 @@ DYN_ROOF_TIE_KEEP_CONFIRM_TOL = 0.003
 DYN_ROOF_GATE_REARM_HYST = 0.02
 DYN_ROOF_GATE_REARM_TICKS = 2
 DYN_ROOF_LOW_BAL_WARN_COOLDOWN_S = 60
+DYN_ROOF_GUARDRAIL_MIN_GAP_RELAXED = 0.01
+DYN_ROOF_GUARDRAIL_STRICT = False  # False = guardrail moderado, no cerebro principal.
 DYN_ROOF_STALL_TO_MODE_C_S = 2 * 60 * 60
 DYN_ROOF_MODE_C_FLOOR = 0.60
 DYN_ROOF_MODE_C_CONFIRM_TICKS = 2
@@ -14744,9 +14885,21 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
     return EMBUDO_DECISION_STATE
 
 
-def _degradar_si_modelo_ia_inmaduro(decision: str, risk_mode: str, degrade_from: str, reason: str, warmup_mode: bool, model_family: str, ia_model_mature: bool) -> tuple[str, str, str, str]:
+def _degradar_si_modelo_ia_inmaduro(
+    decision: str,
+    risk_mode: str,
+    degrade_from: str,
+    reason: str,
+    warmup_mode: bool,
+    model_family: str,
+    ia_model_mature: bool,
+    allow_operational_override: bool = False,
+) -> tuple[str, str, str, str]:
     """Degrada decisión a WAIT cuando el modelo IA no está maduro."""
     if ia_model_mature or decision != EMBUDO_FINAL_REAL_OK:
+        return decision, risk_mode, degrade_from, reason
+    # Escape hatch conservador: si la señal MRV+IA ya es muy fuerte, no congelar por horas.
+    if bool(allow_operational_override):
         return decision, risk_mode, degrade_from, reason
     decision = EMBUDO_FINAL_WAIT_SOFT
     risk_mode = "WAIT_SOFT"
@@ -14758,7 +14911,7 @@ def _degradar_si_modelo_ia_inmaduro(decision: str, risk_mode: str, degrade_from:
 
 
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
-    """Embudo final mínimo: MRV + IA + guardrails reales."""
+    """Embudo final: decisión principal por MRV+IA; dyn_gate/legacy solo guardrail/telemetría."""
     out = _registrar_estado_embudo({
         "decision_final": EMBUDO_FINAL_WAIT_SOFT,
         "decision_reason": "sin_candidatos",
@@ -14775,6 +14928,8 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         "ia_real_backed": 0,
         "real_source": "IA",
         "ia_model_mature": 0,
+        "legacy_estado_real": str(estado_real or "NORMAL"),
+        "legacy_pilot_governs": 0,
     })
     if not candidatos:
         return out
@@ -14795,9 +14950,10 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         mrv_estado = str(st_top.get("mrv_estado", "ESPERA") or "ESPERA")
         mrv_fallback_reason = str(st_top.get("mrv_fallback_reason", "") or "")
 
+        # Guardrails DYN_ROOF (secundarios): nunca reemplazan la calidad MRV+IA.
         dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
-        gap_ok = bool(dgate.get("gap_ok", True))
-        anti_rafaga_ok = bool(dgate.get("crossed_up", True) or dgate.get("trigger_force", False) or dgate.get("trigger_ok", False))
+        guard_gap_ok = bool(dgate.get("gap_ok", True))
+        guard_anti_rafaga_ok = bool(dgate.get("crossed_up", True) or dgate.get("trigger_force", False) or dgate.get("trigger_ok", False))
         cooldown_active = bool(time.time() < float(REAL_COOLDOWN_UNTIL_TS))
 
         meta = meta_live if isinstance(meta_live, dict) else {}
@@ -14827,6 +14983,10 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 "ia_real_backed": 0,
                 "real_source": "OPERATIVO_NO_IA",
                 "ia_model_mature": int(ia_model_mature),
+                "legacy_estado_real": str(estado_real or "NORMAL"),
+                "legacy_pilot_governs": 0,
+                "guardrail_gap_ok": int(guard_gap_ok),
+                "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
             })
 
         decision = EMBUDO_FINAL_WAIT_SOFT
@@ -14836,7 +14996,8 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         quality = "wait"
 
         ia_floor = float(max(get_umbral_operativo(), AUTO_REAL_UNRELIABLE_GATE_MIN_PROB))
-        ia_ok = bool(top1_prob >= ia_floor)
+        ia_floor_eff = float(max(0.0, ia_floor - float(IA_FLOOR_EDGE_TOL)))
+        ia_ok = bool(top1_prob >= ia_floor_eff)
         mrv_ok = bool(
             (mrv_score >= float(MRV_SCORE_REAL_OK_MIN))
             and (mrv_rupt <= float(MRV_RUPTURA_HARD_MAX))
@@ -14846,11 +15007,20 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         # Fallback MRV explícito: no bloquear totalmente cuando la historia aún es insuficiente.
         if (not mrv_ok) and (mrv_fallback_reason in ("low_history", "default")):
             mrv_ok = bool(
-                (top1_prob >= float(max(0.66, ia_floor + 0.03)))
-                and (mrv_rupt <= 0.55)
-                and (mrv_vida >= 0.8)
+                (top1_prob >= float(max(0.62, ia_floor_eff + 0.01)))
+                and (mrv_rupt <= 0.62)
+                and (mrv_vida >= 0.60)
+                and (mrv_estado in ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA"))
             )
-        guardrail_ok = bool(gap_ok and anti_rafaga_ok and (not cooldown_active))
+        if not bool(DYN_ROOF_GUARDRAIL_STRICT):
+            min_gap_relaxed = float(max(0.0, DYN_ROOF_GUARDRAIL_MIN_GAP_RELAXED))
+            guard_gap_ok = bool(guard_gap_ok or (gap_value >= min_gap_relaxed))
+            guard_anti_rafaga_ok = bool(
+                guard_anti_rafaga_ok
+                or (top1_prob >= float(ia_floor_eff + 0.04))
+                or (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
+            )
+        guardrail_ok = bool(guard_gap_ok and guard_anti_rafaga_ok and (not cooldown_active))
 
         if ia_ok and mrv_ok and guardrail_ok:
             decision = EMBUDO_FINAL_REAL_OK
@@ -14865,9 +15035,9 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 wait_reason = "mrv_context"
             elif cooldown_active:
                 wait_reason = "cooldown"
-            elif not gap_ok:
+            elif not guard_gap_ok:
                 wait_reason = "gap_guard"
-            elif not anti_rafaga_ok:
+            elif not guard_anti_rafaga_ok:
                 wait_reason = "anti_rafaga"
             reason = wait_reason
 
@@ -14879,6 +15049,13 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             warmup_mode=warmup_mode,
             model_family=model_family,
             ia_model_mature=ia_model_mature,
+            allow_operational_override=bool(
+                decision == EMBUDO_FINAL_REAL_OK
+                and (n_samples >= 80)
+                and (top1_prob >= float(ia_floor_eff + 0.05))
+                and (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
+                and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
+            ),
         )
         if decision != EMBUDO_FINAL_REAL_OK and not wait_reason:
             wait_reason = reason
@@ -14902,6 +15079,11 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "ia_real_backed": int(ia_real_backed),
             "real_source": str(real_source),
             "ia_model_mature": int(ia_model_mature),
+            "legacy_estado_real": str(estado_real or "NORMAL"),
+            "legacy_pilot_governs": 0,
+            "guardrail_gap_ok": int(guard_gap_ok),
+            "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
+            "ia_floor_eff": float(ia_floor_eff),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
@@ -15441,13 +15623,54 @@ async def cargar_datos_bot(bot, token_actual):
     except Exception as e:
         print(f"⚠️ Error cargando datos para {bot}: {e}")
 
+def _saldo_status_text(reason: str | None = None) -> str:
+    r = str(reason if reason is not None else SALDO_STATUS_REASON).strip().upper()
+    mapping = {
+        "OK": "SALDO DISPONIBLE",
+        "BOOTSTRAP_PENDING": "SALDO NO DISPONIBLE",
+        "TOKEN_REAL_MISSING": "TOKEN REAL AUSENTE",
+        "WEBSOCKET_UNAVAILABLE": "WEBSOCKET NO DISPONIBLE",
+        "AUTH_FAILED": "AUTH BALANCE FALLIDA",
+        "BALANCE_FAILED": "BALANCE FALLIDO",
+        "BALANCE_NOT_READ": "BALANCE NO LEÍDO",
+        "BALANCE_PARSE_FAILED": "BALANCE INVÁLIDO",
+        "EXCEPTION": "ERROR DE LECTURA DE SALDO",
+    }
+    return mapping.get(r, f"SALDO NO DISPONIBLE ({r})")
+
+
+def _set_saldo_status(status: str, reason: str, detail: str = "", announce: bool = False):
+    global SALDO_STATUS, SALDO_STATUS_REASON, SALDO_STATUS_DETAIL, SALDO_STATUS_TS, saldo_real
+    status = str(status).strip().upper()
+    reason = str(reason).strip().upper()
+    detail = str(detail or "").strip()
+    changed = (
+        SALDO_STATUS != status
+        or SALDO_STATUS_REASON != reason
+        or SALDO_STATUS_DETAIL != detail
+    )
+    SALDO_STATUS = status
+    SALDO_STATUS_REASON = reason
+    SALDO_STATUS_DETAIL = detail
+    SALDO_STATUS_TS = float(time.time())
+    if status != "KNOWN":
+        saldo_real = "--"
+    if announce and changed:
+        msg = f"💳 {_saldo_status_text(reason)}"
+        if detail:
+            msg += f": {detail}"
+        agregar_evento(msg)
+
+
 # Obtener saldo real
 async def obtener_saldo_real():
     global saldo_real, ULTIMA_ACT_SALDO
     token_demo, token_real = leer_tokens_usuario()
     if not token_real:
+        _set_saldo_status("UNKNOWN", "TOKEN_REAL_MISSING", announce=True)
         return
     if not WEBSOCKETS_OK:
+        _set_saldo_status("UNKNOWN", "WEBSOCKET_UNAVAILABLE", announce=True)
         return
     try:
         async with websockets.connect(DERIV_WS_URL) as ws:
@@ -15455,19 +15678,32 @@ async def obtener_saldo_real():
             await ws.send(auth_msg)
             resp = json.loads(await ws.recv())
             if "error" in resp:
-                print(f"⚠️ Error en auth: {resp['error']['message']}")
+                detail = str((resp.get("error") or {}).get("message") or "auth rechazado")
+                _set_saldo_status("UNKNOWN", "AUTH_FAILED", detail=detail, announce=True)
                 return
             bal_msg = json.dumps({"balance": 1, "subscribe": 1})
             await ws.send(bal_msg)
             resp = json.loads(await ws.recv())
             if "error" in resp:
-                print(f"⚠️ Error en balance: {resp['error']['message']}")
+                detail = str((resp.get("error") or {}).get("message") or "balance rechazado")
+                _set_saldo_status("UNKNOWN", "BALANCE_FAILED", detail=detail, announce=True)
                 return
-            if "balance" in resp:
-                saldo_real = f"{resp['balance']['balance']:.2f}"
+            balance_obj = resp.get("balance")
+            if isinstance(balance_obj, dict) and ("balance" in balance_obj):
+                try:
+                    val = float(balance_obj.get("balance"))
+                except Exception:
+                    _set_saldo_status("UNKNOWN", "BALANCE_PARSE_FAILED", detail="valor no numérico", announce=True)
+                    return
+                saldo_real = f"{val:.2f}"
                 ULTIMA_ACT_SALDO = time.time()
+                _set_saldo_status("KNOWN", "OK", announce=False)
+                if SALDO_INICIAL is None:
+                    inicializar_saldo_real(val)
+                return
+            _set_saldo_status("UNKNOWN", "BALANCE_NOT_READ", detail="respuesta sin campo balance", announce=True)
     except Exception as e:
-        print(f"⚠️ Error obteniendo saldo: {e}")
+        _set_saldo_status("UNKNOWN", "EXCEPTION", detail=str(e), announce=True)
 
 async def refresh_saldo_real(forzado=False):
     global ULTIMA_ACT_SALDO
@@ -15475,7 +15711,9 @@ async def refresh_saldo_real(forzado=False):
         await obtener_saldo_real()
 
 def obtener_valor_saldo():
-    global saldo_real
+    global saldo_real, SALDO_STATUS
+    if str(SALDO_STATUS).upper() != "KNOWN":
+        return None
     try:
         return float(saldo_real)
     except:
@@ -15484,7 +15722,7 @@ def obtener_valor_saldo():
 def inicializar_saldo_real(valor):
     global SALDO_INICIAL, META
     SALDO_INICIAL = round(valor, 2)
-    META = round(SALDO_INICIAL * 1.20, 2)
+    META = round(SALDO_INICIAL * (1.0 + float(META_OBJETIVO_PCT)), 2)
 
 # Escuchar teclas
 def escuchar_teclas():
@@ -15711,6 +15949,10 @@ def _boot_health_check():
             msgs.append("⚠️ Dependencia faltante: websockets (sin WS/saldo, resto del HUD sigue).")
         if not PYGAME_OK:
             msgs.append("⚠️ Dependencia faltante: pygame (audio desactivado, ejecución continúa).")
+        if str(SALDO_STATUS).upper() != "KNOWN":
+            reason_txt = _saldo_status_text(SALDO_STATUS_REASON)
+            detail_txt = f" ({SALDO_STATUS_DETAIL})" if str(SALDO_STATUS_DETAIL or "").strip() else ""
+            msgs.append(f"⚠️ Estado de saldo al arranque: {reason_txt}{detail_txt}.")
         csv_presentes = [b for b in BOT_NAMES if os.path.exists(f"registro_enriquecido_{b}.csv")]
         if not csv_presentes:
             msgs.append("⚠️ No hay CSV enriquecidos de bots todavía; esperando generación de datos.")
@@ -16006,11 +16248,8 @@ async def main():
                             umbral_ia_real = max(float(REAL_TRIGGER_MIN), float(get_umbral_real_calibrado()))
                             dyn_gate = None
 
-                        # Saldo informativo: no bloquear por colchón completo, solo por ciclo ejecutable.
-                        try:
-                            saldo_val = float(obtener_valor_saldo() or 0.0)
-                        except Exception:
-                            saldo_val = 0.0
+                        # Saldo informativo: distinguir saldo desconocido de saldo insuficiente real.
+                        saldo_val = obtener_valor_saldo()
                         costo_ciclo1 = float(MARTI_ESCALADO[0])
                         costo_plan = float(sum(MARTI_ESCALADO[:max(1, int(MAX_CICLOS))]))
 
@@ -16275,7 +16514,7 @@ async def main():
                             # Selección automática: tomar la mejor señal elegible >= umbral REAL vigente.
 
                         # Si hay señal y el saldo no cubre el plan completo, solo avisar (no bloquear).
-                        if candidatos and saldo_val < costo_plan:
+                        if candidatos and (saldo_val is not None) and saldo_val < costo_plan:
                             ahora_warn = time.time()
                             last_warn = float(DYN_ROOF_STATE.get("last_low_balance_warn_ts", 0.0) or 0.0)
                             if (ahora_warn - last_warn) >= float(DYN_ROOF_LOW_BAL_WARN_COOLDOWN_S):
