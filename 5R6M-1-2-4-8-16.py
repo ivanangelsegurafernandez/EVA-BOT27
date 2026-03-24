@@ -387,6 +387,12 @@ IA_CALIB_GOAL_THRESHOLD = IA_OBJETIVO_REAL_THR  # objetivo real: medir cierres f
 IA_CALIB_MIN_CLOSED = 200  # mínimo recomendado para considerar estable la auditoría
 REAL_GO_N_MIN = 180
 REAL_GO_CLOSED_MIN = 50
+REAL_EARLY_MICRO_OVERRIDE_ENABLE = True
+REAL_EARLY_MICRO_OVERRIDE_MIN_N = 100
+REAL_EARLY_MICRO_OVERRIDE_MIN_AUC = 0.65
+REAL_EARLY_MICRO_OVERRIDE_MIN_PROB_MARGIN = 0.00
+REAL_EARLY_MICRO_OVERRIDE_ALLOW_UNRELIABLE = True
+REAL_EARLY_MICRO_OVERRIDE_REQUIRE_WARMUP_ONLY = True
 
 # Recomendaciones operativas conservadoras (anti-sobreconfianza)
 IA_TEMP_THR_HIGH = 0.80              # umbral temporal sugerido cuando la muestra fuerte es baja
@@ -15263,6 +15269,33 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 wait_reason = "anti_rafaga"
             reason = wait_reason
 
+        strong_operational_override = bool(
+            decision == EMBUDO_FINAL_REAL_OK
+            and (n_samples >= 80)
+            and (top1_prob >= float(ia_floor_eff + 0.05))
+            and (
+                (
+                    (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
+                    and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
+                )
+                or (
+                    bool(PERFIL_COMUN_FLEX_ENABLE)
+                    and bool(flex_eval.get("ok", False))
+                    and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_STRONG))
+                )
+            )
+        )
+        early_micro_override = bool(
+            bool(REAL_EARLY_MICRO_OVERRIDE_ENABLE)
+            and (decision == EMBUDO_FINAL_REAL_OK)
+            and (str(risk_mode) == "REAL_MICRO")
+            and (n_samples >= int(REAL_EARLY_MICRO_OVERRIDE_MIN_N))
+            and (auc >= float(REAL_EARLY_MICRO_OVERRIDE_MIN_AUC))
+            and (top1_prob >= float(ia_floor_eff + REAL_EARLY_MICRO_OVERRIDE_MIN_PROB_MARGIN))
+            and (bool(REAL_EARLY_MICRO_OVERRIDE_ALLOW_UNRELIABLE) or bool(reliable))
+            and ((not bool(REAL_EARLY_MICRO_OVERRIDE_REQUIRE_WARMUP_ONLY)) or bool(warmup_mode))
+        )
+
         decision, risk_mode, degrade_from, reason = _degradar_si_modelo_ia_inmaduro(
             decision=decision,
             risk_mode=risk_mode,
@@ -15271,22 +15304,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             warmup_mode=warmup_mode,
             model_family=model_family,
             ia_model_mature=ia_model_mature,
-            allow_operational_override=bool(
-                decision == EMBUDO_FINAL_REAL_OK
-                and (n_samples >= 80)
-                and (top1_prob >= float(ia_floor_eff + 0.05))
-                and (
-                    (
-                        (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
-                        and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
-                    )
-                    or (
-                        bool(PERFIL_COMUN_FLEX_ENABLE)
-                        and bool(flex_eval.get("ok", False))
-                        and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_STRONG))
-                    )
-                )
-            ),
+            allow_operational_override=bool(strong_operational_override or early_micro_override),
         )
         if decision != EMBUDO_FINAL_REAL_OK and not wait_reason:
             wait_reason = reason
@@ -15324,6 +15342,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "perfil_comun_flex_modec_rescue": int(bool(guardrail_ok_flex and (not guardrail_ok))),
             "perfil_comun_flex_mrv_normal_ok": int(mrv_ok_flex_normal),
             "perfil_comun_flex_mrv_rescue_ok": int(mrv_ok_flex_rescue),
+            "early_micro_override": int(early_micro_override),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
