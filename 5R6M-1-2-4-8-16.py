@@ -12836,6 +12836,12 @@ def mostrar_panel(force: bool = False):
                 f"mrvN={int(emb.get('perfil_comun_flex_mrv_normal_ok',0) or 0)} "
                 f"mrvR={int(emb.get('perfil_comun_flex_mrv_rescue_ok',0) or 0)}"
             )
+            print(
+                padding + Fore.CYAN +
+                f"🧩 EARLY-MICRO: ok={int(emb.get('early_micro_override_ok',0) or 0)} "
+                f"auc={float(emb.get('early_micro_override_auc',0.0) or 0.0):.3f} "
+                f"n={int(emb.get('early_micro_override_n',0) or 0)}"
+            )
 
             ref_racha = ultimo_bot_real if ultimo_bot_real in BOT_NAMES else "--"
             elegido_tick = mejor[0] if isinstance(mejor, tuple) and len(mejor) >= 1 else "--"
@@ -15343,6 +15349,9 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "perfil_comun_flex_mrv_normal_ok": int(mrv_ok_flex_normal),
             "perfil_comun_flex_mrv_rescue_ok": int(mrv_ok_flex_rescue),
             "early_micro_override": int(early_micro_override),
+            "early_micro_override_ok": int(bool(early_micro_override)),
+            "early_micro_override_auc": float(auc or 0.0),
+            "early_micro_override_n": int(n_samples or 0),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
