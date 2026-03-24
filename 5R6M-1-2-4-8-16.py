@@ -663,6 +663,26 @@ MRV_FEATURE_NAMES = [
     "mrv_densidad_corta", "mrv_densidad_media", "mrv_compacidad", "mrv_fragmentacion",
 ]
 
+# === PERFIL_COMUN_FLEX: capa adicional de activación flexible por familias ===
+PERFIL_COMUN_FLEX_ENABLE = True
+PERFIL_COMUN_FLEX_WINDOW = 40
+PERFIL_COMUN_FLEX_MIN_VALID = 28
+PERFIL_COMUN_FLEX_GREEN40_SOFT_MIN = 22
+PERFIL_COMUN_FLEX_GREEN40_SOFT_MAX = 32
+PERFIL_COMUN_FLEX_GREEN8_SOFT_MIN = 4
+PERFIL_COMUN_FLEX_GREEN16_SOFT_MIN = 9
+PERFIL_COMUN_FLEX_MAX_END_RED_STREAK_HARD = 3
+PERFIL_COMUN_FLEX_MAX_RED_CLUSTERS_GE3_HARD = 2
+PERFIL_COMUN_FLEX_MAX_INDEF_40_SOFT = 8
+PERFIL_COMUN_FLEX_SCORE_MIN = 0.62
+PERFIL_COMUN_FLEX_SCORE_STRONG = 0.72
+PERFIL_COMUN_FLEX_IA_MIN_ABS = 0.56
+PERFIL_COMUN_FLEX_IA_EDGE_RELAX = -0.015
+PERFIL_COMUN_FLEX_MRV_SCORE_MIN = 0.47
+PERFIL_COMUN_FLEX_MRV_VIDA_MIN = 0.55
+PERFIL_COMUN_FLEX_MRV_RUPT_MAX = 0.68
+PERFIL_COMUN_FLEX_ESTADOS_OK = ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA")
+
 
 def _mrv_default_payload(now_ts: float | None = None, reason: str = "default") -> dict:
     ts = float(time.time() if now_ts is None else now_ts)
@@ -14884,6 +14904,100 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
     EMBUDO_DECISION_STATE = base
     return EMBUDO_DECISION_STATE
 
+def _perfil_comun_flex_eval(bot: str) -> dict:
+    """Perfil flexible por similitud (familias de matriz), sin plantilla rígida."""
+    out = {
+        "ok": False,
+        "score": 0.0,
+        "score_family": 0.0,
+        "valid_40": 0,
+        "green_40": 0,
+        "green_16": 0,
+        "green_8": 0,
+        "indef_40": 0,
+        "end_red_streak": 0,
+        "red_clusters_ge3": 0,
+        "hard_block": False,
+    }
+    try:
+        st = estado_bots.get(str(bot), {}) if isinstance(estado_bots, dict) else {}
+        rr = list(st.get("resultados", []) or [])
+        if not rr:
+            return out
+        w = int(max(8, PERFIL_COMUN_FLEX_WINDOW))
+        tail = rr[-w:]
+        marks = [_resultado_to_mark(x) for x in tail]
+        valid = [m for m in marks if m in ("G", "R")]
+        valid_40 = int(len(valid))
+        green_40 = int(sum(1 for m in valid if m == "G"))
+        green_16 = int(sum(1 for m in marks[-16:] if m == "G"))
+        green_8 = int(sum(1 for m in marks[-8:] if m == "G"))
+        indef_40 = int(sum(1 for m in marks if m not in ("G", "R")))
+
+        end_red = 0
+        for m in reversed(marks):
+            if m == "R":
+                end_red += 1
+            elif m in ("G", None):
+                break
+
+        clusters_ge3 = 0
+        run_r = 0
+        for m in marks:
+            if m == "R":
+                run_r += 1
+            else:
+                if run_r >= 3:
+                    clusters_ge3 += 1
+                run_r = 0
+        if run_r >= 3:
+            clusters_ge3 += 1
+
+        cols = _construir_matriz_resultados_columnas(estado_bots, BOT_NAMES, window=w)
+        fam_tail = list(cols[:8] or [])
+        fam_ok = [c for c in fam_tail if c.get("green_ratio") is not None]
+        fam_ratio = float(sum(1 for c in fam_ok if float(c.get("green_ratio", 0.0) or 0.0) >= 0.50)) / float(max(1, len(fam_ok)))
+
+        g40_min = float(PERFIL_COMUN_FLEX_GREEN40_SOFT_MIN)
+        g40_max = float(PERFIL_COMUN_FLEX_GREEN40_SOFT_MAX)
+        g40_mid = (g40_min + g40_max) / 2.0
+        g40_half = max(1.0, (g40_max - g40_min) / 2.0)
+        score_g40 = float(max(0.0, 1.0 - (abs(float(green_40) - g40_mid) / g40_half)))
+        score_g8 = float(min(1.0, float(green_8) / float(max(1, PERFIL_COMUN_FLEX_GREEN8_SOFT_MIN))))
+        score_g16 = float(min(1.0, float(green_16) / float(max(1, PERFIL_COMUN_FLEX_GREEN16_SOFT_MIN))))
+        score_indef = float(max(0.0, 1.0 - (float(indef_40) / float(max(1, PERFIL_COMUN_FLEX_MAX_INDEF_40_SOFT)))))
+        score_red_end = float(max(0.0, 1.0 - (float(end_red) / float(max(1, PERFIL_COMUN_FLEX_MAX_END_RED_STREAK_HARD)))))
+        score_red_cluster = float(max(0.0, 1.0 - (float(clusters_ge3) / float(max(1, PERFIL_COMUN_FLEX_MAX_RED_CLUSTERS_GE3_HARD)))))
+        score_struct = float(max(0.0, min(1.0, 0.45 * score_indef + 0.30 * score_red_end + 0.25 * score_red_cluster)))
+        score_family = float(max(0.0, min(1.0, 0.70 * fam_ratio + 0.30 * score_struct)))
+        score = float(max(0.0, min(1.0, 0.35 * score_g40 + 0.20 * score_g8 + 0.20 * score_g16 + 0.25 * score_family)))
+
+        hard_block = bool(
+            (end_red > int(PERFIL_COMUN_FLEX_MAX_END_RED_STREAK_HARD))
+            or (clusters_ge3 > int(PERFIL_COMUN_FLEX_MAX_RED_CLUSTERS_GE3_HARD))
+        )
+        ok = bool(
+            (valid_40 >= int(PERFIL_COMUN_FLEX_MIN_VALID))
+            and (not hard_block)
+            and (score >= float(PERFIL_COMUN_FLEX_SCORE_MIN))
+        )
+        out.update({
+            "ok": ok,
+            "score": score,
+            "score_family": score_family,
+            "valid_40": valid_40,
+            "green_40": green_40,
+            "green_16": green_16,
+            "green_8": green_8,
+            "indef_40": indef_40,
+            "end_red_streak": int(end_red),
+            "red_clusters_ge3": int(clusters_ge3),
+            "hard_block": hard_block,
+        })
+        return out
+    except Exception:
+        return out
+
 
 def _degradar_si_modelo_ia_inmaduro(
     decision: str,
@@ -14998,6 +15112,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         ia_floor = float(max(get_umbral_operativo(), AUTO_REAL_UNRELIABLE_GATE_MIN_PROB))
         ia_floor_eff = float(max(0.0, ia_floor - float(IA_FLOOR_EDGE_TOL)))
         ia_ok = bool(top1_prob >= ia_floor_eff)
+        flex_eval = _perfil_comun_flex_eval(top1_bot) if bool(PERFIL_COMUN_FLEX_ENABLE) else {"ok": False, "score": 0.0}
         mrv_ok = bool(
             (mrv_score >= float(MRV_SCORE_REAL_OK_MIN))
             and (mrv_rupt <= float(MRV_RUPTURA_HARD_MAX))
@@ -15012,6 +15127,16 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 and (mrv_vida >= 0.60)
                 and (mrv_estado in ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA"))
             )
+        ia_floor_flex = float(max(float(PERFIL_COMUN_FLEX_IA_MIN_ABS), ia_floor_eff + float(PERFIL_COMUN_FLEX_IA_EDGE_RELAX)))
+        ia_ok_flex = bool(top1_prob >= ia_floor_flex)
+        mrv_ok_flex = bool(
+            bool(flex_eval.get("ok", False))
+            and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_MIN))
+            and (mrv_score >= float(PERFIL_COMUN_FLEX_MRV_SCORE_MIN))
+            and (mrv_vida >= float(PERFIL_COMUN_FLEX_MRV_VIDA_MIN))
+            and (mrv_rupt <= float(PERFIL_COMUN_FLEX_MRV_RUPT_MAX))
+            and (mrv_estado in tuple(PERFIL_COMUN_FLEX_ESTADOS_OK))
+        )
         if not bool(DYN_ROOF_GUARDRAIL_STRICT):
             min_gap_relaxed = float(max(0.0, DYN_ROOF_GUARDRAIL_MIN_GAP_RELAXED))
             guard_gap_ok = bool(guard_gap_ok or (gap_value >= min_gap_relaxed))
@@ -15028,11 +15153,18 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             reason = "mrv_ia_guard_ok"
             wait_reason = ""
             quality = "strong"
+        elif ia_ok_flex and mrv_ok_flex and guardrail_ok:
+            decision = EMBUDO_FINAL_REAL_OK
+            reason = "perfil_comun_flex_ok"
+            wait_reason = ""
+            flex_score = float(flex_eval.get("score", 0.0) or 0.0)
+            risk_mode = "REAL_OK" if flex_score >= float(PERFIL_COMUN_FLEX_SCORE_STRONG) else "REAL_MICRO"
+            quality = "strong" if flex_score >= float(PERFIL_COMUN_FLEX_SCORE_STRONG) else "moderate"
         else:
             if not ia_ok:
-                wait_reason = "ia_floor"
+                wait_reason = "ia_floor_flex" if (not ia_ok_flex and bool(PERFIL_COMUN_FLEX_ENABLE)) else "ia_floor"
             elif not mrv_ok:
-                wait_reason = "mrv_context"
+                wait_reason = "mrv_context_flex" if (not mrv_ok_flex and bool(PERFIL_COMUN_FLEX_ENABLE)) else "mrv_context"
             elif cooldown_active:
                 wait_reason = "cooldown"
             elif not guard_gap_ok:
@@ -15053,8 +15185,17 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 decision == EMBUDO_FINAL_REAL_OK
                 and (n_samples >= 80)
                 and (top1_prob >= float(ia_floor_eff + 0.05))
-                and (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
-                and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
+                and (
+                    (
+                        (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
+                        and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
+                    )
+                    or (
+                        bool(PERFIL_COMUN_FLEX_ENABLE)
+                        and bool(flex_eval.get("ok", False))
+                        and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_STRONG))
+                    )
+                )
             ),
         )
         if decision != EMBUDO_FINAL_REAL_OK and not wait_reason:
@@ -15084,6 +15225,10 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "guardrail_gap_ok": int(guard_gap_ok),
             "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
             "ia_floor_eff": float(ia_floor_eff),
+            "perfil_comun_flex_ok": int(bool(flex_eval.get("ok", False))),
+            "perfil_comun_flex_score": float(flex_eval.get("score", 0.0) or 0.0),
+            "perfil_comun_flex_family": float(flex_eval.get("score_family", 0.0) or 0.0),
+            "perfil_comun_flex_valid40": int(flex_eval.get("valid_40", 0) or 0),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
