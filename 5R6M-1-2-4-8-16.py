@@ -436,7 +436,7 @@ IA_WARMUP_LOW_EVIDENCE_CAP_POST_N15 = 0.85
 
 AUTO_REAL_ALLOW_UNRELIABLE_POST_N15 = True
 AUTO_REAL_UNRELIABLE_MIN_N = 0
-AUTO_REAL_UNRELIABLE_MIN_PROB = 0.54  # modo unreliable conservador: exige mejor discriminación antes de REAL
+AUTO_REAL_UNRELIABLE_MIN_PROB = 0.535  # ajuste moderado: reduce bloqueos por borde (ej. 53.8 vs 54.0)
 AUTO_REAL_UNRELIABLE_MIN_AUC = 0.52   # unreliable conservador: evita activaciones con AUC marginal débil
 AUTO_REAL_BLOCK_WHEN_WARMUP = False   # no bloquear REAL por warmup (perfil prueba protegida)
 # Ajuste mínimo anti-congelamiento lateral: permite bajar el umbral UNREL
@@ -456,7 +456,7 @@ AUTO_REAL_UNREL_MICRO_RELAX_LOG_COOLDOWN_S = 45.0
 # Bypass controlado: si la compuerta REAL ya está sólida en vivo, permitir AUTO
 # aunque el modelo siga en warmup/reliable=false.
 AUTO_REAL_UNRELIABLE_ALLOW_STRONG_GATE = True
-AUTO_REAL_UNRELIABLE_GATE_MIN_PROB = IA_ACTIVACION_REAL_THR_POST_N15
+AUTO_REAL_UNRELIABLE_GATE_MIN_PROB = 0.535
 # Bootstrap temprano de banderas LEGACY para evitar uso antes de definición.
 LEGACY_QUARANTINE_ENABLE = True
 LEGACY_ENABLE_PATTERN_V1 = not LEGACY_QUARANTINE_ENABLE
@@ -651,9 +651,10 @@ MRV_WINDOW_SHORT = 8
 MRV_WINDOW_MED = 16
 MRV_MIN_HISTORY = 6
 MRV_FALLBACK_VIDA = 2.5
-MRV_SCORE_REAL_OK_MIN = 0.55
+MRV_SCORE_REAL_OK_MIN = 0.52
 MRV_RUPTURA_HARD_MAX = 0.68
-MRV_VIDA_MIN_REAL = 1.0
+MRV_VIDA_MIN_REAL = 0.80
+IA_FLOOR_EDGE_TOL = 0.003  # tolerancia de borde para evitar bloqueos por redondeo marginal.
 MRV_ESTADOS = ["ESPERA", "PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "AGOTAMIENTO"]
 MRV_ESTADO_TO_NUM = {"ESPERA": 0.0, "PRE_ZONA": 1.0, "ZONA_CONFIRMADA": 2.0, "ZONA_MADURA": 3.0, "AGOTAMIENTO": 4.0}
 MRV_FEATURE_NAMES = [
@@ -1308,6 +1309,9 @@ reinicio_manual = False
 LIMPIEZA_PANEL_HASTA = 0
 ULTIMA_ACT_SALDO = 0
 REFRESCO_SALDO = 12
+HUD_RENDER_MIN_INTERVAL_S = 1.20
+HUD_LAST_RENDER_TS = 0.0
+HUD_LAST_RENDER_SIG = ""
 MAX_CICLOS = len(MARTI_ESCALADO)
 huellas_usadas = {bot: set() for bot in BOT_NAMES}
 SNAPSHOT_FILAS = {bot: 0 for bot in BOT_NAMES}
@@ -12365,7 +12369,7 @@ def _fmt_prob_pct(p):
         return "--"
 
 # Mostrar panel
-def mostrar_panel():
+def mostrar_panel(force: bool = False):
     # === IA: actualizar Prob IA antes de render (NO afecta lógica de trading) ===
     try:
         actualizar_prob_ia_todos()
@@ -12375,10 +12379,18 @@ def mostrar_panel():
     """
     HUD principal: muestra estado de los bots, saldos, IA y eventos recientes.
     """
-    global meta_mostrada
+    global meta_mostrada, HUD_LAST_RENDER_TS, HUD_LAST_RENDER_SIG
+
+    now_render = float(time.time())
+    render_sig = f"{ETAPA_ACTUAL}|{ETAPA_DETALLE}|{int(meta_mostrada)}|{int(pausado)}"
+    # Evitar redraw duplicado/seguido del mismo estado dentro del mismo tick.
+    if (not force) and (now_render - float(HUD_LAST_RENDER_TS)) < float(HUD_RENDER_MIN_INTERVAL_S) and render_sig == str(HUD_LAST_RENDER_SIG):
+        return
+    HUD_LAST_RENDER_TS = now_render
+    HUD_LAST_RENDER_SIG = render_sig
 
     # Respetar ventana de limpieza (para mensajes especiales)
-    if time.time() < LIMPIEZA_PANEL_HASTA:
+    if now_render < LIMPIEZA_PANEL_HASTA:
         limpiar_consola()
         return
 
@@ -14151,6 +14163,8 @@ DYN_ROOF_TIE_KEEP_CONFIRM_TOL = 0.003
 DYN_ROOF_GATE_REARM_HYST = 0.02
 DYN_ROOF_GATE_REARM_TICKS = 2
 DYN_ROOF_LOW_BAL_WARN_COOLDOWN_S = 60
+DYN_ROOF_GUARDRAIL_MIN_GAP_RELAXED = 0.01
+DYN_ROOF_GUARDRAIL_STRICT = False  # False = guardrail moderado, no cerebro principal.
 DYN_ROOF_STALL_TO_MODE_C_S = 2 * 60 * 60
 DYN_ROOF_MODE_C_FLOOR = 0.60
 DYN_ROOF_MODE_C_CONFIRM_TICKS = 2
@@ -14864,9 +14878,21 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
     return EMBUDO_DECISION_STATE
 
 
-def _degradar_si_modelo_ia_inmaduro(decision: str, risk_mode: str, degrade_from: str, reason: str, warmup_mode: bool, model_family: str, ia_model_mature: bool) -> tuple[str, str, str, str]:
+def _degradar_si_modelo_ia_inmaduro(
+    decision: str,
+    risk_mode: str,
+    degrade_from: str,
+    reason: str,
+    warmup_mode: bool,
+    model_family: str,
+    ia_model_mature: bool,
+    allow_operational_override: bool = False,
+) -> tuple[str, str, str, str]:
     """Degrada decisión a WAIT cuando el modelo IA no está maduro."""
     if ia_model_mature or decision != EMBUDO_FINAL_REAL_OK:
+        return decision, risk_mode, degrade_from, reason
+    # Escape hatch conservador: si la señal MRV+IA ya es muy fuerte, no congelar por horas.
+    if bool(allow_operational_override):
         return decision, risk_mode, degrade_from, reason
     decision = EMBUDO_FINAL_WAIT_SOFT
     risk_mode = "WAIT_SOFT"
@@ -14963,7 +14989,8 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         quality = "wait"
 
         ia_floor = float(max(get_umbral_operativo(), AUTO_REAL_UNRELIABLE_GATE_MIN_PROB))
-        ia_ok = bool(top1_prob >= ia_floor)
+        ia_floor_eff = float(max(0.0, ia_floor - float(IA_FLOOR_EDGE_TOL)))
+        ia_ok = bool(top1_prob >= ia_floor_eff)
         mrv_ok = bool(
             (mrv_score >= float(MRV_SCORE_REAL_OK_MIN))
             and (mrv_rupt <= float(MRV_RUPTURA_HARD_MAX))
@@ -14973,9 +15000,18 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         # Fallback MRV explícito: no bloquear totalmente cuando la historia aún es insuficiente.
         if (not mrv_ok) and (mrv_fallback_reason in ("low_history", "default")):
             mrv_ok = bool(
-                (top1_prob >= float(max(0.66, ia_floor + 0.03)))
-                and (mrv_rupt <= 0.55)
-                and (mrv_vida >= 0.8)
+                (top1_prob >= float(max(0.62, ia_floor_eff + 0.01)))
+                and (mrv_rupt <= 0.62)
+                and (mrv_vida >= 0.60)
+                and (mrv_estado in ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA"))
+            )
+        if not bool(DYN_ROOF_GUARDRAIL_STRICT):
+            min_gap_relaxed = float(max(0.0, DYN_ROOF_GUARDRAIL_MIN_GAP_RELAXED))
+            guard_gap_ok = bool(guard_gap_ok or (gap_value >= min_gap_relaxed))
+            guard_anti_rafaga_ok = bool(
+                guard_anti_rafaga_ok
+                or (top1_prob >= float(ia_floor_eff + 0.04))
+                or (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
             )
         guardrail_ok = bool(guard_gap_ok and guard_anti_rafaga_ok and (not cooldown_active))
 
@@ -15006,6 +15042,13 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             warmup_mode=warmup_mode,
             model_family=model_family,
             ia_model_mature=ia_model_mature,
+            allow_operational_override=bool(
+                decision == EMBUDO_FINAL_REAL_OK
+                and (n_samples >= 80)
+                and (top1_prob >= float(ia_floor_eff + 0.05))
+                and (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
+                and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
+            ),
         )
         if decision != EMBUDO_FINAL_REAL_OK and not wait_reason:
             wait_reason = reason
@@ -15033,6 +15076,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "legacy_pilot_governs": 0,
             "guardrail_gap_ok": int(guard_gap_ok),
             "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
+            "ia_floor_eff": float(ia_floor_eff),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
