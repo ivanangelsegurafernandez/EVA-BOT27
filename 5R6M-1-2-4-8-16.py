@@ -684,6 +684,10 @@ PERFIL_COMUN_FLEX_MRV_RUPT_MAX = 0.68
 PERFIL_COMUN_FLEX_ESTADOS_OK = ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA")
 PERFIL_COMUN_FLEX_SHORT_VALID_MAX = 27
 PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE = True
+PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_SCORE_MIN = 0.42
+PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_VIDA_MIN = 0.50
+PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_RUPT_MAX = 0.68
+PERFIL_COMUN_FLEX_MODE_C_RESCUE_FAMILIES_OK = ("CONTINUIDAD", "REBOTE")
 
 
 def _mrv_default_payload(now_ts: float | None = None, reason: str = "default") -> dict:
@@ -12822,7 +12826,9 @@ def mostrar_panel(force: bool = False):
                 f"ia_floor={float(emb.get('perfil_comun_flex_ia_floor',0.0) or 0.0):.3f} "
                 f"ok={int(emb.get('perfil_comun_flex_ok',0) or 0)} "
                 f"valid40={int(emb.get('perfil_comun_flex_valid40',0) or 0)} "
-                f"rescC={int(emb.get('perfil_comun_flex_modec_rescue',0) or 0)}"
+                f"rescC={int(emb.get('perfil_comun_flex_modec_rescue',0) or 0)} "
+                f"mrvN={int(emb.get('perfil_comun_flex_mrv_normal_ok',0) or 0)} "
+                f"mrvR={int(emb.get('perfil_comun_flex_mrv_rescue_ok',0) or 0)}"
             )
 
             ref_racha = ultimo_bot_real if ultimo_bot_real in BOT_NAMES else "--"
@@ -15185,7 +15191,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         if bool(PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE) and short_sample_flex and mode_c_pending:
             ia_floor_flex = float(PERFIL_COMUN_FLEX_IA_MIN_ABS)
         ia_ok_flex = bool(top1_prob >= ia_floor_flex)
-        mrv_ok_flex = bool(
+        mrv_ok_flex_normal = bool(
             bool(flex_eval.get("ok", False))
             and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_MIN))
             and (mrv_score >= float(PERFIL_COMUN_FLEX_MRV_SCORE_MIN))
@@ -15193,6 +15199,18 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             and (mrv_rupt <= float(PERFIL_COMUN_FLEX_MRV_RUPT_MAX))
             and (mrv_estado in tuple(PERFIL_COMUN_FLEX_ESTADOS_OK))
         )
+        mrv_ok_flex_rescue = bool(
+            bool(PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE)
+            and short_sample_flex
+            and mode_c_pending
+            and (str(flex_eval.get("family_label", "INVALIDA") or "INVALIDA") in tuple(PERFIL_COMUN_FLEX_MODE_C_RESCUE_FAMILIES_OK))
+            and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_MIN))
+            and (mrv_score >= float(PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_SCORE_MIN))
+            and (mrv_vida >= float(PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_VIDA_MIN))
+            and (mrv_rupt <= float(PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_RUPT_MAX))
+            and (mrv_estado in tuple(PERFIL_COMUN_FLEX_ESTADOS_OK))
+        )
+        mrv_ok_flex = bool(mrv_ok_flex_normal or mrv_ok_flex_rescue)
         if not bool(DYN_ROOF_GUARDRAIL_STRICT):
             min_gap_relaxed = float(max(0.0, DYN_ROOF_GUARDRAIL_MIN_GAP_RELAXED))
             guard_gap_ok = bool(guard_gap_ok or (gap_value >= min_gap_relaxed))
@@ -15219,6 +15237,12 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             reason = "mrv_ia_guard_ok"
             wait_reason = ""
             quality = "strong"
+        elif ia_ok_flex and mrv_ok_flex_rescue and (not mrv_ok_flex_normal) and guardrail_ok_flex:
+            decision = EMBUDO_FINAL_REAL_MICRO
+            reason = "perfil_comun_flex_modec_rescue"
+            wait_reason = ""
+            risk_mode = "REAL_MICRO"
+            quality = "moderate"
         elif ia_ok_flex and mrv_ok_flex and guardrail_ok_flex:
             decision = EMBUDO_FINAL_REAL_OK
             reason = "perfil_comun_flex_ok"
@@ -15298,6 +15322,8 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "perfil_comun_flex_ia_floor": float(ia_floor_flex),
             "perfil_comun_flex_valid40": int(flex_eval.get("valid_40", 0) or 0),
             "perfil_comun_flex_modec_rescue": int(bool(guardrail_ok_flex and (not guardrail_ok))),
+            "perfil_comun_flex_mrv_normal_ok": int(mrv_ok_flex_normal),
+            "perfil_comun_flex_mrv_rescue_ok": int(mrv_ok_flex_rescue),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
