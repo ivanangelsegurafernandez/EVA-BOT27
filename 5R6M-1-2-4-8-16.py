@@ -771,6 +771,11 @@ def _mrv_online_bot(bot: str, row: dict | None = None) -> dict:
         score = float(np.clip(0.45 * p_cont + 0.20 * p_inicio + 0.15 * comp + 0.10 * p_ia + 0.10 * (1.0 - p_rupt), 0.0, 1.0))
         dur_total = float(np.clip(1.0 + 8.0 * p_cont + 2.0 * p_inicio - 4.0 * p_agot, 1.0, 12.0))
         vida_restante = float(np.clip(dur_total * max(0.1, (1.0 - max(p_rupt, p_agot))), 0.5, 12.0))
+        # Anti-congelamiento MRV: con historia suficiente, evitar estado artificialmente muerto.
+        if n >= int(max(MRV_MIN_HISTORY, 12)):
+            if p_rupt < 0.75:
+                score = float(max(score, 0.18))
+            vida_restante = float(max(vida_restante, 0.80))
 
         if score < 0.40:
             estado = "ESPERA"
@@ -782,6 +787,8 @@ def _mrv_online_bot(bot: str, row: dict | None = None) -> dict:
             estado = "ZONA_CONFIRMADA"
         else:
             estado = "AGOTAMIENTO" if (p_agot >= 0.55 or p_rupt >= 0.60) else "PRE_ZONA"
+        if n >= int(max(MRV_MIN_HISTORY, 12)) and estado == "ESPERA" and score >= 0.34 and p_rupt < 0.70:
+            estado = "PRE_ZONA"
 
         return {
             "mrv_p_inicio": p_inicio,
