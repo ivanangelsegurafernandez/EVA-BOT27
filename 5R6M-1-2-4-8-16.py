@@ -12812,6 +12812,14 @@ def mostrar_panel(force: bool = False):
                 f"why={emb.get('decision_reason','--')} wait={emb.get('soft_wait_reason','') or '--'} "
                 f"hard={emb.get('hard_block_reason','') or '--'} deg={emb.get('degrade_from','--')}"
             )
+            print(
+                padding + Fore.CYAN +
+                f"🧬 PFLEX: fam={emb.get('perfil_comun_flex_family','--')} "
+                f"score={float(emb.get('perfil_comun_flex_score',0.0) or 0.0):.2f} "
+                f"fam_score={float(emb.get('perfil_comun_flex_family_score',0.0) or 0.0):.2f} "
+                f"ok={int(emb.get('perfil_comun_flex_ok',0) or 0)} "
+                f"valid40={int(emb.get('perfil_comun_flex_valid40',0) or 0)}"
+            )
 
             ref_racha = ultimo_bot_real if ultimo_bot_real in BOT_NAMES else "--"
             elegido_tick = mejor[0] if isinstance(mejor, tuple) and len(mejor) >= 1 else "--"
@@ -14910,6 +14918,7 @@ def _perfil_comun_flex_eval(bot: str) -> dict:
         "ok": False,
         "score": 0.0,
         "score_family": 0.0,
+        "family_label": "INVALIDA",
         "valid_40": 0,
         "green_40": 0,
         "green_16": 0,
@@ -14971,6 +14980,10 @@ def _perfil_comun_flex_eval(bot: str) -> dict:
         score_struct = float(max(0.0, min(1.0, 0.45 * score_indef + 0.30 * score_red_end + 0.25 * score_red_cluster)))
         score_family = float(max(0.0, min(1.0, 0.70 * fam_ratio + 0.30 * score_struct)))
         score = float(max(0.0, min(1.0, 0.35 * score_g40 + 0.20 * score_g8 + 0.20 * score_g16 + 0.25 * score_family)))
+        prev_8 = [m for m in marks[-16:-8] if m in ("G", "R")]
+        prev_8_green = int(sum(1 for m in prev_8 if m == "G"))
+        prev_8_rate = (float(prev_8_green) / float(max(1, len(prev_8)))) if prev_8 else 0.0
+        now_8_rate = float(green_8) / 8.0
 
         hard_block = bool(
             (end_red > int(PERFIL_COMUN_FLEX_MAX_END_RED_STREAK_HARD))
@@ -14981,10 +14994,32 @@ def _perfil_comun_flex_eval(bot: str) -> dict:
             and (not hard_block)
             and (score >= float(PERFIL_COMUN_FLEX_SCORE_MIN))
         )
+        continuity_ok = bool(
+            (green_40 >= int(PERFIL_COMUN_FLEX_GREEN40_SOFT_MIN))
+            and (green_40 <= int(PERFIL_COMUN_FLEX_GREEN40_SOFT_MAX))
+            and (green_8 >= int(PERFIL_COMUN_FLEX_GREEN8_SOFT_MIN))
+            and (end_red <= 1)
+            and (clusters_ge3 <= 1)
+        )
+        rebound_ok = bool(
+            (not hard_block)
+            and (green_8 >= int(PERFIL_COMUN_FLEX_GREEN8_SOFT_MIN))
+            and ((now_8_rate - prev_8_rate) >= 0.15)
+            and (end_red <= int(PERFIL_COMUN_FLEX_MAX_END_RED_STREAK_HARD))
+        )
+        family_label = "INVALIDA"
+        if ok:
+            if rebound_ok:
+                family_label = "REBOTE"
+            elif continuity_ok:
+                family_label = "CONTINUIDAD"
+            else:
+                family_label = "MIXTA"
         out.update({
             "ok": ok,
             "score": score,
             "score_family": score_family,
+            "family_label": str(family_label),
             "valid_40": valid_40,
             "green_40": green_40,
             "green_16": green_16,
@@ -15227,7 +15262,8 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "ia_floor_eff": float(ia_floor_eff),
             "perfil_comun_flex_ok": int(bool(flex_eval.get("ok", False))),
             "perfil_comun_flex_score": float(flex_eval.get("score", 0.0) or 0.0),
-            "perfil_comun_flex_family": float(flex_eval.get("score_family", 0.0) or 0.0),
+            "perfil_comun_flex_family": str(flex_eval.get("family_label", "INVALIDA") or "INVALIDA"),
+            "perfil_comun_flex_family_score": float(flex_eval.get("score_family", 0.0) or 0.0),
             "perfil_comun_flex_valid40": int(flex_eval.get("valid_40", 0) or 0),
         })
     except Exception:
