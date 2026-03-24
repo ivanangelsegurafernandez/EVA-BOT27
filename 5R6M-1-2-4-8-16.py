@@ -608,8 +608,9 @@ PATTERN_V1_Q2_PROXY = {
     "volatilidad": 0.049,
 }
 PATTERN_V1_LAST_LOG_TS = {}
-# Fase operativa REAL por madurez: SHADOW -> MICRO -> NORMAL
-REAL_PILOT_MODE_ENABLE = True
+# Fase operativa REAL heredada (SHADOW -> MICRO -> NORMAL):
+# desactivada como cerebro operativo; queda solo para telemetría/compatibilidad.
+REAL_PILOT_MODE_ENABLE = False
 REAL_MICRO_REQUIRE_PATTERN = False
 REAL_MICRO_PATTERN_MIN_TOTAL = 4.0
 REAL_MICRO_REQUIRE_DUAL = False
@@ -903,7 +904,7 @@ def _pattern_v1_log_bot(bot: str, pattern_score: float, bonus_dual: float, penal
 
 
 def _resolver_estado_real(meta_live: dict | None = None) -> str:
-    """Estado operativo REAL: SHADOW, MICRO, NORMAL."""
+    """Estado heredado SHADOW/MICRO/NORMAL (solo telemetría, no decisión principal)."""
     try:
         if not bool(REAL_PILOT_MODE_ENABLE):
             return "NORMAL"
@@ -919,7 +920,7 @@ def _resolver_estado_real(meta_live: dict | None = None) -> str:
             return "MICRO"
         return "SHADOW"
     except Exception:
-        return "SHADOW"
+        return "NORMAL" if (not bool(REAL_PILOT_MODE_ENABLE)) else "SHADOW"
 
 
 def _micro_pattern_gate_ok(bot: str, ctx: dict | None = None) -> tuple[bool, str]:
@@ -14877,7 +14878,7 @@ def _degradar_si_modelo_ia_inmaduro(decision: str, risk_mode: str, degrade_from:
 
 
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
-    """Embudo final mínimo: MRV + IA + guardrails reales."""
+    """Embudo final: decisión principal por MRV+IA; dyn_gate/legacy solo guardrail/telemetría."""
     out = _registrar_estado_embudo({
         "decision_final": EMBUDO_FINAL_WAIT_SOFT,
         "decision_reason": "sin_candidatos",
@@ -14894,6 +14895,8 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         "ia_real_backed": 0,
         "real_source": "IA",
         "ia_model_mature": 0,
+        "legacy_estado_real": str(estado_real or "NORMAL"),
+        "legacy_pilot_governs": 0,
     })
     if not candidatos:
         return out
@@ -14914,9 +14917,10 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         mrv_estado = str(st_top.get("mrv_estado", "ESPERA") or "ESPERA")
         mrv_fallback_reason = str(st_top.get("mrv_fallback_reason", "") or "")
 
+        # Guardrails DYN_ROOF (secundarios): nunca reemplazan la calidad MRV+IA.
         dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
-        gap_ok = bool(dgate.get("gap_ok", True))
-        anti_rafaga_ok = bool(dgate.get("crossed_up", True) or dgate.get("trigger_force", False) or dgate.get("trigger_ok", False))
+        guard_gap_ok = bool(dgate.get("gap_ok", True))
+        guard_anti_rafaga_ok = bool(dgate.get("crossed_up", True) or dgate.get("trigger_force", False) or dgate.get("trigger_ok", False))
         cooldown_active = bool(time.time() < float(REAL_COOLDOWN_UNTIL_TS))
 
         meta = meta_live if isinstance(meta_live, dict) else {}
@@ -14946,6 +14950,10 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 "ia_real_backed": 0,
                 "real_source": "OPERATIVO_NO_IA",
                 "ia_model_mature": int(ia_model_mature),
+                "legacy_estado_real": str(estado_real or "NORMAL"),
+                "legacy_pilot_governs": 0,
+                "guardrail_gap_ok": int(guard_gap_ok),
+                "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
             })
 
         decision = EMBUDO_FINAL_WAIT_SOFT
@@ -14969,7 +14977,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 and (mrv_rupt <= 0.55)
                 and (mrv_vida >= 0.8)
             )
-        guardrail_ok = bool(gap_ok and anti_rafaga_ok and (not cooldown_active))
+        guardrail_ok = bool(guard_gap_ok and guard_anti_rafaga_ok and (not cooldown_active))
 
         if ia_ok and mrv_ok and guardrail_ok:
             decision = EMBUDO_FINAL_REAL_OK
@@ -14984,9 +14992,9 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 wait_reason = "mrv_context"
             elif cooldown_active:
                 wait_reason = "cooldown"
-            elif not gap_ok:
+            elif not guard_gap_ok:
                 wait_reason = "gap_guard"
-            elif not anti_rafaga_ok:
+            elif not guard_anti_rafaga_ok:
                 wait_reason = "anti_rafaga"
             reason = wait_reason
 
@@ -15021,6 +15029,10 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "ia_real_backed": int(ia_real_backed),
             "real_source": str(real_source),
             "ia_model_mature": int(ia_model_mature),
+            "legacy_estado_real": str(estado_real or "NORMAL"),
+            "legacy_pilot_governs": 0,
+            "guardrail_gap_ok": int(guard_gap_ok),
+            "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
