@@ -651,6 +651,10 @@ EMBUDO_CANDIDATE_RESCUE_MIN_PROB = 0.52
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER = False
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK = True
 EMBUDO_CANDIDATE_RESCUE_ONLY_WHEN_WAIT_SOFT = True
+EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS = 1.5
+EMBUDO_CANDIDATE_RESCUE_ALLOW_CONFIRM_PENDING = False
+EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER_OR_CONTEXT = True
+EMBUDO_CANDIDATE_RESCUE_BLOCK_ON_HARD_GUARD = True
 IA_PROB_POLARIZE_ENABLE = True
 IA_PROB_POLARIZE_FACTOR_RELIABLE = 1.25
 IA_PROB_POLARIZE_FACTOR_UNRELIABLE = 2.05
@@ -15361,6 +15365,48 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
 
+def _candidate_rescue_ok(embudo: dict, dyn_gate: dict | None, top1_bot: str, top1_prob: float) -> tuple[bool, str, float]:
+    """Valida rescate post-embudo de forma coherente y auditable."""
+    emb = embudo if isinstance(embudo, dict) else {}
+    dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
+    decision_now = str(emb.get("decision_final", EMBUDO_FINAL_WAIT_SOFT) or EMBUDO_FINAL_WAIT_SOFT)
+    wait_reason = str(emb.get("soft_wait_reason") or emb.get("decision_reason") or "")
+    hard_reason = str(emb.get("hard_block_reason") or "")
+
+    if decision_now == EMBUDO_FINAL_BLOCK_HARD:
+        return False, "rescue_reject:hard_block", 0.0
+    if bool(EMBUDO_CANDIDATE_RESCUE_ONLY_WHEN_WAIT_SOFT) and decision_now != EMBUDO_FINAL_WAIT_SOFT:
+        return False, "rescue_reject:not_wait_soft", 0.0
+    if not bool(("sin_candidatos" in wait_reason) or ("wait_soft" in wait_reason.lower()) or (decision_now == EMBUDO_FINAL_WAIT_SOFT)):
+        return False, "rescue_reject:not_soft_wait_reason", 0.0
+    if bool(EMBUDO_CANDIDATE_RESCUE_BLOCK_ON_HARD_GUARD):
+        hg = _estado_guardrail_ia_fuerte(force=False) if "_estado_guardrail_ia_fuerte" in globals() else {}
+        if bool((hg or {}).get("hard_block", False)) or str((hg or {}).get("level", "")).upper() == "RED":
+            return False, "rescue_reject:hard_block", 0.0
+    if bool(EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK) and hard_reason:
+        return False, "rescue_reject:hard_block", 0.0
+    if (not str(top1_bot or "").strip()) or (float(top1_prob or 0.0) <= 0.0):
+        return False, "rescue_reject:no_top1", 0.0
+
+    roof_ref = float(dgate.get("roof_eff", dgate.get("roof", 0.0)) or 0.0)
+    roof_deficit_pts = max(0.0, float(roof_ref - float(top1_prob)) * 100.0) if roof_ref > 0.0 else 0.0
+    if (roof_deficit_pts > float(EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS)) and (roof_ref > 0.0):
+        return False, "rescue_reject:roof_deficit", roof_deficit_pts
+
+    confirm_streak = int(dgate.get("confirm_streak", 0) or 0)
+    confirm_need = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
+    confirm_pending = bool(confirm_streak < confirm_need)
+    if confirm_pending and (not bool(EMBUDO_CANDIDATE_RESCUE_ALLOW_CONFIRM_PENDING)):
+        return False, "rescue_reject:confirm_pending", roof_deficit_pts
+
+    trig_ok = bool(dgate.get("trigger_ok", False))
+    trig_force = bool(dgate.get("trigger_force", False))
+    ctx_ok = bool(int(emb.get("perfil_comun_flex_ok", 0) or 0) == 1)
+    if bool(EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER_OR_CONTEXT) and (not (trig_ok or trig_force or ctx_ok)):
+        return False, "rescue_reject:no_trigger_no_context", roof_deficit_pts
+
+    return True, "rescue_ok:candidate_rescue_wait_soft", roof_deficit_pts
+
 
 def _umbral_senal_actual_hud() -> float:
     """
@@ -16837,17 +16883,20 @@ async def main():
                                 if live_pre:
                                     top1_rescue = str(live_pre[0][0] or "").strip()
                                     top1_prob_rescue = float(live_pre[0][1] or 0.0)
-                            hard_block_rescue = str(embudo.get("hard_block_reason") or "").strip()
-                            trigger_ok_rescue = bool((dyn_gate or {}).get("trigger_ok", False) or (dyn_gate or {}).get("trigger_force", False))
                             can_rescue_wait = bool(
                                 EMBUDO_CANDIDATE_RESCUE_ENABLE
-                                and ((not EMBUDO_CANDIDATE_RESCUE_ONLY_WHEN_WAIT_SOFT) or decision_final == EMBUDO_FINAL_WAIT_SOFT)
-                                and (wait_reason_emb == "sin_candidatos")
                                 and (top1_rescue in BOT_NAMES)
                                 and (top1_prob_rescue >= float(EMBUDO_CANDIDATE_RESCUE_MIN_PROB))
-                                and ((not EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER) or trigger_ok_rescue)
-                                and ((not EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK) or (hard_block_rescue == ""))
                             )
+                            rescue_reason = "rescue_reject:not_evaluated"
+                            roof_deficit_pts = 0.0
+                            if can_rescue_wait:
+                                can_rescue_wait, rescue_reason, roof_deficit_pts = _candidate_rescue_ok(
+                                    embudo=embudo,
+                                    dyn_gate=dyn_gate,
+                                    top1_bot=top1_rescue,
+                                    top1_prob=float(top1_prob_rescue),
+                                )
                             if can_rescue_wait:
                                 rec = rec_pre if rec_pre is not None else next((c for c in list(candidatos_pre_embudo or []) if str(c[1]) == top1_rescue), None)
                                 if rec is None:
@@ -16865,16 +16914,24 @@ async def main():
                                 candidatos = [rec]
                                 embudo = _registrar_estado_embudo({
                                     "decision_final": EMBUDO_FINAL_REAL_OK,
-                                    "decision_reason": "candidate_rescue_wait_soft",
+                                    "decision_reason": str(rescue_reason),
                                     "soft_wait_reason": "",
                                     "risk_mode": "REAL_MICRO",
+                                    "gate_quality": "rescue_ok",
+                                    "hard_block_reason": "",
                                     "top1_bot": str(top1_rescue),
                                     "top1_prob": float(top1_prob_rescue),
                                 })
                                 rescue_applied = True
-                                agregar_evento(f"🛟 EMBUDO RESCUE: {top1_rescue} {top1_prob_rescue*100:.1f}% -> REAL_MICRO.")
+                                agregar_evento(f"🛟 EMBUDO RESCUE OK: bot={top1_rescue} p={top1_prob_rescue*100:.1f}% roof_def={roof_deficit_pts:.1f}pts why={rescue_reason}.")
                             if not rescue_applied:
-                                agregar_evento(f"⏳ EMBUDO WAIT: {wait_reason_emb}")
+                                embudo = _registrar_estado_embudo({
+                                    "decision_final": EMBUDO_FINAL_WAIT_SOFT,
+                                    "decision_reason": str(rescue_reason),
+                                    "soft_wait_reason": str(rescue_reason),
+                                    "gate_quality": "wait",
+                                })
+                                agregar_evento(f"⏳ EMBUDO WAIT: {rescue_reason} bot={top1_rescue or '--'} p={top1_prob_rescue*100:.1f}% roof_def={roof_deficit_pts:.1f}pts.")
                                 candidatos = []
                         elif decision_final == EMBUDO_FINAL_REAL_OK:
                             candidatos = candidatos[:1]
