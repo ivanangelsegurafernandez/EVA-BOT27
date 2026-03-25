@@ -13060,25 +13060,42 @@ def mostrar_panel(force: bool = False):
             bot_rb = str(emb_rb.get("top1_bot") or "").strip()
             if bot_rb not in BOT_NAMES:
                 bot_rb = str(ultimo_bot_real) if str(ultimo_bot_real) in BOT_NAMES else ""
-            st_rb = estado_bots.get(bot_rb, {}) if bot_rb else {}
-            score_rb = float(st_rb.get("red_bisagra_score", 0.0) or 0.0)
-            ok_rb = bool(st_rb.get("red_bisagra_ok", False))
-            if bot_rb:
+            if bot_rb not in BOT_NAMES:
+                owner_rb = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+                bot_rb = str(owner_rb) if str(owner_rb) in BOT_NAMES else ""
+            if bot_rb not in BOT_NAMES:
+                best_rb = ""
+                best_p = -1.0
+                for _b in BOT_NAMES:
+                    _p = _prob_ia_operativa_bot(_b, default=None)
+                    if isinstance(_p, (int, float)) and float(_p) > best_p:
+                        best_p = float(_p)
+                        best_rb = str(_b)
+                bot_rb = best_rb if best_rb in BOT_NAMES else ""
+
+            if bot_rb in BOT_NAMES:
+                st_rb = estado_bots.get(bot_rb, {}) if isinstance(estado_bots, dict) else {}
+                score_rb = float(st_rb.get("red_bisagra_score", 0.0) or 0.0)
+                ok_rb = bool(st_rb.get("red_bisagra_ok", False))
+                reason_rb = str(st_rb.get("red_bisagra_reason", "--") or "--")
                 if ok_rb:
                     print(
                         padding + Fore.CYAN
-                        + f"RB: ok score={score_rb:.2f} gr={float(st_rb.get('red_bisagra_green_ratio',0.0) or 0.0):.2f} "
+                        + f"RB: bot={bot_rb} ok score={score_rb:.2f} gr={float(st_rb.get('red_bisagra_green_ratio',0.0) or 0.0):.2f} "
                         + f"wbr={int(st_rb.get('red_bisagra_consec_wins_before_red',0) or 0)} "
                         + f"rc={int(st_rb.get('red_bisagra_red_clusters',0) or 0)} "
                         + f"tailR={int(st_rb.get('red_bisagra_tail_red_streak',0) or 0)}"
                     )
                 else:
+                    status_rb = "n/a" if reason_rb.startswith("muestra_insuficiente") else "no"
                     print(
                         padding + Fore.CYAN
-                        + f"RB: no score={score_rb:.2f} motivo={str(st_rb.get('red_bisagra_reason','--') or '--')}"
+                        + f"RB: bot={bot_rb} {status_rb} score={score_rb:.2f} motivo={reason_rb}"
                     )
+            else:
+                print(padding + Fore.CYAN + "RB: n/a motivo=no_contexto")
         except Exception:
-            pass
+            print(padding + Fore.CYAN + "RB: n/a motivo=error_contexto")
     except Exception:
         pass
 
