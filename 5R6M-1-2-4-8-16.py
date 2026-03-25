@@ -655,6 +655,16 @@ EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS = 1.5
 EMBUDO_CANDIDATE_RESCUE_ALLOW_CONFIRM_PENDING = False
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER_OR_CONTEXT = True
 EMBUDO_CANDIDATE_RESCUE_BLOCK_ON_HARD_GUARD = True
+RED_BISAGRA_ENABLE = True
+RED_BISAGRA_LOOKBACK = 8
+RED_BISAGRA_MIN_GREEN_RATIO = 0.66
+RED_BISAGRA_MIN_CONSEC_WINS_BEFORE_RED = 2
+RED_BISAGRA_REQUIRED_TAIL_RED_STREAK = 1
+RED_BISAGRA_MAX_RED_CLUSTERS = 1
+RED_BISAGRA_MIN_SCORE_RESCUE = 0.62
+RED_BISAGRA_RESCUE_MIN_PROB = 0.53
+RED_BISAGRA_RESCUE_MAX_EXTRA_ROOF_PTS = 1.20
+RED_BISAGRA_REQUIRE_PATTERN_OK = True
 EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = True
 EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = True
 IA_PROB_POLARIZE_ENABLE = True
@@ -725,6 +735,124 @@ def _mrv_default_payload(now_ts: float | None = None, reason: str = "default") -
         "mrv_fragmentacion": 0.50,
         "mrv_fallback_reason": str(reason),
     }
+
+
+def _result_to_bin(x):
+    sx = str(x or "").strip().upper()
+    if sx in ("GANANCIA", "WIN", "G", "VERDE", "GREEN", "W"):
+        return 1
+    if sx in ("PÉRDIDA", "PERDIDA", "LOSS", "L", "R", "ROJO", "RED"):
+        return 0
+    return None
+
+
+def _tail_red_streak(seq_bin) -> int:
+    n = 0
+    for v in reversed(list(seq_bin or [])):
+        if int(v) == 0:
+            n += 1
+        else:
+            break
+    return int(n)
+
+
+def _count_red_clusters(seq_bin) -> int:
+    c = 0
+    prev_red = False
+    for v in list(seq_bin or []):
+        is_red = int(v) == 0
+        if is_red and (not prev_red):
+            c += 1
+        prev_red = is_red
+    return int(c)
+
+
+def _consecutive_wins_before_last_red(seq_bin) -> int:
+    vals = list(seq_bin or [])
+    if not vals or int(vals[-1]) != 0:
+        return 0
+    c = 0
+    idx = len(vals) - 2
+    while idx >= 0 and int(vals[idx]) == 1:
+        c += 1
+        idx -= 1
+    return int(c)
+
+
+def _compute_red_bisagra(bot: str) -> dict:
+    payload = {
+        "red_bisagra_score": 0.0,
+        "red_bisagra_ok": False,
+        "red_bisagra_last_is_red": False,
+        "red_bisagra_tail_red_streak": 0,
+        "red_bisagra_green_ratio": 0.0,
+        "red_bisagra_consec_wins_before_red": 0,
+        "red_bisagra_red_clusters": 0,
+        "red_bisagra_reason": "disabled",
+    }
+    if not bool(RED_BISAGRA_ENABLE):
+        return payload
+    try:
+        st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+        rr = list(st.get("resultados", []) or [])
+        valid = []
+        for x in rr:
+            b = _result_to_bin(x)
+            if b is not None:
+                valid.append(int(b))
+        lookback = int(max(1, int(RED_BISAGRA_LOOKBACK)))
+        if len(valid) < lookback:
+            payload["red_bisagra_reason"] = f"muestra_insuficiente:{len(valid)}/{lookback}"
+            return payload
+        seq = valid[-lookback:]
+        last_is_red = bool(seq and int(seq[-1]) == 0)
+        tail_red = int(_tail_red_streak(seq))
+        green_ratio = float(sum(1 for v in seq if int(v) == 1) / max(1, len(seq)))
+        wins_before_red = int(_consecutive_wins_before_last_red(seq))
+        red_clusters = int(_count_red_clusters(seq))
+        payload.update({
+            "red_bisagra_last_is_red": last_is_red,
+            "red_bisagra_tail_red_streak": tail_red,
+            "red_bisagra_green_ratio": green_ratio,
+            "red_bisagra_consec_wins_before_red": wins_before_red,
+            "red_bisagra_red_clusters": red_clusters,
+        })
+        if not last_is_red:
+            payload["red_bisagra_reason"] = "last_not_red"
+            return payload
+        if tail_red != int(RED_BISAGRA_REQUIRED_TAIL_RED_STREAK):
+            payload["red_bisagra_reason"] = f"tail_red_streak!={int(RED_BISAGRA_REQUIRED_TAIL_RED_STREAK)}"
+            return payload
+        if green_ratio < float(RED_BISAGRA_MIN_GREEN_RATIO):
+            payload["red_bisagra_reason"] = "green_ratio_low"
+            return payload
+        if wins_before_red < int(RED_BISAGRA_MIN_CONSEC_WINS_BEFORE_RED):
+            payload["red_bisagra_reason"] = "wins_before_red_low"
+            return payload
+        if red_clusters > int(RED_BISAGRA_MAX_RED_CLUSTERS):
+            payload["red_bisagra_reason"] = "red_clusters_high"
+            return payload
+
+        wins_norm = min(float(wins_before_red) / 4.0, 1.0)
+        cluster_component = 1.0 - min(
+            float(red_clusters) / max(1.0, float(int(RED_BISAGRA_MAX_RED_CLUSTERS) + 1)),
+            1.0,
+        )
+        isolated_red_bonus = 1.0 if tail_red == 1 else 0.0
+        score = (
+            0.40 * float(green_ratio)
+            + 0.25 * float(wins_norm)
+            + 0.20 * float(isolated_red_bonus)
+            + 0.15 * float(cluster_component)
+        )
+        score = float(max(0.0, min(1.0, score)))
+        payload["red_bisagra_score"] = score
+        payload["red_bisagra_ok"] = bool(score >= float(RED_BISAGRA_MIN_SCORE_RESCUE))
+        payload["red_bisagra_reason"] = "ok" if payload["red_bisagra_ok"] else "score_below_min_rescue"
+        return payload
+    except Exception as e:
+        payload["red_bisagra_reason"] = f"error:{type(e).__name__}"
+        return payload
 
 
 def _mrv_historico_bot(bot: str) -> dict:
@@ -12927,6 +13055,46 @@ def mostrar_panel(force: bool = False):
             + f"late={'sí' if bool(pat.get('late_chase', False)) else 'no'} "
             + f"Δ={float(pat.get('pattern_delta', 0.0) or 0.0):+.2f}"
         )
+        try:
+            emb_rb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
+            bot_rb = str(emb_rb.get("top1_bot") or "").strip()
+            if bot_rb not in BOT_NAMES:
+                bot_rb = str(ultimo_bot_real) if str(ultimo_bot_real) in BOT_NAMES else ""
+            if bot_rb not in BOT_NAMES:
+                owner_rb = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+                bot_rb = str(owner_rb) if str(owner_rb) in BOT_NAMES else ""
+            if bot_rb not in BOT_NAMES:
+                best_rb = ""
+                best_p = -1.0
+                for _b in BOT_NAMES:
+                    _p = _prob_ia_operativa_bot(_b, default=None)
+                    if isinstance(_p, (int, float)) and float(_p) > best_p:
+                        best_p = float(_p)
+                        best_rb = str(_b)
+                bot_rb = best_rb if best_rb in BOT_NAMES else ""
+
+            if bot_rb in BOT_NAMES:
+                st_rb = estado_bots.get(bot_rb, {}) if isinstance(estado_bots, dict) else {}
+                score_rb = float(st_rb.get("red_bisagra_score", 0.0) or 0.0)
+                ok_rb = bool(st_rb.get("red_bisagra_ok", False))
+                reason_rb = str(st_rb.get("red_bisagra_reason", "--") or "--")
+                if ok_rb:
+                    print(
+                        padding + Fore.CYAN
+                        + f"RB: bot={bot_rb} ok score={score_rb:.2f} gr={float(st_rb.get('red_bisagra_green_ratio',0.0) or 0.0):.2f} "
+                        + f"wbr={int(st_rb.get('red_bisagra_consec_wins_before_red',0) or 0)} "
+                        + f"rc={int(st_rb.get('red_bisagra_red_clusters',0) or 0)} "
+                        + f"tailR={int(st_rb.get('red_bisagra_tail_red_streak',0) or 0)}"
+                    )
+                else:
+                    print(
+                        padding + Fore.CYAN
+                        + f"RB: bot={bot_rb} no score={score_rb:.2f} motivo={reason_rb}"
+                    )
+            else:
+                print(padding + Fore.CYAN + "RB: n/a motivo=no_contexto")
+        except Exception:
+            print(padding + Fore.CYAN + "RB: n/a motivo=error_contexto")
     except Exception:
         pass
 
@@ -15461,8 +15629,42 @@ def _candidate_rescue_ok(embudo: dict, dyn_gate: dict | None, top1_bot: str, top
 
     roof_ref = float(dgate.get("roof_eff", dgate.get("roof", 0.0)) or 0.0)
     roof_deficit_pts = max(0.0, float(roof_ref - float(top1_prob)) * 100.0) if roof_ref > 0.0 else 0.0
-    if (roof_deficit_pts > float(EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS)) and (roof_ref > 0.0):
-        return False, "rescue_reject:roof_deficit", roof_deficit_pts
+    roof_def_base = float(EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS)
+    roof_def_max = float(roof_def_base)
+    rb = estado_bots.get(top1_bot, {}) if isinstance(estado_bots, dict) else {}
+    rb_score = float(rb.get("red_bisagra_score", 0.0) or 0.0)
+    rb_ok = bool(rb.get("red_bisagra_ok", False))
+    rb_reason = str(rb.get("red_bisagra_reason", "") or "")
+    if (roof_deficit_pts > roof_def_base) and (roof_ref > 0.0):
+        can_rb_extra = False
+        if bool(RED_BISAGRA_ENABLE) and rb_ok:
+            mrv_score = float(rb.get("mrv_score_zona", 0.0) or 0.0)
+            mrv_vida = float(rb.get("mrv_vida_util_restante", 0.0) or 0.0)
+            mrv_rupt = float(rb.get("mrv_p_ruptura_inmediata", 1.0) or 1.0)
+            wait_has_roof = ("roof" in str(wait_reason).lower()) or ("roof_deficit" in str(wait_reason).lower())
+            pattern_src = emb.get("pattern_state", emb.get("perfil_comun_flex_family", None))
+            pattern_state = str(pattern_src).upper().strip() if pattern_src is not None else ""
+            pattern_ok = pattern_state in ("CONTINUIDAD", "REBOTE")
+            if bool(RED_BISAGRA_REQUIRE_PATTERN_OK) and (not pattern_state):
+                return False, "rescue_reject:red_bisagra_no_pattern_state", roof_deficit_pts
+            if bool(RED_BISAGRA_REQUIRE_PATTERN_OK) and (not pattern_ok):
+                return False, "rescue_reject:red_bisagra_pattern_not_ok", roof_deficit_pts
+            can_rb_extra = bool(
+                (decision_now == EMBUDO_FINAL_WAIT_SOFT)
+                and (not bool(hard_reason))
+                and wait_has_roof
+                and (float(top1_prob) >= float(RED_BISAGRA_RESCUE_MIN_PROB))
+                and (rb_score >= float(RED_BISAGRA_MIN_SCORE_RESCUE))
+                and (mrv_score >= 0.42)
+                and (mrv_vida >= 0.50)
+                and (mrv_rupt <= 0.68)
+            )
+        if can_rb_extra:
+            roof_def_max = roof_def_base + float(RED_BISAGRA_RESCUE_MAX_EXTRA_ROOF_PTS)
+        if roof_deficit_pts > roof_def_max:
+            if can_rb_extra:
+                return False, "rescue_reject:roof_deficit_even_with_red_bisagra", roof_deficit_pts
+            return False, "rescue_reject:roof_deficit", roof_deficit_pts
 
     confirm_streak = int(dgate.get("confirm_streak", 0) or 0)
     confirm_need = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
@@ -16006,6 +16208,11 @@ async def cargar_datos_bot(bot, token_actual):
 
             estado_bots[bot]["token"] = "REAL" if effective_owner == bot else "DEMO"
             last_update_time[bot] = time.time()
+
+        try:
+            estado_bots[bot].update(_compute_red_bisagra(bot))
+        except Exception:
+            pass
 
         # Mantén tu pipeline incremental como estaba
         anexar_incremental_desde_bot(bot)
