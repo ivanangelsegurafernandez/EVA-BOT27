@@ -588,6 +588,8 @@ PATTERN_COL_PENAL_LATE_CHASE = 1.00
 PATTERN_COL80_UNA_X_ENABLE = True
 PATTERN_COL80_UNA_X_LOOKBACK = 3
 PATTERN_COL80_UNA_X_BONUS = 0.30
+PATTERN_COL80_HYBRID_PTS_TO_PROB = 0.012
+PATTERN_COL80_HYBRID_DELTA_CAP = 0.012
 PATTERN_COL80_UNA_X_RESCUE_MAX_EXTRA_ROOF_PTS = 0.35
 PATTERN_COL_LAST_STATE = {
     "green_ratio_col_actual": None,
@@ -12291,7 +12293,7 @@ def evaluar_col80_una_x_rebote(columnas: list[dict], bots: list[str], thr80: flo
         })
         return out
     if out["col80_una_x_state"] == "NONE":
-        out["col80_block_reason"] = "columna_no_valida"
+        out["col80_block_reason"] = ""
     return out
 
 def clasificar_estado_patron(col_actual: dict, col_anterior: dict, rebote_rate_hist: float | None, rebote_samples_hist: int, col80_signal: dict | None = None) -> dict:
@@ -13155,7 +13157,7 @@ def mostrar_panel(force: bool = False):
             + f"reb_hist={reb_txt} "
             + f"X={int(pat.get('total_x_hist', 0) or 0)} "
             + f"X→✓={int(pat.get('total_x_rebote_hist', 0) or 0)} "
-            + f"state={str(pat.get('pattern_state', 'BLOQUEADO'))} "
+            + f"state={str(pat.get('col80_una_x_state', 'NONE'))} "
             + f"st80={int(pat.get('strong_streak_80', 0) or 0)} "
             + f"st90={int(pat.get('strong_streak_90', 0) or 0)} "
             + f"late={'sí' if bool(pat.get('late_chase', False)) else 'no'} "
@@ -17157,7 +17159,7 @@ async def main():
                                 # Se usa como modulador de elegibilidad común, sin reordenar bots por sí solo.
                                 pat_state = dict(pattern_col_eval if isinstance(pattern_col_eval, dict) else {})
                                 pat_bonus_col, pat_penal_col, pat_delta_col = aplicar_ajuste_patron_score(pat_state)
-                                k_pts_pat = 0.012
+                                k_pts_pat = float(PATTERN_COL80_HYBRID_PTS_TO_PROB)
                                 thr_post_ctx = float(thr_post)
                                 if False:  # CUARENTENA FUNCIONAL pattern columns
                                     pass
@@ -17178,7 +17180,7 @@ async def main():
                                 estado_bots[b]["ia_pattern_red_count"] = int(pat_state.get("col80_red_count", 0) or 0)
                                 estado_bots[b]["ia_pattern_target_bot"] = col80_target
                                 estado_bots[b]["ia_pattern_isolated_red"] = bool(col80_isolated)
-                                estado_bots[b]["ia_pattern_block_reason"] = str(pat_state.get("col80_block_reason", "") or "")
+                                estado_bots[b]["ia_pattern_block_reason"] = str(pat_state.get("col80_block_reason", "") or "") if pattern_col_state == "BLOCKED" else ""
                                 estado_bots[b]["ia_pattern_source"] = col80_source
                                 estado_bots[b]["ia_pattern_state"] = str(pat_state.get("pattern_state", "BLOQUEADO") or "BLOQUEADO")
                                 estado_bots[b]["ia_pattern_thr_ctx"] = float(thr_post_ctx)
@@ -17219,7 +17221,7 @@ async def main():
                                     and (not bool(sensor_plano_b))
                                 )
                                 delta_hibrido_col80 = (float(k_pts_pat) * float(pat_delta_col)) if col80_micro_ok else 0.0
-                                delta_hibrido_col80 = float(max(-0.012, min(0.012, delta_hibrido_col80)))
+                                delta_hibrido_col80 = float(max(-float(PATTERN_COL80_HYBRID_DELTA_CAP), min(float(PATTERN_COL80_HYBRID_DELTA_CAP), delta_hibrido_col80)))
                                 if col80_micro_ok:
                                     score_hibrido = float(max(0.0, min(1.0, float(score_hibrido) + float(delta_hibrido_col80))))
                                 if False:  # CUARENTENA FUNCIONAL pattern v1
