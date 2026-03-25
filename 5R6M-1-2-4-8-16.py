@@ -647,8 +647,8 @@ EMBUDO_FINAL_REAL_MICRO = EMBUDO_FINAL_REAL_OK
 EMBUDO_FINAL_REAL_NORMAL = EMBUDO_FINAL_REAL_OK
 EMBUDO_FINAL_SHADOW_OK = EMBUDO_FINAL_WAIT_SOFT
 EMBUDO_CANDIDATE_RESCUE_ENABLE = True
-EMBUDO_CANDIDATE_RESCUE_MIN_PROB = 0.60
-EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER = True
+EMBUDO_CANDIDATE_RESCUE_MIN_PROB = 0.52
+EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER = False
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK = True
 EMBUDO_CANDIDATE_RESCUE_ONLY_WHEN_WAIT_SOFT = True
 IA_PROB_POLARIZE_ENABLE = True
@@ -16810,6 +16810,7 @@ async def main():
 
                         if candidatos:
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
+                        candidatos_pre_embudo = list(candidatos or [])
 
                         embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
                         decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
@@ -16821,6 +16822,21 @@ async def main():
                             wait_reason_emb = str(embudo.get("soft_wait_reason") or embudo.get("decision_reason") or "")
                             top1_rescue = str(embudo.get("top1_bot") or "").strip()
                             top1_prob_rescue = float(embudo.get("top1_prob", 0.0) or 0.0)
+                            rec_pre = None
+                            if (not top1_rescue) and candidatos_pre_embudo:
+                                rec_pre = candidatos_pre_embudo[0]
+                                top1_rescue = str(rec_pre[1] or "").strip()
+                                top1_prob_rescue = float(rec_pre[2] or 0.0)
+                            if (not top1_rescue):
+                                live_pre = []
+                                for _b in BOT_NAMES:
+                                    _p = _prob_ia_operativa_bot(_b, default=None)
+                                    if isinstance(_p, (int, float)):
+                                        live_pre.append((str(_b), float(_p)))
+                                live_pre.sort(key=lambda t: float(t[1]), reverse=True)
+                                if live_pre:
+                                    top1_rescue = str(live_pre[0][0] or "").strip()
+                                    top1_prob_rescue = float(live_pre[0][1] or 0.0)
                             hard_block_rescue = str(embudo.get("hard_block_reason") or "").strip()
                             trigger_ok_rescue = bool((dyn_gate or {}).get("trigger_ok", False) or (dyn_gate or {}).get("trigger_force", False))
                             can_rescue_wait = bool(
@@ -16833,7 +16849,7 @@ async def main():
                                 and ((not EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK) or (hard_block_rescue == ""))
                             )
                             if can_rescue_wait:
-                                rec = next((c for c in list(candidatos or []) if str(c[1]) == top1_rescue), None)
+                                rec = rec_pre if rec_pre is not None else next((c for c in list(candidatos_pre_embudo or []) if str(c[1]) == top1_rescue), None)
                                 if rec is None:
                                     st_res = estado_bots.get(top1_rescue, {}) if isinstance(estado_bots, dict) else {}
                                     rec = (
