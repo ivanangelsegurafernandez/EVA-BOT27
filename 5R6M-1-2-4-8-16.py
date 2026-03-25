@@ -13087,10 +13087,9 @@ def mostrar_panel(force: bool = False):
                         + f"tailR={int(st_rb.get('red_bisagra_tail_red_streak',0) or 0)}"
                     )
                 else:
-                    status_rb = "n/a" if reason_rb.startswith("muestra_insuficiente") else "no"
                     print(
                         padding + Fore.CYAN
-                        + f"RB: bot={bot_rb} {status_rb} score={score_rb:.2f} motivo={reason_rb}"
+                        + f"RB: bot={bot_rb} no score={score_rb:.2f} motivo={reason_rb}"
                     )
             else:
                 print(padding + Fore.CYAN + "RB: n/a motivo=no_contexto")
