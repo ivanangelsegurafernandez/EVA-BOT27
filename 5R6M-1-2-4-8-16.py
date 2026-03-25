@@ -655,6 +655,8 @@ EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS = 1.5
 EMBUDO_CANDIDATE_RESCUE_ALLOW_CONFIRM_PENDING = False
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER_OR_CONTEXT = True
 EMBUDO_CANDIDATE_RESCUE_BLOCK_ON_HARD_GUARD = True
+EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = True
+EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = True
 IA_PROB_POLARIZE_ENABLE = True
 IA_PROB_POLARIZE_FACTOR_RELIABLE = 1.25
 IA_PROB_POLARIZE_FACTOR_UNRELIABLE = 2.05
@@ -15089,6 +15091,41 @@ def _degradar_si_modelo_ia_inmaduro(
         return decision, risk_mode, "ia_immature_fallback", "ia_fallback->wait"
     return decision, risk_mode, "ia_immature_unreliable", "ia_unreliable->wait"
 
+def _embudo_main_decision_coherent(
+    decision: str,
+    risk_mode: str,
+    hard_guard_hard_block: bool,
+    cooldown_active: bool,
+    mode_c_pending: bool,
+    guardrail_ok: bool,
+    guardrail_ok_flex: bool,
+    guard_gap_ok: bool,
+    trigger_ok_live: bool,
+    trigger_force_live: bool,
+    mrv_score: float,
+    flex_ok: bool,
+    flex_score: float,
+) -> tuple[bool, str, bool]:
+    if decision != EMBUDO_FINAL_REAL_OK:
+        return True, "main_skip:not_real", False
+    if bool(hard_guard_hard_block):
+        return False, "main_reject:hard_block", False
+    if bool(cooldown_active):
+        return False, "main_reject:cooldown", False
+    if bool(EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING) and bool(mode_c_pending) and str(risk_mode) != "REAL_MICRO":
+        return False, "main_reject:mode_c_pending", False
+    ctx_strong = bool(
+        (float(mrv_score) >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
+        or (bool(flex_ok) and (float(flex_score) >= float(PERFIL_COMUN_FLEX_SCORE_STRONG)))
+    )
+    trig_ok = bool(trigger_ok_live or trigger_force_live)
+    if bool(EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT) and (not (trig_ok or ctx_strong)):
+        return False, "main_reject:no_trigger_no_context", ctx_strong
+    guard_main_ok = bool(guardrail_ok if str(risk_mode) == "REAL_OK" else guardrail_ok_flex)
+    if not bool(guard_main_ok):
+        return False, ("main_reject:gap_guard" if not bool(guard_gap_ok) else "main_reject:guardrail"), ctx_strong
+    return True, "main_ok", ctx_strong
+
 
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
     """Embudo final: decisión principal por MRV+IA; dyn_gate/legacy solo guardrail/telemetría."""
@@ -15197,6 +15234,7 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         confirm_streak_live = int(dgate.get("confirm_streak", 0) or 0)
         confirm_need_live = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
         trigger_ok_live = bool(dgate.get("trigger_ok", False))
+        trigger_force_live = bool(dgate.get("trigger_force", False))
         valid40_live = int(flex_eval.get("valid_40", 0) or 0)
         short_sample_flex = bool(
             (valid40_live >= int(PERFIL_COMUN_FLEX_MIN_VALID))
@@ -15284,6 +15322,28 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 wait_reason = "anti_rafaga"
             reason = wait_reason
 
+        main_ok, main_reason, main_ctx_strong = _embudo_main_decision_coherent(
+            decision=decision,
+            risk_mode=risk_mode,
+            hard_guard_hard_block=hard_guard_hard_block,
+            cooldown_active=cooldown_active,
+            mode_c_pending=mode_c_pending,
+            guardrail_ok=guardrail_ok,
+            guardrail_ok_flex=guardrail_ok_flex,
+            guard_gap_ok=guard_gap_ok,
+            trigger_ok_live=trigger_ok_live,
+            trigger_force_live=trigger_force_live,
+            mrv_score=mrv_score,
+            flex_ok=bool(flex_eval.get("ok", False)),
+            flex_score=float(flex_eval.get("score", 0.0) or 0.0),
+        )
+        if (decision == EMBUDO_FINAL_REAL_OK) and (not bool(main_ok)):
+            decision = EMBUDO_FINAL_WAIT_SOFT
+            risk_mode = "WAIT_SOFT"
+            quality = "wait"
+            reason = str(main_reason)
+            wait_reason = str(main_reason)
+
         strong_operational_override = bool(
             decision == EMBUDO_FINAL_REAL_OK
             and (n_samples >= 80)
@@ -15319,10 +15379,21 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             warmup_mode=warmup_mode,
             model_family=model_family,
             ia_model_mature=ia_model_mature,
-            allow_operational_override=bool(strong_operational_override or early_micro_override),
+            allow_operational_override=bool(main_ok and (strong_operational_override or early_micro_override)),
         )
         if decision != EMBUDO_FINAL_REAL_OK and not wait_reason:
             wait_reason = reason
+
+        main_label = "MAIN OK" if decision == EMBUDO_FINAL_REAL_OK else "MAIN REJECT"
+        try:
+            agregar_evento(
+                f"🧭 {main_label}: bot={top1_bot} p={top1_prob*100:.1f}% risk={risk_mode} reason={reason} "
+                f"gap={gap_value*100:.1f}pp gap_ok={int(guard_gap_ok)} anti={int(guard_anti_rafaga_ok)} "
+                f"trig={int(trigger_ok_live or trigger_force_live)} ctx={int(main_ctx_strong)} mode_c_pending={int(mode_c_pending)} "
+                f"ovr={int(main_ok and (strong_operational_override or early_micro_override))}"
+            )
+        except Exception:
+            pass
 
         ia_real_backed = int(decision == EMBUDO_FINAL_REAL_OK and ia_model_mature)
         real_source = "IA" if ia_real_backed else "OPERATIVO_NO_IA"
