@@ -16719,11 +16719,18 @@ def _cargar_datos_bot_sync(bot, token_actual):
             if cierre_recuperado:
                 fila_dict["resultado"] = str(resultado)
             estado_bots[bot]["ultimo_resultado"] = resultado
+            previo_n = int(len(list(estado_bots[bot].get("resultados", []) or [])))
             estado_bots[bot]["resultados"].append(resultado)
             rv = estado_bots[bot].setdefault("resultados_visual", [])
             rv.append(resultado)
             if len(rv) > 40:
                 del rv[:-40]
+            if previo_n == 0 and (not bool(estado_bots[bot].get("boot_visual_handover_logged", False))):
+                try:
+                    agregar_evento(f"➕ {bot} sesión real toma control de la franja visual")
+                except Exception:
+                    pass
+                estado_bots[bot]["boot_visual_handover_logged"] = True
             try:
                 agregar_evento(f"➕ {bot} cierre nuevo añadido a sesión y franja visual")
             except Exception:
