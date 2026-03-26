@@ -16356,6 +16356,9 @@ def evaluar_ctt_fase(candidatos: list) -> tuple[list, dict]:
 # Cargar datos bot
 # Cargar datos bot
 async def cargar_datos_bot(bot, token_actual):
+    await asyncio.to_thread(_cargar_datos_bot_sync, bot, token_actual)
+
+def _cargar_datos_bot_sync(bot, token_actual):
     ruta = f"registro_enriquecido_{bot}.csv"
     if not os.path.exists(ruta):
         return
@@ -17046,11 +17049,20 @@ async def _boot04_background_sync():
         pass
 
 _RETRAIN_BG_TASK = None
+_RETRAIN_BG_OMIT_LOG_TS = 0.0
 def _schedule_maybe_retrain_bg(force: bool = False, source: str = "tick") -> bool:
     """Lanza maybe_retrain en background para no bloquear el loop principal."""
     global _RETRAIN_BG_TASK
     try:
         if (_RETRAIN_BG_TASK is not None) and (not _RETRAIN_BG_TASK.done()):
+            now = float(time.time())
+            global _RETRAIN_BG_OMIT_LOG_TS
+            if (now - float(_RETRAIN_BG_OMIT_LOG_TS or 0.0)) >= 20.0:
+                _RETRAIN_BG_OMIT_LOG_TS = now
+                try:
+                    agregar_evento("⏳ Retrain omitido: ya en progreso.")
+                except Exception:
+                    pass
             return False
     except Exception:
         pass
@@ -17065,6 +17077,10 @@ def _schedule_maybe_retrain_bg(force: bool = False, source: str = "tick") -> boo
                 pass
 
     _RETRAIN_BG_TASK = asyncio.create_task(_runner())
+    try:
+        agregar_evento(f"🧠 Retrain background programado ({source}).")
+    except Exception:
+        pass
     return True
 
 
@@ -17212,6 +17228,7 @@ async def main():
         except Exception:
             pass
         first_loop_logged = False
+        first_tick_trace_done = False
 
         while True:
             if salir:
@@ -17234,6 +17251,8 @@ async def main():
                         pass
                     first_loop_logged = True
                 set_etapa("TICK_01")
+                if not first_tick_trace_done:
+                    agregar_evento("🧭 TICK_01 inicio.")
                 token_actual_loop = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else (leer_token_actual() or next((b for b in BOT_NAMES if estado_bots.get(b, {}).get("token") == "REAL"), None))
 
                 # Reconciliación anti-desincronía maestro↔bots:
@@ -17277,12 +17296,16 @@ async def main():
                     _enforce_single_real_standby(activo_real)
                 for bot in BOT_NAMES:
                     try:  # Aislamiento per-bot para evitar skips globales
+                        if not first_tick_trace_done:
+                            agregar_evento(f"🧭 TICK_01 cargando {bot}")
                         if reinicio_forzado.is_set():
                             # Menos ruido: no agregar evento si repetido
                             reinicio_forzado.clear()
                             # No mostrar_panel inmediato; dejar al tick
                             break
                         await asyncio.wait_for(cargar_datos_bot(bot, token_actual_loop), timeout=2.0)
+                        if not first_tick_trace_done:
+                            agregar_evento(f"✅ TICK_01 ok {bot}")
                         # Evita desincronizar REAL por inactividad normal durante contrato.
                         # El owner REAL se vigila en TICK_02 (watchdog sin salida a DEMO).
                         if time.time() - last_update_time[bot] > 60:
@@ -17295,6 +17318,9 @@ async def main():
                     finally:
                         await asyncio.sleep(0)
                 else:
+                    if not first_tick_trace_done:
+                        agregar_evento("🏁 TICK_01 fin.")
+                        first_tick_trace_done = True
                     # Reentreno periódico no bloqueante (evita quedarse en OFF si boot ocurrió con pocos datos)
                     try:
                         now_rt = time.time()
