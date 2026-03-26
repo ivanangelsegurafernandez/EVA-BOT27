@@ -17045,6 +17045,28 @@ async def _boot04_background_sync():
     except Exception:
         pass
 
+_RETRAIN_BG_TASK = None
+def _schedule_maybe_retrain_bg(force: bool = False, source: str = "tick") -> bool:
+    """Lanza maybe_retrain en background para no bloquear el loop principal."""
+    global _RETRAIN_BG_TASK
+    try:
+        if (_RETRAIN_BG_TASK is not None) and (not _RETRAIN_BG_TASK.done()):
+            return False
+    except Exception:
+        pass
+
+    async def _runner():
+        try:
+            await asyncio.to_thread(maybe_retrain, bool(force))
+        except Exception as e:
+            try:
+                agregar_evento(f"⚠️ IA: maybe_retrain bg error ({source}): {e}")
+            except Exception:
+                pass
+
+    _RETRAIN_BG_TASK = asyncio.create_task(_runner())
+    return True
+
 
 async def main():
     global salir, pausado, reinicio_manual, SALDO_INICIAL
@@ -17238,7 +17260,7 @@ async def main():
                         meta_tick = _ORACLE_CACHE.get("meta") or leer_model_meta() or {}
                         audit_tick = auditar_refresh_campeon_stale(meta_tick, force_log=False)
                         if bool(audit_tick.get("needs_review", False)):
-                            maybe_retrain(force=True)
+                            _schedule_maybe_retrain_bg(force=True, source="audit_tick")
                         auditar_degradacion_temporal_modelo()
                 except Exception:
                     pass
@@ -17255,21 +17277,25 @@ async def main():
                             reinicio_forzado.clear()
                             # No mostrar_panel inmediato; dejar al tick
                             break
-                        await cargar_datos_bot(bot, token_actual_loop)
+                        await asyncio.wait_for(cargar_datos_bot(bot, token_actual_loop), timeout=2.0)
                         # Evita desincronizar REAL por inactividad normal durante contrato.
                         # El owner REAL se vigila en TICK_02 (watchdog sin salida a DEMO).
                         if time.time() - last_update_time[bot] > 60:
                             if estado_bots.get(bot, {}).get("token") != "REAL":
                                 reiniciar_bot(bot)
+                    except asyncio.TimeoutError:
+                        agregar_evento(f"⚠️ TICK_01 timeout cargar_datos_bot({bot})")
                     except Exception as e_bot:
                         agregar_evento(f"⚠️ Error en {bot}: {e_bot}")
+                    finally:
+                        await asyncio.sleep(0)
                 else:
                     # Reentreno periódico no bloqueante (evita quedarse en OFF si boot ocurrió con pocos datos)
                     try:
                         now_rt = time.time()
                         if (now_rt - float(globals().get("_LAST_AUTO_RETRAIN_TICK", 0.0) or 0.0)) >= float(AUTO_RETRAIN_TICK_S):
                             globals()["_LAST_AUTO_RETRAIN_TICK"] = now_rt
-                            maybe_retrain(force=False)
+                            _schedule_maybe_retrain_bg(force=False, source="auto_tick")
                     except Exception:
                         pass
 
