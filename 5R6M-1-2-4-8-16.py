@@ -585,19 +585,6 @@ PATTERN_COL_BONUS_CONTINUIDAD = 0.60
 PATTERN_COL_BONUS_REBOTE = 0.80
 PATTERN_COL_PENAL_SATURACION = 1.20
 PATTERN_COL_PENAL_LATE_CHASE = 1.00
-PATTERN_COL80_UNA_X_ENABLE = True
-PATTERN_COL80_UNA_X_LOOKBACK = 3
-PATTERN_COL80_UNA_X_BONUS = 0.30
-PATTERN_COL80_HYBRID_PTS_TO_PROB = 0.012
-PATTERN_COL80_HYBRID_DELTA_CAP = 0.012
-PATTERN_COL80_UNA_X_RESCUE_MAX_EXTRA_ROOF_PTS = 0.35
-FORCE_REAL_COLVERDE_ENABLE = True
-FORCE_REAL_COLVERDE_LOOKBACK = 3
-FORCE_REAL_COLVERDE_SOLO_MODE = True
-OVERRIDE_REZAGADA_ENABLE = True
-OVERRIDE_REZAGADA_MIN_VALID = 5
-OVERRIDE_REZAGADA_GREENS_OK = (4, 5)
-OVERRIDE_REZAGADA_REDS_OK = (1, 2)
 PATTERN_COL_LAST_STATE = {
     "green_ratio_col_actual": None,
     "total_verdes_col_actual": 0,
@@ -612,12 +599,6 @@ PATTERN_COL_LAST_STATE = {
     "late_chase": False,
     "pattern_delta": 0.0,
     "pattern_bonus_penalty": 0.0,
-    "pattern_source": "NONE",
-    "col80_una_x_state": "NONE",
-    "col80_red_count": 0,
-    "col80_target_bot": "",
-    "col80_isolated_red": False,
-    "col80_block_reason": "",
 }
 PATTERN_V1_Q3_PROXY = {
     "rsi_9": 64.0,
@@ -1483,14 +1464,10 @@ def write_token_atomic(path, content):
 # 3) fulll48: intermedio, baja muestra.
 # 4) fulll49/fulll46: sobreconfianza alta y peor hit-rate reciente.
 BOT_NAMES = ["fulll47", "fulll50", "fulll45", "fulll48", "fulll49", "fulll46"]
-HUD_SESSION_ONLY = True
-SESSION_BASE_ROWS = {bot: 0 for bot in BOT_NAMES}
 IA53_TRIGGERED = {bot: False for bot in BOT_NAMES}
 IA53_LAST_TS = {bot: 0.0 for bot in BOT_NAMES}
 TOKEN_FILE = "token_actual.txt"
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
-SALDO_WS_CONNECT_TIMEOUT_S = 4.0
-SALDO_WS_RECV_TIMEOUT_S = 4.0
 saldo_real = "--"
 SALDO_INICIAL = None
 META = None
@@ -1563,17 +1540,6 @@ EMBUDO_DECISION_STATE = {
     "top1_prob": 0.0,
     "top2_prob": 0.0,
     "degrade_from": "none",
-    "force_real_colverde_enable": int(FORCE_REAL_COLVERDE_ENABLE),
-    "force_real_colverde_state": "NONE",
-    "force_real_colverde_target_bot": "",
-    "force_real_colverde_red_count": 0,
-    "force_real_colverde_green_count": 0,
-    "force_real_colverde_reason": "",
-    "force_real_colverde_compare_detail": "",
-    "force_real_colverde_selected_by": "",
-    "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
-    "real_authority": "FORCE_REAL_COLVERDE" if bool(FORCE_REAL_COLVERDE_SOLO_MODE) else "MIXED",
-    "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
 }
 
 try:
@@ -1584,11 +1550,6 @@ except NameError:
 estado_bots = {
     bot: {
         "resultados": [], 
-        "resultados_visual": [],
-        "resultados_visual_boot": [],
-        "hud_etiqueta_superior": "",
-        "boot_visual_seed_logged": False,
-        "boot_visual_handover_logged": False,
         "token": "DEMO", 
         "trigger_real": False,
         "ganancias": 0, 
@@ -3261,118 +3222,11 @@ def normalizar_resultado(texto):
     t = normalize("NFKD", raw).encode("ASCII", "ignore").decode("ASCII").strip().upper()
 
     # Nota: después de ASCII, "PÉRDIDA" se vuelve "PERDIDA"
-    if t in {"W", "WIN", "GREEN", "PROFIT"}:
-        return "GANANCIA"
-    if t in {"L", "LOSS", "LOSE", "RED"}:
+    if "PERD" in t or "LOSS" in t:
         return "PÉRDIDA"
-    if "PERD" in t or "LOSS" in t or "LOSE" in t or t.endswith(" RED"):
-        return "PÉRDIDA"
-    if "GAN" in t or "WIN" in t or "PROFIT" in t or t.endswith(" GREEN"):
+    if "GAN" in t or "WIN" in t:
         return "GANANCIA"
     return "INDEFINIDO"
-
-def inferir_resultado_cierre(fila_dict) -> str | None:
-    """Intenta recuperar GANANCIA/PÉRDIDA en filas CERRADO sin resultado canónico."""
-    d = fila_dict if isinstance(fila_dict, dict) else {}
-
-    for k in ("resultado", "result", "status", "contract_status"):
-        rn = normalizar_resultado(d.get(k))
-        if rn in ("GANANCIA", "PÉRDIDA"):
-            return rn
-
-    for k in ("won", "win", "loss", "result_bin"):
-        v = d.get(k, None)
-        if v is None or str(v).strip() == "":
-            continue
-        sv = str(v).strip().upper()
-        if sv in {"1", "TRUE", "T", "YES", "Y"}:
-            return "GANANCIA" if k != "loss" else "PÉRDIDA"
-        if sv in {"0", "FALSE", "F", "NO", "N"}:
-            return "PÉRDIDA" if k != "loss" else "GANANCIA"
-        try:
-            iv = int(float(sv))
-            if iv == 1:
-                return "GANANCIA" if k != "loss" else "PÉRDIDA"
-            if iv == 0:
-                return "PÉRDIDA" if k != "loss" else "GANANCIA"
-        except Exception:
-            pass
-
-    for k in ("profit", "pnl", "profit_amount"):
-        try:
-            x = float(d.get(k))
-            if x > 0:
-                return "GANANCIA"
-            if x < 0:
-                return "PÉRDIDA"
-        except Exception:
-            pass
-
-    try:
-        sell = float(d.get("sell_price"))
-        buy = float(d.get("buy_price"))
-        if sell > buy:
-            return "GANANCIA"
-        if sell < buy:
-            return "PÉRDIDA"
-    except Exception:
-        pass
-    return None
-
-def _etiqueta_superior_a_resultado_visual(tag: str | None) -> str:
-    """
-    Convierte etiqueta visual superior del HUD a marca de franja inferior.
-    Política conservadora:
-      - doble confirmación positiva -> GANANCIA
-      - doble negativa -> PÉRDIDA
-      - mixto/ambiguo -> INDEFINIDO
-    """
-    raw = str(tag or "").strip()
-    if not raw:
-        return "INDEFINIDO"
-    t = normalize("NFKD", raw).encode("ASCII", "ignore").decode("ASCII").upper()
-    ok = ("C✅" in raw and "O✅" in raw) or ("COK" in t and "OOK" in t) or ("C1" in t and "O1" in t)
-    ko = ("C❌" in raw and "O❌" in raw) or ("CX" in t and "OX" in t) or ("C0" in t and "O0" in t)
-    if ok:
-        return "GANANCIA"
-    if ko:
-        return "PÉRDIDA"
-    return "INDEFINIDO"
-
-def seed_resultados_visual_desde_etiquetas(tag: str | None) -> str:
-    """
-    Helper puro: traduce una etiqueta superior a marca visual temporal.
-    No modifica estado interno ni acumula historial.
-    """
-    return _etiqueta_superior_a_resultado_visual(tag)
-
-def build_resultados_visual_overlay_from_label(bot: str) -> list[str]:
-    """
-    Construye overlay temporal para la franja inferior desde etiqueta superior.
-    Puro: no persiste ni modifica estado.
-    """
-    if bot not in BOT_NAMES:
-        return []
-    st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
-    tag = st.get("hud_etiqueta_superior", None)
-    marca = seed_resultados_visual_desde_etiquetas(tag)
-    if marca in ("GANANCIA", "PÉRDIDA", "INDEFINIDO"):
-        return [str(marca)]
-    return []
-
-_CIERRE_RECOVERY_LOG_TS = {}
-def _log_cierre_recovery_event(bot: str, kind: str, msg: str, cooldown_s: float = 20.0) -> None:
-    """Log mínimo con cooldown para evitar spam por cierres repetidos."""
-    try:
-        key = f"{str(bot)}|{str(kind)}"
-        now = float(time.time())
-        last = float(_CIERRE_RECOVERY_LOG_TS.get(key, 0.0) or 0.0)
-        if (now - last) < float(cooldown_s):
-            return
-        _CIERRE_RECOVERY_LOG_TS[key] = now
-        agregar_evento(str(msg))
-    except Exception:
-        pass
 def normalizar_trade_status(ts):
     """
     Normaliza trade_status a canónico del Maestro:
@@ -12359,181 +12213,7 @@ def calcular_strong_streak(columnas_stats: list[dict], thr: float = 0.80) -> int
         streak += 1
     return int(streak)
 
-def _force_real_colverde_eval(columnas: list[dict], bots: list[str], candidatos: list | None = None) -> dict:
-    out = {
-        "force_real_colverde_enable": bool(FORCE_REAL_COLVERDE_ENABLE),
-        "force_real_colverde_state": "NONE",
-        "force_real_colverde_target_bot": "",
-        "force_real_colverde_red_count": 0,
-        "force_real_colverde_green_count": 0,
-        "force_real_colverde_reason": "",
-        "force_real_colverde_compare_detail": "",
-        "force_real_colverde_selected_by": "",
-        "force_real_colverde_offset": None,
-    }
-    if not bool(FORCE_REAL_COLVERDE_ENABLE):
-        return out
-    cols = list(columnas or [])
-    bots_ok = [str(b) for b in list(bots or []) if str(b).strip()]
-    if (not cols) or (not bots_ok):
-        out["force_real_colverde_state"] = "BLOCKED"
-        out["force_real_colverde_reason"] = "missing_matrix"
-        return out
-
-    cand_map = {}
-    for c in list(candidatos or []):
-        if not isinstance(c, tuple) or len(c) < 3:
-            continue
-        b = str(c[1] or "").strip()
-        if b:
-            cand_map[b] = c
-
-    max_cols = max(1, min(int(FORCE_REAL_COLVERDE_LOOKBACK), len(cols)))
-    for off in range(max_cols):
-        col = dict(cols[off] or {})
-        cells = dict(col.get("cells", {}) or {})
-        validos = int(col.get("total_validos", 0) or 0)
-        verdes = int(col.get("total_verdes", 0) or 0)
-        rojos = int(col.get("total_rojos", 0) or 0)
-        if validos != len(bots_ok):
-            continue
-        if verdes not in (4, 5):
-            continue
-        if rojos not in (1, 2):
-            continue
-        red_bots = [b for b in bots_ok if cells.get(b) == "R"]
-        if len(red_bots) != rojos:
-            continue
-
-        chosen = ""
-        selected_by = "single_red"
-        compare_detail = ""
-        if rojos == 1:
-            chosen = str(red_bots[0])
-        else:
-            rank = []
-            for rb in red_bots:
-                st = estado_bots.get(rb, {}) if isinstance(estado_bots, dict) else {}
-                cand = cand_map.get(rb)
-                prob_ia = None
-                score_h = None
-                if isinstance(cand, tuple) and len(cand) >= 3:
-                    score_h = float(cand[0] or 0.0)
-                    prob_ia = float(cand[2] or 0.0)
-                if prob_ia is None:
-                    prob_ia = float(st.get("prob_ia_oper", st.get("prob_ia", 0.0)) or 0.0)
-                if score_h is None:
-                    score_h = float(st.get("ia_score_hibrido", 0.0) or 0.0)
-                hist = float(st.get("porcentaje_exito", 0.0) or 0.0) / 100.0
-                payout = float(st.get("payout", 0.0) or 0.0)
-                context = float(st.get("ia_regime_score", 0.0) or 0.0)
-                rank.append((rb, prob_ia, score_h, hist, payout, context))
-            rank.sort(key=lambda t: (t[1], t[2], t[3], t[4], t[5], t[0]), reverse=True)
-            if len(rank) >= 2:
-                a, b = rank[0], rank[1]
-                metric_names = ("prob_ia", "score_hibrido", "hist", "payout", "context")
-                deltas = [float(a[i] - b[i]) for i in range(1, 6)]
-                idx = next((i for i, d in enumerate(deltas) if abs(d) > 1e-12), None)
-                selected_by = metric_names[idx] if idx is not None else "context"
-                compare_detail = (
-                    f"{a[0]}>{b[0]} "
-                    f"prob={a[1]:.4f}/{b[1]:.4f} "
-                    f"sh={a[2]:.4f}/{b[2]:.4f} "
-                    f"hist={a[3]:.4f}/{b[3]:.4f} "
-                    f"pay={a[4]:.4f}/{b[4]:.4f} "
-                    f"ctx={a[5]:.4f}/{b[5]:.4f}"
-                )
-            chosen = str(rank[0][0]) if rank else ""
-
-        if chosen not in bots_ok:
-            out["force_real_colverde_state"] = "BLOCKED"
-            out["force_real_colverde_reason"] = "target_invalid"
-            continue
-        out.update({
-            "force_real_colverde_state": "ACTIVE",
-            "force_real_colverde_target_bot": str(chosen),
-            "force_real_colverde_red_count": int(rojos),
-            "force_real_colverde_green_count": int(verdes),
-            "force_real_colverde_reason": "columna_verde_rezagado",
-            "force_real_colverde_compare_detail": str(compare_detail),
-            "force_real_colverde_selected_by": str(selected_by),
-            "force_real_colverde_offset": int(off),
-        })
-        return out
-    return out
-
-def evaluar_col80_una_x_rebote(columnas: list[dict], bots: list[str], thr80: float = 0.80, lookback: int = 3) -> dict:
-    out = {
-        "pattern_source": "COL80_UNA_X_REBOTE",
-        "col80_una_x_state": "NONE",
-        "col80_red_count": 0,
-        "col80_target_bot": "",
-        "col80_isolated_red": False,
-        "col80_block_reason": "",
-        "col80_green_ratio": None,
-        "col80_offset": None,
-    }
-    cols = list(columnas or [])
-    bots_ok = [str(b) for b in list(bots or []) if str(b).strip()]
-    if len(cols) < 2 or not bots_ok:
-        out["col80_una_x_state"] = "BLOCKED"
-        out["col80_block_reason"] = "muestra_insuficiente"
-        return out
-    max_cols = max(1, min(int(lookback), len(cols)))
-    for off in range(max_cols):
-        col = dict(cols[off] or {})
-        cells = dict(col.get("cells", {}) or {})
-        validos = int(col.get("total_validos", 0) or 0)
-        ratio = col.get("green_ratio", None)
-        if validos < max(3, int(len(bots_ok) * 0.75)):
-            continue
-        if (ratio is None) or (float(ratio) < float(thr80)):
-            continue
-        red_bots = [b for b in bots_ok if cells.get(b) == "R"]
-        if len(red_bots) != 1:
-            continue
-        target_bot = str(red_bots[0])
-        prev_col = dict(cols[off - 1] or {}) if off > 0 else {}
-        next_col = dict(cols[off + 1] or {}) if (off + 1) < len(cols) else {}
-        prev_cells = dict(prev_col.get("cells", {}) or {})
-        next_cells = dict(next_col.get("cells", {}) or {})
-        if prev_cells.get(target_bot) == "R":
-            out["col80_una_x_state"] = "BLOCKED"
-            out["col80_block_reason"] = "x_no_aislada_consecutiva"
-            continue
-        red_nearby = 0
-        for cdict in (prev_cells, next_cells):
-            if cdict.get(target_bot) == "R":
-                red_nearby += 1
-        if red_nearby >= 2:
-            out["col80_una_x_state"] = "BLOCKED"
-            out["col80_block_reason"] = "deterioro_rojo_target"
-            continue
-        neigh = [dict(cols[i] or {}) for i in range(off, min(len(cols), off + 3))]
-        ratios = [float(c.get("green_ratio", 0.0) or 0.0) for c in neigh if c.get("green_ratio") is not None]
-        if ratios and (sum(ratios) / float(len(ratios))) < 0.60:
-            out["col80_una_x_state"] = "BLOCKED"
-            out["col80_block_reason"] = "contexto_rojo_inestable"
-            continue
-        if any(int(c.get("total_rojos", 0) or 0) >= 2 for c in neigh):
-            out["col80_una_x_state"] = "BLOCKED"
-            out["col80_block_reason"] = "muralla_roja"
-            continue
-        out.update({
-            "col80_una_x_state": "ACTIVE",
-            "col80_red_count": 1,
-            "col80_target_bot": target_bot,
-            "col80_isolated_red": True,
-            "col80_block_reason": "",
-            "col80_green_ratio": ratio,
-            "col80_offset": int(off),
-        })
-        return out
-    if out["col80_una_x_state"] == "NONE":
-        out["col80_block_reason"] = ""
-    return out
-
-def clasificar_estado_patron(col_actual: dict, col_anterior: dict, rebote_rate_hist: float | None, rebote_samples_hist: int, col80_signal: dict | None = None) -> dict:
+def clasificar_estado_patron(col_actual: dict, col_anterior: dict, rebote_rate_hist: float | None, rebote_samples_hist: int) -> dict:
     ratio = col_actual.get("green_ratio", None)
     col80 = bool(col_actual.get("es_col80", False))
     col90 = bool(col_actual.get("es_col90", False))
@@ -12554,19 +12234,9 @@ def clasificar_estado_patron(col_actual: dict, col_anterior: dict, rebote_rate_h
     )
     continuidad_ok = bool(col80 and (not col90) and (not prev90) and (not late_chase))
 
-    col80 = dict(col80_signal or {})
-    col80_active = bool(
-        bool(PATTERN_COL80_UNA_X_ENABLE)
-        and str(col80.get("col80_una_x_state", "NONE")).upper() == "ACTIVE"
-        and bool(col80.get("col80_isolated_red", False))
-        and int(col80.get("col80_red_count", 0) or 0) == 1
-    )
-
     if sat_activa:
         state = "SATURACION"
     elif rebote_ok:
-        state = "REBOTE"
-    elif col80_active:
         state = "REBOTE"
     elif continuidad_ok:
         state = "CONTINUIDAD"
@@ -12581,12 +12251,6 @@ def clasificar_estado_patron(col_actual: dict, col_anterior: dict, rebote_rate_h
         "green_ratio_col_actual": ratio,
         "strong_streak_80": strong_streak_80,
         "strong_streak_90": strong_streak_90,
-        "pattern_source": "COL80_UNA_X_REBOTE" if str(col80.get("col80_una_x_state", "NONE")).upper() in ("ACTIVE", "BLOCKED") else "NONE",
-        "col80_una_x_state": str(col80.get("col80_una_x_state", "NONE") or "NONE"),
-        "col80_red_count": int(col80.get("col80_red_count", 0) or 0),
-        "col80_target_bot": str(col80.get("col80_target_bot", "") or ""),
-        "col80_isolated_red": bool(col80.get("col80_isolated_red", False)),
-        "col80_block_reason": str(col80.get("col80_block_reason", "") or ""),
     }
 
 def aplicar_ajuste_patron_score(pattern_eval: dict) -> tuple[float, float, float]:
@@ -12600,11 +12264,6 @@ def aplicar_ajuste_patron_score(pattern_eval: dict) -> tuple[float, float, float
         bonus += float(PATTERN_COL_BONUS_REBOTE)
     elif state == "SATURACION":
         penal += float(PATTERN_COL_PENAL_SATURACION)
-    if str((pattern_eval or {}).get("pattern_source", "NONE")).upper() == "COL80_UNA_X_REBOTE":
-        if str((pattern_eval or {}).get("col80_una_x_state", "NONE")).upper() == "ACTIVE":
-            bonus += float(PATTERN_COL80_UNA_X_BONUS)
-        elif str((pattern_eval or {}).get("col80_una_x_state", "NONE")).upper() == "BLOCKED":
-            penal += 0.05
     if late_chase:
         penal += float(PATTERN_COL_PENAL_LATE_CHASE)
     return float(bonus), float(penal), float(bonus - penal)
@@ -13208,8 +12867,7 @@ def mostrar_panel(force: bool = False):
                         and ia_prob_valida(b, max_age_s=12.0)
                         and (float(p_oper_b) >= float(thr_oper))
                     )
-                    etiqueta_bot = f"C{'✅' if c_ok else '❌'}|O{'✅' if o_ok else '❌'}"
-                    tags.append(f"{b}:{etiqueta_bot}")
+                    tags.append(f"{b}:C{'✅' if c_ok else '❌'}|O{'✅' if o_ok else '❌'}")
                 tags_line = "🏷️ Etiquetas bot: " + " · ".join(tags)
                 print(padding + Fore.CYAN + tags_line)
                 _runtime_audit_append(tags_line)
@@ -13323,23 +12981,6 @@ def mostrar_panel(force: bool = False):
                 f"auc={float(emb.get('early_micro_override_auc',0.0) or 0.0):.3f} "
                 f"n={int(emb.get('early_micro_override_n',0) or 0)}"
             )
-            print(
-                padding + Fore.CYAN +
-                f"🧷 FORCE_REAL_COLVERDE_SOLO_MODE={'ON' if int(emb.get('force_real_colverde_solo_mode',0) or 0) else 'OFF'} "
-                f"REAL_AUTHORITY={emb.get('real_authority','MIXED')} "
-                f"STANDBY_OTHERS={'ON' if int(emb.get('standby_others',0) or 0) else 'OFF'}"
-            )
-            print(
-                padding + Fore.CYAN +
-                f"🟥 FORCE_REAL_COLVERDE={emb.get('force_real_colverde_state','NONE')} "
-                f"greens={int(emb.get('force_real_colverde_green_count',0) or 0)} "
-                f"reds={int(emb.get('force_real_colverde_red_count',0) or 0)} "
-                f"target_bot={emb.get('force_real_colverde_target_bot') or '--'} "
-                f"selected_by={emb.get('force_real_colverde_selected_by') or '--'} "
-                f"reason={emb.get('force_real_colverde_reason') or '--'} "
-                f"impact={'REAL_DIRECT' if str(emb.get('force_real_colverde_state','NONE')) == 'ACTIVE' else 'NO_REAL'} "
-                f"others={'STANDBY' if int(emb.get('standby_others',0) or 0) else 'ACTIVE'}"
-            )
 
             ref_racha = ultimo_bot_real if ultimo_bot_real in BOT_NAMES else "--"
             elegido_tick = mejor[0] if isinstance(mejor, tuple) and len(mejor) >= 1 else "--"
@@ -13403,23 +13044,15 @@ def mostrar_panel(force: bool = False):
             padding
             + Fore.CYAN
             + "🧠 PatternCol: "
-            + f"pattern={str(pat.get('pattern_source', 'NONE'))} "
             + f"ratio={ratio_txt} V={int(pat.get('total_verdes_col_actual', 0) or 0)} "
             + f"R={int(pat.get('total_rojos_col_actual', 0) or 0)} "
-            + f"red_count={int(pat.get('col80_red_count', 0) or 0)} "
-            + f"target_bot={str(pat.get('col80_target_bot', '--') or '--')} "
-            + f"isolated_red={'yes' if bool(pat.get('col80_isolated_red', False)) else 'no'} "
             + f"reb_hist={reb_txt} "
             + f"X={int(pat.get('total_x_hist', 0) or 0)} "
             + f"X→✓={int(pat.get('total_x_rebote_hist', 0) or 0)} "
-            + f"state={str(pat.get('col80_una_x_state', 'NONE'))} "
+            + f"state={str(pat.get('pattern_state', 'BLOQUEADO'))} "
             + f"st80={int(pat.get('strong_streak_80', 0) or 0)} "
             + f"st90={int(pat.get('strong_streak_90', 0) or 0)} "
             + f"late={'sí' if bool(pat.get('late_chase', False)) else 'no'} "
-            + f"bonus={float(max(0.0, float(pat.get('pattern_delta', 0.0) or 0.0))):+.2f} "
-            + f"penal={float(min(0.0, float(pat.get('pattern_delta', 0.0) or 0.0))):+.2f} "
-            + f"block_reason={str(pat.get('col80_block_reason', '--') or '--')} "
-            + f"impact={'score' if str(pat.get('col80_una_x_state', 'NONE')).upper() == 'ACTIVE' else 'none'} "
             + f"Δ={float(pat.get('pattern_delta', 0.0) or 0.0):+.2f}"
         )
         try:
@@ -13492,33 +13125,11 @@ def mostrar_panel(force: bool = False):
 
     # Sincronía visual dura: si hay owner REAL en memoria, la tabla SIEMPRE lo refleja.
     owner_visual = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
-    try:
-        now_hud = float(time.time())
-        last_hud_src = float(globals().get("_HUD_SOURCE_REAL_ONLY_LOG_TS", 0.0) or 0.0)
-        if (now_hud - last_hud_src) >= 30.0:
-            agregar_evento("🧹 HUD inferior: fuente = cierres reales de sesión")
-            agregar_evento("👁️ Etiqueta superior mantenida solo como telemetría")
-            globals()["_HUD_SOURCE_REAL_ONLY_LOG_TS"] = now_hud
-    except Exception:
-        pass
 
     for bot in BOT_NAMES:
-        r_visual = list(estado_bots[bot].get("resultados_visual", []) or [])
-        r = list(r_visual)
-        fuente_franja = "resultados_visual" if r else "vacia"
-        try:
-            now_src = float(time.time())
-            src_map = globals().setdefault("_HUD_FRANJA_SOURCE_LOG_TS", {})
-            last_src = float(src_map.get(bot, 0.0) or 0.0)
-            if (now_src - last_src) >= 45.0:
-                if fuente_franja == "resultados_visual":
-                    agregar_evento(f"👁️ {bot} franja visual usando resultados_visual")
-                elif fuente_franja == "vacia":
-                    agregar_evento(f"👁️ {bot} franja visual vacía")
-                src_map[bot] = now_src
-        except Exception:
-            pass
+        r = estado_bots[bot]["resultados"]
         token = "REAL" if owner_visual == bot else "DEMO"
+        estado_bots[bot]["token"] = token
         src = estado_bots[bot].get("fuente")
 
         # Token + origen
@@ -14415,15 +14026,12 @@ def resetear_incremental_y_modelos(borrar_modelos: bool = True):
 def resetear_estado_hud(estado_bots: dict):
     for bot in list(estado_bots.keys()):
         estado_bots[bot].update({
-            "resultados": [], "resultados_visual": [], "resultados_visual_boot": [], "ganancias": 0, "perdidas": 0,
+            "resultados": [], "ganancias": 0, "perdidas": 0,
             "porcentaje_exito": None, "tamano_muestra": 0,
             "prob_ia": None, "prob_ia_oper": None, "token": "DEMO",
             "fuente": None, "modo_ia": "low_data",
             "ia_seniales": 0, "ia_aciertos": 0, "ia_fallos": 0, "ia_senal_pendiente": False,
-            "ia_prob_senal": None,
-            "hud_etiqueta_superior": "",
-            "boot_visual_seed_logged": False,
-            "boot_visual_handover_logged": False
+            "ia_prob_senal": None
         })
 
 def limpieza_dura():
@@ -14699,17 +14307,8 @@ def backfill_incremental(ultimas=500):
                         continue
                     with open(inc, "a", newline="", encoding="utf-8") as f:
                         w = csv.DictWriter(f, fieldnames=cols)
-                        logged_schema_filter = False
                         for rd in nuevas_filas:
-                            extras = [k for k in rd.keys() if k not in cols]
-                            if extras and (not logged_schema_filter):
-                                logged_schema_filter = True
-                                try:
-                                    agregar_evento("🛠️ Backfill dict filtrado al schema canónico")
-                                except Exception:
-                                    pass
-                            rd_safe = {k: rd.get(k, None) for k in cols}
-                            w.writerow(rd_safe)
+                            w.writerow(rd)
                         f.flush(); os.fsync(f.fileno())
         agregar_evento("✅ IA: backfill incremental completado.")
     except Exception as e:
@@ -15503,17 +15102,6 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
         "ia_real_backed": 0,
         "real_source": "IA",
         "ia_model_mature": 0,
-        "force_real_colverde_enable": int(FORCE_REAL_COLVERDE_ENABLE),
-        "force_real_colverde_state": "NONE",
-        "force_real_colverde_target_bot": "",
-        "force_real_colverde_red_count": 0,
-        "force_real_colverde_green_count": 0,
-        "force_real_colverde_reason": "",
-        "force_real_colverde_compare_detail": "",
-        "force_real_colverde_selected_by": "",
-        "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
-        "real_authority": "FORCE_REAL_COLVERDE" if bool(FORCE_REAL_COLVERDE_SOLO_MODE) else "MIXED",
-        "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
     }
     try:
         if isinstance(EMBUDO_DECISION_STATE, dict):
@@ -15707,103 +15295,6 @@ def _embudo_main_decision_coherent(
     return True, "main_ok", ctx_strong
 
 
-def _override_columna_rezagada_directa(candidatos: list, estado: dict, bot_names: list[str]) -> dict | None:
-    """Override directo: última columna casi verde (4/5G) -> elegir X rezagada para REAL."""
-    if not bool(OVERRIDE_REZAGADA_ENABLE):
-        return None
-    try:
-        cols = _construir_matriz_resultados_columnas(estado, bot_names, window=40)
-        if not cols:
-            return None
-        col = cols[0] if isinstance(cols[0], dict) else {}
-        cells = list(col.get("cells", []) or [])
-        total_validos = int(col.get("total_validos", 0) or 0)
-        total_verdes = int(col.get("total_verdes", 0) or 0)
-        total_rojos = int(col.get("total_rojos", 0) or 0)
-        if total_validos < int(OVERRIDE_REZAGADA_MIN_VALID):
-            return None
-        if total_verdes not in tuple(OVERRIDE_REZAGADA_GREENS_OK):
-            return None
-        if total_rojos not in tuple(OVERRIDE_REZAGADA_REDS_OK):
-            return None
-        red_bots = [str(c.get("bot")) for c in cells if str(c.get("mark") or "") == "R" and str(c.get("bot") or "") in bot_names]
-        if len(red_bots) != total_rojos or len(red_bots) not in (1, 2):
-            return None
-
-        def _metric(st: dict, keys: tuple[str, ...]) -> float:
-            for k in keys:
-                v = st.get(k, None)
-                if isinstance(v, (int, float)):
-                    return float(v)
-            return 0.0
-
-        ranking_debug = []
-        if len(red_bots) == 1:
-            selected_bot = str(red_bots[0])
-            selected_case = "1X"
-            st_sel = estado.get(selected_bot, {}) if isinstance(estado, dict) else {}
-            selected_prob = _metric(st_sel, ("prob_ia_oper", "prob_ia", "p_ia"))
-            selected_score_hibrido = _metric(st_sel, ("ia_score_hibrido",))
-        else:
-            selected_case = "2X"
-            rows = []
-            for rb in red_bots:
-                st_rb = estado.get(str(rb), {}) if isinstance(estado, dict) else {}
-                prob_oper = _metric(st_rb, ("prob_ia_oper", "prob_ia", "p_ia"))
-                score_h = _metric(st_rb, ("ia_score_hibrido",))
-                hist = _metric(st_rb, ("porcentaje_exito", "ia_evidence_wr", "winrate", "wr"))
-                payout = _metric(st_rb, ("payout",))
-                ctx = _metric(st_rb, ("mrv_score_zona", "ia_suceso_idx", "ia_regime_score"))
-                rows.append((str(rb), prob_oper, score_h, hist, payout, ctx))
-            rows.sort(key=lambda t: (-float(t[1]), -float(t[2]), -float(t[3]), -float(t[4]), -float(t[5]), str(t[0])))
-            ranking_debug = [
-                {
-                    "bot": r[0],
-                    "prob_ia_oper": float(r[1]),
-                    "ia_score_hibrido": float(r[2]),
-                    "historico": float(r[3]),
-                    "payout": float(r[4]),
-                    "contexto": float(r[5]),
-                }
-                for r in rows
-            ]
-            selected_bot = str(rows[0][0])
-            selected_prob = float(rows[0][1])
-            selected_score_hibrido = float(rows[0][2])
-
-        if selected_bot not in bot_names:
-            return None
-        rec = next((c for c in list(candidatos or []) if str(c[1]) == selected_bot), None)
-        if rec is None:
-            st_sel = estado.get(selected_bot, {}) if isinstance(estado, dict) else {}
-            rec = (
-                float(selected_score_hibrido),
-                str(selected_bot),
-                float(selected_prob),
-                float(_metric(st_sel, ("prob_ia", "p_ia", "prob_ia_oper"))),
-                float(_metric(st_sel, ("ia_regime_score",))),
-                int(st_sel.get("ia_evidence_n", 0) or 0),
-                float(_metric(st_sel, ("ia_evidence_wr", "porcentaje_exito", "winrate", "wr"))),
-                float(_metric(st_sel, ("ia_evidence_lb",))),
-            )
-        return {
-            "triggered": True,
-            "selected_bot": str(selected_bot),
-            "selected_case": str(selected_case),
-            "greens": int(total_verdes),
-            "reds": int(total_rojos),
-            "valids": int(total_validos),
-            "red_bots": list(red_bots),
-            "ranking_debug": list(ranking_debug),
-            "selected_prob": float(selected_prob),
-            "selected_score_hibrido": float(selected_score_hibrido),
-            "selected_candidate": rec,
-            "reason": "override_columna_rezagada_directa",
-        }
-    except Exception:
-        return None
-
-
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
     """Embudo final: decisión principal por MRV+IA; dyn_gate/legacy solo guardrail/telemetría."""
     out = _registrar_estado_embudo({
@@ -15836,14 +15327,8 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
         top2_bot = str(top2[1]) if top2 else None
         top2_prob = float(top2[2] or 0.0) if top2 else 0.0
         gap_value = float(top1_prob - top2_prob)
-        cols_recent = _construir_matriz_resultados_columnas(estado_bots, BOT_NAMES, window=max(2, int(FORCE_REAL_COLVERDE_LOOKBACK)))
-        force_colverde = _force_real_colverde_eval(cols_recent, BOT_NAMES, candidatos=candidatos)
-        force_state = str(force_colverde.get("force_real_colverde_state", "NONE") or "NONE")
-        force_target = str(force_colverde.get("force_real_colverde_target_bot", "") or "").strip()
 
         st_top = estado_bots.get(top1_bot, {}) if isinstance(estado_bots, dict) else {}
-        pattern_state_top = str(st_top.get("ia_pattern_state", st_top.get("ia_pattern_col_state", "BLOQUEADO")) or "BLOQUEADO")
-        pattern_source_top = str(st_top.get("ia_pattern_source", "NONE") or "NONE")
         mrv_score = float(st_top.get("mrv_score_zona", 0.0) or 0.0)
         mrv_rupt = float(st_top.get("mrv_p_ruptura_inmediata", 1.0) or 1.0)
         mrv_vida = float(st_top.get("mrv_vida_util_restante", 0.0) or 0.0)
@@ -15887,85 +15372,6 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 "legacy_pilot_governs": 0,
                 "guardrail_gap_ok": int(guard_gap_ok),
                 "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
-                "force_real_colverde_enable": int(force_colverde.get("force_real_colverde_enable", 0) or 0),
-                "force_real_colverde_state": str(force_state),
-                "force_real_colverde_target_bot": str(force_target),
-                "force_real_colverde_red_count": int(force_colverde.get("force_real_colverde_red_count", 0) or 0),
-                "force_real_colverde_green_count": int(force_colverde.get("force_real_colverde_green_count", 0) or 0),
-                "force_real_colverde_reason": str(force_colverde.get("force_real_colverde_reason", "") or ""),
-                "force_real_colverde_compare_detail": str(force_colverde.get("force_real_colverde_compare_detail", "") or ""),
-                "force_real_colverde_selected_by": str(force_colverde.get("force_real_colverde_selected_by", "") or ""),
-                "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
-                "real_authority": "FORCE_REAL_COLVERDE" if bool(FORCE_REAL_COLVERDE_SOLO_MODE) else "MIXED",
-                "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
-            })
-
-        if (force_state == "ACTIVE") and (force_target in BOT_NAMES):
-            st_force = estado_bots.get(force_target, {}) if isinstance(estado_bots, dict) else {}
-            force_prob = float(st_force.get("prob_ia_oper", st_force.get("prob_ia", top1_prob)) or top1_prob)
-            return _registrar_estado_embudo({
-                "decision_final": EMBUDO_FINAL_REAL_OK,
-                "decision_reason": "columna_verde_rezagado",
-                "gate_quality": "force_colverde",
-                "risk_mode": "REAL_OK",
-                "hard_block_reason": "",
-                "soft_wait_reason": "",
-                "top1_bot": str(force_target),
-                "top2_bot": top2_bot,
-                "gap_value": gap_value,
-                "top1_prob": float(force_prob),
-                "top2_prob": top2_prob,
-                "degrade_from": "force_colverde",
-                "ia_real_backed": 0,
-                "real_source": "OPERATIVO_NO_IA",
-                "ia_model_mature": 0,
-                "legacy_estado_real": str(estado_real or "NORMAL"),
-                "legacy_pilot_governs": 0,
-                "guardrail_gap_ok": 1,
-                "guardrail_anti_rafaga_ok": 1,
-                "force_real_colverde_enable": int(force_colverde.get("force_real_colverde_enable", 0) or 0),
-                "force_real_colverde_state": str(force_state),
-                "force_real_colverde_target_bot": str(force_target),
-                "force_real_colverde_red_count": int(force_colverde.get("force_real_colverde_red_count", 0) or 0),
-                "force_real_colverde_green_count": int(force_colverde.get("force_real_colverde_green_count", 0) or 0),
-                "force_real_colverde_reason": str(force_colverde.get("force_real_colverde_reason", "") or ""),
-                "force_real_colverde_compare_detail": str(force_colverde.get("force_real_colverde_compare_detail", "") or ""),
-                "force_real_colverde_selected_by": str(force_colverde.get("force_real_colverde_selected_by", "") or ""),
-                "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
-                "real_authority": "FORCE_REAL_COLVERDE",
-                "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
-            })
-
-        if bool(FORCE_REAL_COLVERDE_SOLO_MODE):
-            return _registrar_estado_embudo({
-                "decision_final": EMBUDO_FINAL_WAIT_SOFT,
-                "decision_reason": "force_colverde_solo_no_match",
-                "gate_quality": "standby_others",
-                "risk_mode": "WAIT_SOFT",
-                "soft_wait_reason": "force_colverde_solo_no_match",
-                "hard_block_reason": "",
-                "top1_bot": top1_bot,
-                "top2_bot": top2_bot,
-                "gap_value": gap_value,
-                "top1_prob": top1_prob,
-                "top2_prob": top2_prob,
-                "degrade_from": "force_colverde_solo",
-                "ia_real_backed": 0,
-                "real_source": "OPERATIVO_NO_IA",
-                "ia_model_mature": int(ia_model_mature),
-                "legacy_estado_real": str(estado_real or "NORMAL"),
-                "legacy_pilot_governs": 0,
-                "force_real_colverde_enable": int(force_colverde.get("force_real_colverde_enable", 0) or 0),
-                "force_real_colverde_state": str(force_state),
-                "force_real_colverde_target_bot": str(force_target),
-                "force_real_colverde_red_count": int(force_colverde.get("force_real_colverde_red_count", 0) or 0),
-                "force_real_colverde_green_count": int(force_colverde.get("force_real_colverde_green_count", 0) or 0),
-                "force_real_colverde_reason": str(force_colverde.get("force_real_colverde_reason", "") or ""),
-                "force_real_colverde_compare_detail": str(force_colverde.get("force_real_colverde_compare_detail", "") or ""),
-                "force_real_colverde_selected_by": str(force_colverde.get("force_real_colverde_selected_by", "") or ""),
-                "force_real_colverde_solo_mode": 1,
-                "real_authority": "FORCE_REAL_COLVERDE",
-                "standby_others": 1,
             })
 
         decision = EMBUDO_FINAL_WAIT_SOFT
@@ -16176,8 +15582,6 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "ia_real_backed": int(ia_real_backed),
             "real_source": str(real_source),
             "ia_model_mature": int(ia_model_mature),
-            "pattern_state": str(pattern_state_top),
-            "pattern_source": str(pattern_source_top),
             "legacy_estado_real": str(estado_real or "NORMAL"),
             "legacy_pilot_governs": 0,
             "guardrail_gap_ok": int(guard_gap_ok),
@@ -16196,17 +15600,6 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "early_micro_override_ok": int(bool(early_micro_override)),
             "early_micro_override_auc": float(auc or 0.0),
             "early_micro_override_n": int(n_samples or 0),
-            "force_real_colverde_enable": int(force_colverde.get("force_real_colverde_enable", 0) or 0),
-            "force_real_colverde_state": str(force_state),
-            "force_real_colverde_target_bot": str(force_target),
-            "force_real_colverde_red_count": int(force_colverde.get("force_real_colverde_red_count", 0) or 0),
-            "force_real_colverde_green_count": int(force_colverde.get("force_real_colverde_green_count", 0) or 0),
-            "force_real_colverde_reason": str(force_colverde.get("force_real_colverde_reason", "") or ""),
-            "force_real_colverde_compare_detail": str(force_colverde.get("force_real_colverde_compare_detail", "") or ""),
-            "force_real_colverde_selected_by": str(force_colverde.get("force_real_colverde_selected_by", "") or ""),
-            "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
-            "real_authority": "FORCE_REAL_COLVERDE" if bool(FORCE_REAL_COLVERDE_SOLO_MODE) else "MIXED",
-            "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
@@ -16239,25 +15632,11 @@ def _candidate_rescue_ok(embudo: dict, dyn_gate: dict | None, top1_bot: str, top
     roof_def_base = float(EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS)
     roof_def_max = float(roof_def_base)
     rb = estado_bots.get(top1_bot, {}) if isinstance(estado_bots, dict) else {}
-    if bool(rb.get("ia_sensor_plano", False)):
-        return False, "rescue_reject:sensor_plano", roof_deficit_pts
-    col80_source = str(rb.get("ia_pattern_source", "") or "")
-    col80_state = str(rb.get("ia_pattern_col_state", "NONE") or "NONE").upper()
-    col80_isolated = bool(rb.get("ia_pattern_isolated_red", False))
-    col80_target = str(rb.get("ia_pattern_target_bot", "") or "")
-    col80_block_reason = str(rb.get("ia_pattern_block_reason", "") or "")
-    col80_ok = bool(
-        (col80_source == "COL80_UNA_X_REBOTE")
-        and (col80_state == "ACTIVE")
-        and col80_isolated
-        and (col80_target == str(top1_bot))
-    )
     rb_score = float(rb.get("red_bisagra_score", 0.0) or 0.0)
     rb_ok = bool(rb.get("red_bisagra_ok", False))
     rb_reason = str(rb.get("red_bisagra_reason", "") or "")
     if (roof_deficit_pts > roof_def_base) and (roof_ref > 0.0):
         can_rb_extra = False
-        can_col80_extra = False
         if bool(RED_BISAGRA_ENABLE) and rb_ok:
             mrv_score = float(rb.get("mrv_score_zona", 0.0) or 0.0)
             mrv_vida = float(rb.get("mrv_vida_util_restante", 0.0) or 0.0)
@@ -16280,24 +15659,11 @@ def _candidate_rescue_ok(embudo: dict, dyn_gate: dict | None, top1_bot: str, top
                 and (mrv_vida >= 0.50)
                 and (mrv_rupt <= 0.68)
             )
-        can_col80_extra = bool(
-            col80_ok
-            and (decision_now == EMBUDO_FINAL_WAIT_SOFT)
-            and (not bool(hard_reason))
-            and (("roof" in str(wait_reason).lower()) or ("wait_soft" in str(wait_reason).lower()))
-            and (float(top1_prob) >= float(EMBUDO_CANDIDATE_RESCUE_MIN_PROB))
-            and bool(int(emb.get("perfil_comun_flex_ok", 0) or 0) == 1)
-            and (not col80_block_reason)
-        )
         if can_rb_extra:
             roof_def_max = roof_def_base + float(RED_BISAGRA_RESCUE_MAX_EXTRA_ROOF_PTS)
-        elif can_col80_extra:
-            roof_def_max = roof_def_base + float(PATTERN_COL80_UNA_X_RESCUE_MAX_EXTRA_ROOF_PTS)
         if roof_deficit_pts > roof_def_max:
             if can_rb_extra:
                 return False, "rescue_reject:roof_deficit_even_with_red_bisagra", roof_deficit_pts
-            if can_col80_extra:
-                return False, "rescue_reject:roof_deficit_even_with_col80", roof_deficit_pts
             return False, "rescue_reject:roof_deficit", roof_deficit_pts
 
     confirm_streak = int(dgate.get("confirm_streak", 0) or 0)
@@ -16606,18 +15972,9 @@ def evaluar_ctt_fase(candidatos: list) -> tuple[list, dict]:
 # Cargar datos bot
 # Cargar datos bot
 async def cargar_datos_bot(bot, token_actual):
-    await asyncio.to_thread(_cargar_datos_bot_sync, bot, token_actual)
-
-def _cargar_datos_bot_sync(bot, token_actual):
     ruta = f"registro_enriquecido_{bot}.csv"
     if not os.path.exists(ruta):
         return
-    if not bool(HUD_SESSION_ONLY):
-        try:
-            if not bool(estado_bots.get(bot, {}).get("historial_hidratado", False)):
-                hidratar_historial_resultados_bot(bot, max_items=40)
-        except Exception:
-            pass
 
     try:
         snapshot = SNAPSHOT_FILAS.get(bot, 0)
@@ -16691,32 +16048,8 @@ def _cargar_datos_bot_sync(bot, token_actual):
             except Exception:
                 pass
 
-            trade_status_raw = (
-                fila_dict.get("trade_status", None)
-                if fila_dict.get("trade_status", None) not in (None, "")
-                else fila_dict.get("status", fila_dict.get("contract_status", ""))
-            )
-            trade_status = normalizar_trade_status(trade_status_raw)
+            trade_status = str(fila_dict.get("trade_status", "")).strip().upper()
             resultado = normalizar_resultado(fila_dict.get("resultado", ""))
-            cierre_recuperado = False
-            if (trade_status == "CERRADO") and (resultado not in ("GANANCIA", "PÉRDIDA")):
-                inferido = inferir_resultado_cierre(fila_dict)
-                if inferido in ("GANANCIA", "PÉRDIDA"):
-                    resultado = str(inferido)
-                    cierre_recuperado = True
-                    _log_cierre_recovery_event(bot, "recovered", f"✅ {bot} cierre recuperado por inferencia: {resultado}")
-                else:
-                    # Fallback final defensivo por aliases textuales simples.
-                    for _k in ("resultado", "result", "status", "contract_status"):
-                        _rn = normalizar_resultado(fila_dict.get(_k, ""))
-                        if _rn in ("GANANCIA", "PÉRDIDA"):
-                            resultado = _rn
-                            cierre_recuperado = True
-                            break
-                    if cierre_recuperado:
-                        _log_cierre_recovery_event(bot, "recovered_fallback", f"✅ {bot} cierre recuperado por fallback: {resultado}")
-                    else:
-                        _log_cierre_recovery_event(bot, "uninferable", f"⚠️ {bot} closed_without_inferable_result")
 
             try:
                 ep_dec = int(float(fila_dict.get("epoch", 0) or 0))
@@ -16745,7 +16078,6 @@ def _cargar_datos_bot_sync(bot, token_actual):
 
                 # Si el bot marcó CERRADO pero no trajo resultado válido,
                 # cerramos señal pendiente (si existía) sin contaminar historial.
-                # OJO: aquí solo entra si YA falló la inferencia de cierre.
                 if trade_status == "CERRADO":
                     if estado_bots[bot].get("ia_senal_pendiente"):
                         estado_bots[bot]["ia_senal_pendiente"] = False
@@ -16815,25 +16147,8 @@ def _cargar_datos_bot_sync(bot, token_actual):
             #    - Aquí sí actualizamos historial y estadísticas reales
             # =========================
             _registrar_cierre_ctt(bot, fila_dict, resultado)
-            if cierre_recuperado:
-                fila_dict["resultado"] = str(resultado)
             estado_bots[bot]["ultimo_resultado"] = resultado
-            previo_n = int(len(list(estado_bots[bot].get("resultados", []) or [])))
             estado_bots[bot]["resultados"].append(resultado)
-            rv = estado_bots[bot].setdefault("resultados_visual", [])
-            rv.append(resultado)
-            if len(rv) > 40:
-                del rv[:-40]
-            if previo_n == 0 and (not bool(estado_bots[bot].get("boot_visual_handover_logged", False))):
-                try:
-                    agregar_evento(f"➕ {bot} sesión real toma control de la franja visual")
-                except Exception:
-                    pass
-                estado_bots[bot]["boot_visual_handover_logged"] = True
-            try:
-                agregar_evento(f"➕ {bot} cierre nuevo añadido a sesión y franja visual")
-            except Exception:
-                pass
             estado_bots[bot]["tamano_muestra"] += 1
 
             if resultado == "GANANCIA":
@@ -16955,17 +16270,17 @@ async def obtener_saldo_real():
         _set_saldo_status("UNKNOWN", "WEBSOCKET_UNAVAILABLE", announce=True)
         return
     try:
-        async with websockets.connect(DERIV_WS_URL, open_timeout=float(SALDO_WS_CONNECT_TIMEOUT_S)) as ws:
+        async with websockets.connect(DERIV_WS_URL) as ws:
             auth_msg = json.dumps({"authorize": token_real})
             await ws.send(auth_msg)
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=float(SALDO_WS_RECV_TIMEOUT_S)))
+            resp = json.loads(await ws.recv())
             if "error" in resp:
                 detail = str((resp.get("error") or {}).get("message") or "auth rechazado")
                 _set_saldo_status("UNKNOWN", "AUTH_FAILED", detail=detail, announce=True)
                 return
             bal_msg = json.dumps({"balance": 1, "subscribe": 1})
             await ws.send(bal_msg)
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=float(SALDO_WS_RECV_TIMEOUT_S)))
+            resp = json.loads(await ws.recv())
             if "error" in resp:
                 detail = str((resp.get("error") or {}).get("message") or "balance rechazado")
                 _set_saldo_status("UNKNOWN", "BALANCE_FAILED", detail=detail, announce=True)
@@ -16984,8 +16299,6 @@ async def obtener_saldo_real():
                     inicializar_saldo_real(val)
                 return
             _set_saldo_status("UNKNOWN", "BALANCE_NOT_READ", detail="respuesta sin campo balance", announce=True)
-    except asyncio.TimeoutError:
-        _set_saldo_status("UNKNOWN", "TIMEOUT", detail="saldo_ws_timeout", announce=True)
     except Exception as e:
         _set_saldo_status("UNKNOWN", "EXCEPTION", detail=str(e), announce=True)
 
@@ -17284,203 +16597,9 @@ def _boot_health_check():
         msgs.append(f"⚠️ Health-check parcial con error: {e}")
     return msgs
 
-async def _boot03_background_warmup():
-    """Ejecuta backfill + primer entrenamiento sin bloquear el arranque principal."""
-    try:
-        agregar_evento("🚀 BOOT_03 inicio (background): backfill + primer entrenamiento.")
-    except Exception:
-        pass
-    try:
-        await asyncio.to_thread(backfill_incremental, 1500)
-        agregar_evento("✅ BOOT_03 backfill inicial completado.")
-    except Exception as e:
-        agregar_evento(f"⚠️ IA: error en backfill inicial (bg): {e}")
-    try:
-        await asyncio.to_thread(maybe_retrain, True)
-        agregar_evento("✅ BOOT_03 primer entrenamiento lanzado/completado.")
-    except Exception as e:
-        agregar_evento(f"⚠️ IA: error al intentar entrenar tras backfill (bg): {e}")
-    try:
-        def _audit_boot_sync():
-            meta_boot = _ORACLE_CACHE.get("meta") or leer_model_meta() or {}
-            audit_boot = auditar_refresh_campeon_stale(meta_boot, force_log=True)
-            if bool(audit_boot.get("needs_review", False)):
-                maybe_retrain(force=True)
-            auditar_degradacion_temporal_modelo()
-        await asyncio.to_thread(_audit_boot_sync)
-        agregar_evento("✅ BOOT_03 auditoría IA completada.")
-    except Exception as e:
-        agregar_evento(f"⚠️ IA: auditoría boot parcial con error (bg): {e}")
-    try:
-        agregar_evento("🏁 BOOT_03 fin (background).")
-    except Exception:
-        pass
-
-async def _boot04_background_sync():
-    """Sincronización inicial HUD/CSV en background para no bloquear arranque visible."""
-    try:
-        agregar_evento("🚀 BOOT_04 inicio (background): sincronización inicial HUD/CSV.")
-    except Exception:
-        pass
-    token_actual_loop = "--"
-    for bot in BOT_NAMES:
-        try:
-            if not bool(HUD_SESSION_ONLY):
-                await asyncio.to_thread(hidratar_historial_resultados_bot, bot, 40)
-            await asyncio.wait_for(cargar_datos_bot(bot, token_actual_loop), timeout=2.0)
-            try:
-                agregar_evento(f"✅ BOOT_04 sync inicial: {bot}")
-            except Exception:
-                pass
-        except asyncio.TimeoutError:
-            try:
-                agregar_evento(f"⚠️ BOOT_04 timeout en sync inicial de {bot}")
-            except Exception:
-                pass
-        except Exception as e:
-            try:
-                agregar_evento(f"⚠️ BOOT_04 error en sync inicial de {bot}: {e}")
-            except Exception:
-                pass
-        await asyncio.sleep(0)
-    try:
-        agregar_evento("🏁 BOOT_04 fin (background).")
-    except Exception:
-        pass
-
-def hidratar_historial_resultados_bot(bot: str, max_items: int = 40) -> int:
-    """Reconstruye historial visual desde cierres en CSV, independiente de SNAPSHOT incremental."""
-    b = str(bot)
-    if b not in BOT_NAMES:
-        return 0
-    st = estado_bots.get(b, {}) if isinstance(estado_bots, dict) else {}
-    if bool(st.get("historial_hidratado", False)):
-        return int(len(list(st.get("resultados", []) or [])))
-
-    ruta = f"registro_enriquecido_{b}.csv"
-    if not os.path.exists(ruta):
-        estado_bots[b]["historial_hidratado"] = True
-        return 0
-    try:
-        df = pd.read_csv(ruta, encoding="utf-8", on_bad_lines="skip")
-    except Exception:
-        estado_bots[b]["historial_hidratado"] = True
-        return 0
-    if df is None or df.empty:
-        estado_bots[b]["historial_hidratado"] = True
-        return 0
-
-    hist = []
-    for _, row in df.iterrows():
-        fila = canonicalizar_campos_bot_maestro(row.to_dict())
-        ts_raw = fila.get("trade_status", fila.get("status", fila.get("contract_status", "")))
-        ts = normalizar_trade_status(ts_raw)
-        if ts != "CERRADO":
-            continue
-        res = normalizar_resultado(fila.get("resultado", fila.get("result", "")))
-        if res not in ("GANANCIA", "PÉRDIDA"):
-            res = inferir_resultado_cierre(fila)
-        if res in ("GANANCIA", "PÉRDIDA"):
-            hist.append(str(res))
-
-    hist_tail = hist[-max(1, int(max_items)):] if hist else []
-    g = int(sum(1 for x in hist if x == "GANANCIA"))
-    p = int(sum(1 for x in hist if x == "PÉRDIDA"))
-    n = int(g + p)
-
-    estado_bots[b]["resultados"] = list(hist_tail)
-    estado_bots[b]["ultimo_resultado"] = (hist_tail[-1] if hist_tail else None)
-    estado_bots[b]["ganancias"] = int(g)
-    estado_bots[b]["perdidas"] = int(p)
-    estado_bots[b]["tamano_muestra"] = int(n)
-    estado_bots[b]["porcentaje_exito"] = ((float(g) / float(n)) * 100.0) if n > 0 else None
-    estado_bots[b]["historial_hidratado"] = True
-    try:
-        SNAPSHOT_FILAS[b] = int(len(df))
-    except Exception:
-        pass
-
-    if n > 0:
-        _log_cierre_recovery_event(b, "hydrated_ok", f"✅ {b} historial hidratado: {n} cierres / {len(hist_tail)} visuales", cooldown_s=120.0)
-    else:
-        _log_cierre_recovery_event(b, "hydrated_empty", f"⚠️ {b} sin cierres históricos hidratables", cooldown_s=120.0)
-    return int(len(hist_tail))
-
-def hidratar_historial_visual_bot(bot: str, max_items: int = 40) -> int:
-    """Hidrata SOLO la franja visual de resultados (sin tocar contadores de sesión)."""
-    b = str(bot)
-    if b not in BOT_NAMES:
-        return 0
-    ruta = f"registro_enriquecido_{b}.csv"
-    if not os.path.exists(ruta):
-        estado_bots[b]["resultados_visual"] = []
-        return 0
-    try:
-        df = pd.read_csv(ruta, encoding="utf-8", on_bad_lines="skip")
-    except Exception:
-        estado_bots[b]["resultados_visual"] = []
-        return 0
-    if df is None or df.empty:
-        estado_bots[b]["resultados_visual"] = []
-        return 0
-
-    visual = []
-    for _, row in df.iterrows():
-        fila = canonicalizar_campos_bot_maestro(row.to_dict())
-        ts_raw = fila.get("trade_status", fila.get("status", fila.get("contract_status", "")))
-        if normalizar_trade_status(ts_raw) != "CERRADO":
-            continue
-        res = normalizar_resultado(fila.get("resultado", fila.get("result", "")))
-        if res not in ("GANANCIA", "PÉRDIDA"):
-            res = inferir_resultado_cierre(fila)
-        if res in ("GANANCIA", "PÉRDIDA"):
-            visual.append(str(res))
-    visual_tail = visual[-max(1, int(max_items)):] if visual else []
-    estado_bots[b]["resultados_visual"] = list(visual_tail)
-    if len(visual_tail) > 0:
-        _log_cierre_recovery_event(b, "visual_hydrated", f"✅ {b} historial visual hidratado: {len(visual_tail)}", cooldown_s=120.0)
-    else:
-        _log_cierre_recovery_event(b, "visual_empty", f"⚠️ {b} sin historial visual hidratable", cooldown_s=120.0)
-    return int(len(visual_tail))
-
-_RETRAIN_BG_TASK = None
-_RETRAIN_BG_OMIT_LOG_TS = 0.0
-def _schedule_maybe_retrain_bg(force: bool = False, source: str = "tick") -> bool:
-    """Lanza maybe_retrain en background para no bloquear el loop principal."""
-    global _RETRAIN_BG_TASK
-    try:
-        if (_RETRAIN_BG_TASK is not None) and (not _RETRAIN_BG_TASK.done()):
-            now = float(time.time())
-            global _RETRAIN_BG_OMIT_LOG_TS
-            if (now - float(_RETRAIN_BG_OMIT_LOG_TS or 0.0)) >= 20.0:
-                _RETRAIN_BG_OMIT_LOG_TS = now
-                try:
-                    agregar_evento("⏳ Retrain omitido: ya en progreso.")
-                except Exception:
-                    pass
-            return False
-    except Exception:
-        pass
-
-    async def _runner():
-        try:
-            await asyncio.to_thread(maybe_retrain, bool(force))
-        except Exception as e:
-            try:
-                agregar_evento(f"⚠️ IA: maybe_retrain bg error ({source}): {e}")
-            except Exception:
-                pass
-
-    _RETRAIN_BG_TASK = asyncio.create_task(_runner())
-    try:
-        agregar_evento(f"🧠 Retrain background programado ({source}).")
-    except Exception:
-        pass
-    return True
-
 
 async def main():
-    global salir, pausado, reinicio_manual, SALDO_INICIAL, LIMPIEZA_PANEL_HASTA
+    global salir, pausado, reinicio_manual, SALDO_INICIAL
     global PENDIENTE_FORZAR_BOT, PENDIENTE_FORZAR_INICIO, PENDIENTE_FORZAR_EXPIRA, REAL_OWNER_LOCK
     global REAL_LOCK_MISMATCH_SINCE
 
@@ -17516,146 +16635,42 @@ async def main():
                     agregar_evento(_msg)
                 except Exception:
                     pass
-        print("🧭 BOOT: inicio reiniciar_completo()")
-        try:
-            agregar_evento("🧭 BOOT: inicio reiniciar_completo().")
-        except Exception:
-            pass
-        reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=0, modo_suave=True)
-        print("✅ BOOT: fin reiniciar_completo()")
-        try:
-            agregar_evento("✅ BOOT: fin reiniciar_completo().")
-        except Exception:
-            pass
-        if bool(HUD_SESSION_ONLY):
-            try:
-                agregar_evento("📍 HUD_SESSION_ONLY activo: sin histórico visual al arranque")
-            except Exception:
-                pass
-            for _b in BOT_NAMES:
-                base_rows = int(contar_filas_csv(_b) or 0)
-                SESSION_BASE_ROWS[_b] = int(base_rows)
-                SNAPSHOT_FILAS[_b] = int(base_rows)
-                estado_bots[_b]["resultados"] = []
-                estado_bots[_b]["resultados_visual"] = []
-                estado_bots[_b]["resultados_visual_boot"] = []
-                estado_bots[_b]["hud_etiqueta_superior"] = ""
-                estado_bots[_b]["ultimo_resultado"] = None
-                estado_bots[_b]["ganancias"] = 0
-                estado_bots[_b]["perdidas"] = 0
-                estado_bots[_b]["tamano_muestra"] = 0
-                estado_bots[_b]["porcentaje_exito"] = None
-                estado_bots[_b]["historial_hidratado"] = True
-                estado_bots[_b]["boot_visual_seed_logged"] = False
-                estado_bots[_b]["boot_visual_handover_logged"] = False
-                try:
-                    hidratar_historial_visual_bot(_b, 40)
-                except Exception as e:
-                    try:
-                        agregar_evento(f"⚠️ {_b} no se pudo hidratar resultados_visual al boot: {e}")
-                    except Exception:
-                        pass
-                try:
-                    agregar_evento(f"🧹 {_b} sesión estadística sigue en cero")
-                except Exception:
-                    pass
+        reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=15, modo_suave=True)
         loop = asyncio.get_running_loop()
         set_main_loop(loop)
-        print("🧭 BOOT: inicio refresh_saldo_real(forzado=True)")
-        try:
-            agregar_evento("🧭 BOOT: inicio refresh_saldo_real(forzado=True).")
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(refresh_saldo_real(forzado=True), timeout=5.0)
-            print("✅ BOOT: fin refresh_saldo_real(forzado=True)")
-            try:
-                agregar_evento("✅ BOOT: fin refresh_saldo_real(forzado=True).")
-            except Exception:
-                pass
-        except asyncio.TimeoutError:
-            print("⚠️ BOOT: timeout en refresh_saldo_real(forzado=True), continuo arranque.")
-            try:
-                agregar_evento("⚠️ BOOT: timeout saldo inicial; arranque continúa (saldo en background).")
-            except Exception:
-                pass
-            asyncio.create_task(refresh_saldo_real(forzado=True))
-        except Exception as e:
-            print(f"⚠️ BOOT: fallo refresh_saldo_real(forzado=True): {e}. Continúo arranque.")
-            try:
-                agregar_evento(f"⚠️ BOOT: fallo saldo inicial ({e}); arranque continúa.")
-            except Exception:
-                pass
+        await refresh_saldo_real(forzado=True)
         valor = obtener_valor_saldo()
         if valor is not None:
             inicializar_saldo_real(valor)
 
-        print("🧭 BOOT: preparando BOOT_03 (background).")
+        set_etapa("BOOT_03", "Backfill y primer entrenamiento")
+        # Backfill IA desde los logs enriquecidos
         try:
-            agregar_evento("🧭 BOOT: preparando BOOT_03 (background).")
-        except Exception:
-            pass
-        set_etapa("BOOT_03", "Backfill y primer entrenamiento (background)")
-        print("🧭 BOOT: BOOT_03 programado en background (no bloqueante).")
-        try:
-            agregar_evento("🧭 BOOT: BOOT_03 en background (main loop continúa).")
-        except Exception:
-            pass
-        asyncio.create_task(_boot03_background_warmup())
-        print("✅ BOOT: BOOT_03 programado.")
-
-        print("🧭 BOOT: preparando BOOT_04 (background).")
-        try:
-            agregar_evento("🧭 BOOT: preparando BOOT_04 (background).")
-        except Exception:
-            pass
-        set_etapa("BOOT_04", "Sincronización inicial HUD/CSV (background)")
-        print("🧭 BOOT: BOOT_04 programado en background (no bloqueante).")
-        try:
-            agregar_evento("🧭 BOOT: BOOT_04 en background (main loop continúa).")
-        except Exception:
-            pass
-        asyncio.create_task(_boot04_background_sync())
-        print("✅ BOOT: BOOT_04 programado.")
-        await asyncio.sleep(0)
-
-        try:
-            set_etapa("BOOT_04A", "Primer render temprano HUD")
-        except Exception:
-            pass
-        print("🧭 BOOT: primer render HUD.")
-        try:
-            agregar_evento("🧭 BOOT: primer render HUD.")
-        except Exception:
-            pass
-        try:
-            if not MODAL_ACTIVO:
-                LIMPIEZA_PANEL_HASTA = 0.0
-                try:
-                    agregar_evento("🧭 BOOT: limpieza visual liberada para render temprano HUD.")
-                except Exception:
-                    pass
-                with RENDER_LOCK:
-                    mostrar_panel(force=True)
-            print("✅ BOOT: primer render HUD completado.")
-            try:
-                agregar_evento("✅ BOOT: primer render HUD completado.")
-            except Exception:
-                pass
+            backfill_incremental(ultimas=1500)
         except Exception as e:
-            try:
-                agregar_evento(f"⚠️ Primer render HUD falló: {e}")
-            except Exception:
-                pass
-        await asyncio.sleep(0)
+            agregar_evento(f"⚠️ IA: error en backfill inicial: {e}")
 
-        print("🧭 BOOT: entrando al while principal.")
+        # Intentar un primer entrenamiento, si ya hay suficientes filas
         try:
-            agregar_evento("🧭 BOOT: entrando al while principal.")
-        except Exception:
-            pass
-        first_loop_logged = False
-        first_tick_trace_done = False
+            maybe_retrain(force=True)
+        except Exception as e:
+            agregar_evento(f"⚠️ IA: error al intentar entrenar tras el backfill: {e}")
+
+        # Diagnóstico BOOT de desalineación campeón/dataset + degradación temporal (no bloquea operativa)
+        try:
+            meta_boot = _ORACLE_CACHE.get("meta") or leer_model_meta() or {}
+            audit_boot = auditar_refresh_campeon_stale(meta_boot, force_log=True)
+            if bool(audit_boot.get("needs_review", False)):
+                maybe_retrain(force=True)
+            auditar_degradacion_temporal_modelo()
+        except Exception as e:
+            agregar_evento(f"⚠️ IA: auditoría boot parcial con error: {e}")
+
+        set_etapa("BOOT_04", "Sincronizando HUD con CSV")
+        # Pasada inicial para sincronizar HUD con CSV existentes
+        token_actual_loop = "--"  # Dummy para carga inicial
+        for bot in BOT_NAMES:
+            await cargar_datos_bot(bot, token_actual_loop)
 
         while True:
             if salir:
@@ -17670,16 +16685,7 @@ async def main():
                 await refresh_saldo_real(forzado=True)
 
             try:  
-                if not first_loop_logged:
-                    print("✅ TICK_00: loop principal vivo.")
-                    try:
-                        agregar_evento("✅ TICK_00: loop principal vivo.")
-                    except Exception:
-                        pass
-                    first_loop_logged = True
                 set_etapa("TICK_01")
-                if not first_tick_trace_done:
-                    agregar_evento("🧭 TICK_01 inicio.")
                 token_actual_loop = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else (leer_token_actual() or next((b for b in BOT_NAMES if estado_bots.get(b, {}).get("token") == "REAL"), None))
 
                 # Reconciliación anti-desincronía maestro↔bots:
@@ -17711,7 +16717,7 @@ async def main():
                         meta_tick = _ORACLE_CACHE.get("meta") or leer_model_meta() or {}
                         audit_tick = auditar_refresh_campeon_stale(meta_tick, force_log=False)
                         if bool(audit_tick.get("needs_review", False)):
-                            _schedule_maybe_retrain_bg(force=True, source="audit_tick")
+                            maybe_retrain(force=True)
                         auditar_degradacion_temporal_modelo()
                 except Exception:
                     pass
@@ -17723,37 +16729,26 @@ async def main():
                     _enforce_single_real_standby(activo_real)
                 for bot in BOT_NAMES:
                     try:  # Aislamiento per-bot para evitar skips globales
-                        if not first_tick_trace_done:
-                            agregar_evento(f"🧭 TICK_01 cargando {bot}")
                         if reinicio_forzado.is_set():
                             # Menos ruido: no agregar evento si repetido
                             reinicio_forzado.clear()
                             # No mostrar_panel inmediato; dejar al tick
                             break
-                        await asyncio.wait_for(cargar_datos_bot(bot, token_actual_loop), timeout=2.0)
-                        if not first_tick_trace_done:
-                            agregar_evento(f"✅ TICK_01 ok {bot}")
+                        await cargar_datos_bot(bot, token_actual_loop)
                         # Evita desincronizar REAL por inactividad normal durante contrato.
                         # El owner REAL se vigila en TICK_02 (watchdog sin salida a DEMO).
                         if time.time() - last_update_time[bot] > 60:
                             if estado_bots.get(bot, {}).get("token") != "REAL":
                                 reiniciar_bot(bot)
-                    except asyncio.TimeoutError:
-                        agregar_evento(f"⚠️ TICK_01 timeout cargar_datos_bot({bot})")
                     except Exception as e_bot:
                         agregar_evento(f"⚠️ Error en {bot}: {e_bot}")
-                    finally:
-                        await asyncio.sleep(0)
                 else:
-                    if not first_tick_trace_done:
-                        agregar_evento("🏁 TICK_01 fin.")
-                        first_tick_trace_done = True
                     # Reentreno periódico no bloqueante (evita quedarse en OFF si boot ocurrió con pocos datos)
                     try:
                         now_rt = time.time()
                         if (now_rt - float(globals().get("_LAST_AUTO_RETRAIN_TICK", 0.0) or 0.0)) >= float(AUTO_RETRAIN_TICK_S):
                             globals()["_LAST_AUTO_RETRAIN_TICK"] = now_rt
-                            _schedule_maybe_retrain_bg(force=False, source="auto_tick")
+                            maybe_retrain(force=False)
                     except Exception:
                         pass
 
@@ -17859,51 +16854,39 @@ async def main():
                         candidatos = []
                         raw_rank_scores = []
                         pattern_col_eval = dict(PATTERN_COL_LAST_STATE)
-                        try:
-                            cols = _construir_matriz_resultados_columnas(estado_bots, BOT_NAMES, window=int(PATTERN_COL_WINDOW))
-                            cols_stats = [
-                                evaluar_patron_columna_verde(c, thr80=float(PATTERN_COL80_THRESHOLD), thr90=float(PATTERN_COL90_THRESHOLD))
-                                for c in cols
-                            ]
-                            col_actual = dict(cols_stats[0]) if cols_stats else {}
-                            col_anterior = dict(cols_stats[1]) if len(cols_stats) > 1 else {}
-                            streak80 = calcular_strong_streak(cols_stats, thr=float(PATTERN_COL80_THRESHOLD))
-                            streak90 = calcular_strong_streak(cols_stats, thr=float(PATTERN_COL90_THRESHOLD))
-                            col_actual["strong_streak_80"] = int(streak80)
-                            col_actual["strong_streak_90"] = int(streak90)
-                            rebote_hist = calcular_rebote_x_to_check_historico(cols, lookback=int(PATTERN_REBOTE_LOOKBACK))
-                            col80_signal = evaluar_col80_una_x_rebote(
-                                cols,
-                                BOT_NAMES,
-                                thr80=float(PATTERN_COL80_THRESHOLD),
-                                lookback=int(PATTERN_COL80_UNA_X_LOOKBACK),
-                            )
-                            pattern_col_eval = clasificar_estado_patron(
-                                col_actual=col_actual,
-                                col_anterior=col_anterior,
-                                rebote_rate_hist=rebote_hist.get("rebote_rate_hist", None),
-                                rebote_samples_hist=int(rebote_hist.get("rebote_samples_hist", 0) or 0),
-                                col80_signal=col80_signal,
-                            )
-                            _b_pat, _p_pat, _d_pat = aplicar_ajuste_patron_score(pattern_col_eval)
-                            pattern_col_eval.update({
-                                "total_verdes_col_actual": int(col_actual.get("total_verdes", 0) or 0),
-                                "total_rojos_col_actual": int(col_actual.get("total_rojos", 0) or 0),
-                                "rebote_rate_hist": rebote_hist.get("rebote_rate_hist", None),
-                                "rebote_samples_hist": int(rebote_hist.get("rebote_samples_hist", 0) or 0),
-                                "total_x_hist": int(rebote_hist.get("total_x_hist", 0) or 0),
-                                "total_x_rebote_hist": int(rebote_hist.get("total_x_rebote_hist", 0) or 0),
-                                "pattern_delta": float(_d_pat),
-                                "pattern_bonus_penalty": float(_d_pat),
-                                "pattern_source": str(pattern_col_eval.get("pattern_source", col80_signal.get("pattern_source", "NONE"))),
-                                "col80_una_x_state": str(col80_signal.get("col80_una_x_state", "NONE") or "NONE"),
-                                "col80_red_count": int(col80_signal.get("col80_red_count", 0) or 0),
-                                "col80_target_bot": str(col80_signal.get("col80_target_bot", "") or ""),
-                                "col80_isolated_red": bool(col80_signal.get("col80_isolated_red", False)),
-                                "col80_block_reason": str(col80_signal.get("col80_block_reason", "") or ""),
-                            })
-                        except Exception:
-                            pattern_col_eval = dict(PATTERN_COL_LAST_STATE)
+                        if bool(PATTERN_ENABLE):
+                            try:
+                                cols = _construir_matriz_resultados_columnas(estado_bots, BOT_NAMES, window=int(PATTERN_COL_WINDOW))
+                                cols_stats = [
+                                    evaluar_patron_columna_verde(c, thr80=float(PATTERN_COL80_THRESHOLD), thr90=float(PATTERN_COL90_THRESHOLD))
+                                    for c in cols
+                                ]
+                                col_actual = dict(cols_stats[0]) if cols_stats else {}
+                                col_anterior = dict(cols_stats[1]) if len(cols_stats) > 1 else {}
+                                streak80 = calcular_strong_streak(cols_stats, thr=float(PATTERN_COL80_THRESHOLD))
+                                streak90 = calcular_strong_streak(cols_stats, thr=float(PATTERN_COL90_THRESHOLD))
+                                col_actual["strong_streak_80"] = int(streak80)
+                                col_actual["strong_streak_90"] = int(streak90)
+                                rebote_hist = calcular_rebote_x_to_check_historico(cols, lookback=int(PATTERN_REBOTE_LOOKBACK))
+                                pattern_col_eval = clasificar_estado_patron(
+                                    col_actual=col_actual,
+                                    col_anterior=col_anterior,
+                                    rebote_rate_hist=rebote_hist.get("rebote_rate_hist", None),
+                                    rebote_samples_hist=int(rebote_hist.get("rebote_samples_hist", 0) or 0),
+                                )
+                                _b_pat, _p_pat, _d_pat = aplicar_ajuste_patron_score(pattern_col_eval)
+                                pattern_col_eval.update({
+                                    "total_verdes_col_actual": int(col_actual.get("total_verdes", 0) or 0),
+                                    "total_rojos_col_actual": int(col_actual.get("total_rojos", 0) or 0),
+                                    "rebote_rate_hist": rebote_hist.get("rebote_rate_hist", None),
+                                    "rebote_samples_hist": int(rebote_hist.get("rebote_samples_hist", 0) or 0),
+                                    "total_x_hist": int(rebote_hist.get("total_x_hist", 0) or 0),
+                                    "total_x_rebote_hist": int(rebote_hist.get("total_x_rebote_hist", 0) or 0),
+                                    "pattern_delta": float(_d_pat),
+                                    "pattern_bonus_penalty": float(_d_pat),
+                                })
+                            except Exception:
+                                pattern_col_eval = dict(PATTERN_COL_LAST_STATE)
                         globals()["PATTERN_COL_LAST_STATE"] = dict(pattern_col_eval)
                         diag_gate = _leer_gate_desde_diagnostico(ttl_s=60.0)
                         # CTT como autoridad contextual superior: si hay veto duro,
@@ -18021,16 +17004,11 @@ async def main():
                                 # Se usa como modulador de elegibilidad común, sin reordenar bots por sí solo.
                                 pat_state = dict(pattern_col_eval if isinstance(pattern_col_eval, dict) else {})
                                 pat_bonus_col, pat_penal_col, pat_delta_col = aplicar_ajuste_patron_score(pat_state)
-                                k_pts_pat = float(PATTERN_COL80_HYBRID_PTS_TO_PROB)
+                                k_pts_pat = float(PATTERN_V1_HYBRID_PTS_TO_PROB)
                                 thr_post_ctx = float(thr_post)
                                 if False:  # CUARENTENA FUNCIONAL pattern columns
                                     pass
-                                col80_state = str(pat_state.get("col80_una_x_state", "NONE") or "NONE").upper()
-                                col80_source = str(pat_state.get("pattern_source", "NONE") or "NONE")
-                                col80_target = str(pat_state.get("col80_target_bot", "") or "")
-                                col80_isolated = bool(pat_state.get("col80_isolated_red", False))
-                                pattern_col_state = "ACTIVE" if col80_state == "ACTIVE" else ("BLOCKED" if col80_state == "BLOCKED" else "NONE")
-                                estado_bots[b]["ia_pattern_col_state"] = str(pattern_col_state)
+                                estado_bots[b]["ia_pattern_col_state"] = str(pat_state.get("pattern_state", "BLOQUEADO"))
                                 estado_bots[b]["ia_pattern_col_ratio"] = pat_state.get("green_ratio_col_actual", None)
                                 estado_bots[b]["ia_pattern_rebote_hist"] = pat_state.get("rebote_rate_hist", None)
                                 estado_bots[b]["ia_pattern_strong80"] = int(pat_state.get("strong_streak_80", 0) or 0)
@@ -18039,12 +17017,6 @@ async def main():
                                 estado_bots[b]["ia_pattern_col_bonus"] = float(pat_bonus_col)
                                 estado_bots[b]["ia_pattern_col_penal"] = float(pat_penal_col)
                                 estado_bots[b]["ia_pattern_col_delta"] = float(pat_delta_col)
-                                estado_bots[b]["ia_pattern_red_count"] = int(pat_state.get("col80_red_count", 0) or 0)
-                                estado_bots[b]["ia_pattern_target_bot"] = col80_target
-                                estado_bots[b]["ia_pattern_isolated_red"] = bool(col80_isolated)
-                                estado_bots[b]["ia_pattern_block_reason"] = str(pat_state.get("col80_block_reason", "") or "") if pattern_col_state == "BLOCKED" else ""
-                                estado_bots[b]["ia_pattern_source"] = col80_source
-                                estado_bots[b]["ia_pattern_state"] = str(pat_state.get("pattern_state", "BLOQUEADO") or "BLOQUEADO")
                                 estado_bots[b]["ia_pattern_thr_ctx"] = float(thr_post_ctx)
                                 if float(p_post) < float(thr_post_ctx):
                                     continue
@@ -18075,17 +17047,6 @@ async def main():
                                 pattern_bonus_b = 0.0
                                 pattern_penal_b = 0.0
                                 score_hibrido = float(score_final)
-                                col80_micro_ok = bool(
-                                    (col80_source == "COL80_UNA_X_REBOTE")
-                                    and (pattern_col_state == "ACTIVE")
-                                    and col80_isolated
-                                    and (col80_target == str(b))
-                                    and (not bool(sensor_plano_b))
-                                )
-                                delta_hibrido_col80 = (float(k_pts_pat) * float(pat_delta_col)) if col80_micro_ok else 0.0
-                                delta_hibrido_col80 = float(max(-float(PATTERN_COL80_HYBRID_DELTA_CAP), min(float(PATTERN_COL80_HYBRID_DELTA_CAP), delta_hibrido_col80)))
-                                if col80_micro_ok:
-                                    score_hibrido = float(max(0.0, min(1.0, float(score_hibrido) + float(delta_hibrido_col80))))
                                 if False:  # CUARENTENA FUNCIONAL pattern v1
                                     q3_proxy, q2_proxy = _pattern_v1_thresholds_proxy()
                                     pattern_score_b, pattern_bonus_b, pattern_penal_b, pattern_total_b = pattern_score_operativo_v1(ctx, q3_proxy, q2_proxy)
@@ -18111,7 +17072,6 @@ async def main():
                                 estado_bots[b]["ia_pattern_penal"] = float(pattern_penal_b)
                                 estado_bots[b]["ia_score_hibrido"] = float(score_hibrido)
                                 estado_bots[b]["ia_score_hibrido_delta"] = float(score_hibrido - float(score_final))
-                                estado_bots[b]["ia_pattern_col80_hybrid_delta"] = float(delta_hibrido_col80)
                                 estado_bots[b]["ia_regime_score"] = float(regime_score)
                                 estado_bots[b]["ia_evidence_n"] = int(ev_n)
                                 estado_bots[b]["ia_evidence_wr"] = float(ev_wr)
@@ -18176,52 +17136,12 @@ async def main():
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
                         candidatos_pre_embudo = list(candidatos or [])
 
-                        override_rezagada = _override_columna_rezagada_directa(candidatos, estado_bots, BOT_NAMES)
-                        if isinstance(override_rezagada, dict) and bool(override_rezagada.get("triggered", False)):
-                            selected_bot = str(override_rezagada.get("selected_bot") or "").strip()
-                            selected_prob = float(override_rezagada.get("selected_prob", 0.0) or 0.0)
-                            selected_case = str(override_rezagada.get("selected_case") or "")
-                            red_bots_dbg = list(override_rezagada.get("red_bots", []) or [])
-                            if selected_case == "1X":
-                                agregar_evento(
-                                    f"🔥 Override columna rezagada: caso=1X bot={selected_bot} greens={int(override_rezagada.get('greens', 0) or 0)} reds={int(override_rezagada.get('reds', 0) or 0)} -> REAL directo"
-                                )
-                            else:
-                                agregar_evento(
-                                    f"🔥 Override columna rezagada: caso=2X bot={selected_bot} reds={red_bots_dbg} -> gana por fuerza comparativa -> REAL directo"
-                                )
-                            rec_override = override_rezagada.get("selected_candidate")
-                            if rec_override is not None:
-                                candidatos = [rec_override]
-                            embudo = _registrar_estado_embudo({
-                                "decision_final": EMBUDO_FINAL_REAL_OK,
-                                "decision_reason": "override_columna_rezagada_directa",
-                                "gate_quality": "force_override",
-                                "risk_mode": "REAL_OK",
-                                "soft_wait_reason": "",
-                                "hard_block_reason": "",
-                                "real_source": "OVERRIDE_COLUMNA_REZAGADA",
-                                "top1_bot": selected_bot,
-                                "top1_prob": float(selected_prob),
-                                "top2_bot": None,
-                                "top2_prob": 0.0,
-                                "gap_value": 0.0,
-                            })
-                        else:
-                            embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
+                        embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
                         decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
                             agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
                             candidatos = []
                         elif decision_final == EMBUDO_FINAL_WAIT_SOFT:
-                            solo_mode_active = bool(int(embudo.get("force_real_colverde_solo_mode", int(FORCE_REAL_COLVERDE_SOLO_MODE)) or 0))
-                            if solo_mode_active:
-                                agregar_evento(
-                                    f"🟥 FORCE_REAL_COLVERDE={embudo.get('force_real_colverde_state','NONE')} "
-                                    f"impact=NO_REAL others=STANDBY reason={embudo.get('decision_reason') or embudo.get('soft_wait_reason') or '--'}"
-                                )
-                                candidatos = []
-                                continue
                             rescue_applied = False
                             wait_reason_emb = str(embudo.get("soft_wait_reason") or embudo.get("decision_reason") or "")
                             top1_rescue = str(embudo.get("top1_bot") or "").strip()
@@ -18292,32 +17212,7 @@ async def main():
                                 agregar_evento(f"⏳ EMBUDO WAIT: {rescue_reason} bot={top1_rescue or '--'} p={top1_prob_rescue*100:.1f}% roof_def={roof_deficit_pts:.1f}pts.")
                                 candidatos = []
                         elif decision_final == EMBUDO_FINAL_REAL_OK:
-                            force_target = str(embudo.get("force_real_colverde_target_bot") or "").strip()
-                            force_active = str(embudo.get("force_real_colverde_state", "NONE") or "NONE") == "ACTIVE"
-                            if force_active and force_target:
-                                rec_force = next((c for c in list(candidatos_pre_embudo or []) if str(c[1]) == force_target), None)
-                                if rec_force is not None:
-                                    candidatos = [rec_force]
-                                else:
-                                    st_force = estado_bots.get(force_target, {}) if isinstance(estado_bots, dict) else {}
-                                    p_force = float(st_force.get("prob_ia_oper", st_force.get("prob_ia", 0.0)) or 0.0)
-                                    candidatos = [(
-                                        float(st_force.get("ia_score_hibrido", p_force) or p_force),
-                                        str(force_target),
-                                        float(p_force),
-                                        float(p_force),
-                                        float(st_force.get("ia_regime_score", 0.0) or 0.0),
-                                        int(st_force.get("ia_evidence_n", 0) or 0),
-                                        float(st_force.get("ia_evidence_wr", 0.0) or 0.0),
-                                        float(st_force.get("ia_evidence_lb", 0.0) or 0.0),
-                                    )]
-                                agregar_evento(
-                                    f"🟥 FORCE_REAL_COLVERDE=ACTIVE greens={int(embudo.get('force_real_colverde_green_count',0) or 0)} "
-                                    f"reds={int(embudo.get('force_real_colverde_red_count',0) or 0)} target_bot={force_target} "
-                                    f"selected_by={embudo.get('force_real_colverde_selected_by') or '--'} reason=columna_verde_rezagado impact=REAL_DIRECT"
-                                )
-                            else:
-                                candidatos = candidatos[:1]
+                            candidatos = candidatos[:1]
 
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
                         # Si la IA detecta señal y tú estás en manual, preselecciona el mejor bot y abre la ventana
