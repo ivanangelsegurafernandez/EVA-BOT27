@@ -13486,8 +13486,35 @@ def mostrar_panel(force: bool = False):
         pass
 
     for bot in BOT_NAMES:
+        r_visual = list(estado_bots[bot].get("resultados_visual", []) or [])
         r_session = list(estado_bots[bot].get("resultados", []) or [])
-        r = list(r_session)
+        r_boot = list(estado_bots[bot].get("resultados_visual_boot", []) or [])
+        if r_visual:
+            r = list(r_visual)
+            fuente_franja = "resultados_visual"
+        elif r_session:
+            r = list(r_session)
+            fuente_franja = "resultados"
+        elif r_boot:
+            r = list(r_boot)
+            fuente_franja = "resultados_visual_boot"
+        else:
+            r = []
+            fuente_franja = "vacia"
+        try:
+            now_src = float(time.time())
+            src_map = globals().setdefault("_HUD_FRANJA_SOURCE_LOG_TS", {})
+            last_src = float(src_map.get(bot, 0.0) or 0.0)
+            if (now_src - last_src) >= 45.0:
+                if fuente_franja == "resultados_visual":
+                    agregar_evento(f"👁️ {bot} franja visual usando resultados_visual")
+                elif fuente_franja == "resultados_visual_boot":
+                    agregar_evento(f"👁️ {bot} franja visual usando resultados_visual_boot (fallback)")
+                elif fuente_franja == "vacia":
+                    agregar_evento(f"👁️ {bot} franja visual vacía (sin datos de sesión ni boot)")
+                src_map[bot] = now_src
+        except Exception:
+            pass
         token = "REAL" if owner_visual == bot else "DEMO"
         estado_bots[bot]["token"] = token
         src = estado_bots[bot].get("fuente")
