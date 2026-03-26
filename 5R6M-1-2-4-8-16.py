@@ -1483,6 +1483,8 @@ IA53_TRIGGERED = {bot: False for bot in BOT_NAMES}
 IA53_LAST_TS = {bot: 0.0 for bot in BOT_NAMES}
 TOKEN_FILE = "token_actual.txt"
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+SALDO_WS_CONNECT_TIMEOUT_S = 4.0
+SALDO_WS_RECV_TIMEOUT_S = 4.0
 saldo_real = "--"
 SALDO_INICIAL = None
 META = None
@@ -16652,17 +16654,17 @@ async def obtener_saldo_real():
         _set_saldo_status("UNKNOWN", "WEBSOCKET_UNAVAILABLE", announce=True)
         return
     try:
-        async with websockets.connect(DERIV_WS_URL) as ws:
+        async with websockets.connect(DERIV_WS_URL, open_timeout=float(SALDO_WS_CONNECT_TIMEOUT_S)) as ws:
             auth_msg = json.dumps({"authorize": token_real})
             await ws.send(auth_msg)
-            resp = json.loads(await ws.recv())
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=float(SALDO_WS_RECV_TIMEOUT_S)))
             if "error" in resp:
                 detail = str((resp.get("error") or {}).get("message") or "auth rechazado")
                 _set_saldo_status("UNKNOWN", "AUTH_FAILED", detail=detail, announce=True)
                 return
             bal_msg = json.dumps({"balance": 1, "subscribe": 1})
             await ws.send(bal_msg)
-            resp = json.loads(await ws.recv())
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=float(SALDO_WS_RECV_TIMEOUT_S)))
             if "error" in resp:
                 detail = str((resp.get("error") or {}).get("message") or "balance rechazado")
                 _set_saldo_status("UNKNOWN", "BALANCE_FAILED", detail=detail, announce=True)
@@ -16681,6 +16683,8 @@ async def obtener_saldo_real():
                     inicializar_saldo_real(val)
                 return
             _set_saldo_status("UNKNOWN", "BALANCE_NOT_READ", detail="respuesta sin campo balance", announce=True)
+    except asyncio.TimeoutError:
+        _set_saldo_status("UNKNOWN", "TIMEOUT", detail="saldo_ws_timeout", announce=True)
     except Exception as e:
         _set_saldo_status("UNKNOWN", "EXCEPTION", detail=str(e), announce=True)
 
@@ -16979,6 +16983,38 @@ def _boot_health_check():
         msgs.append(f"⚠️ Health-check parcial con error: {e}")
     return msgs
 
+async def _boot03_background_warmup():
+    """Ejecuta backfill + primer entrenamiento sin bloquear el arranque principal."""
+    try:
+        agregar_evento("🚀 BOOT_03 inicio (background): backfill + primer entrenamiento.")
+    except Exception:
+        pass
+    try:
+        await asyncio.to_thread(backfill_incremental, 1500)
+        agregar_evento("✅ BOOT_03 backfill inicial completado.")
+    except Exception as e:
+        agregar_evento(f"⚠️ IA: error en backfill inicial (bg): {e}")
+    try:
+        await asyncio.to_thread(maybe_retrain, True)
+        agregar_evento("✅ BOOT_03 primer entrenamiento lanzado/completado.")
+    except Exception as e:
+        agregar_evento(f"⚠️ IA: error al intentar entrenar tras backfill (bg): {e}")
+    try:
+        def _audit_boot_sync():
+            meta_boot = _ORACLE_CACHE.get("meta") or leer_model_meta() or {}
+            audit_boot = auditar_refresh_campeon_stale(meta_boot, force_log=True)
+            if bool(audit_boot.get("needs_review", False)):
+                maybe_retrain(force=True)
+            auditar_degradacion_temporal_modelo()
+        await asyncio.to_thread(_audit_boot_sync)
+        agregar_evento("✅ BOOT_03 auditoría IA completada.")
+    except Exception as e:
+        agregar_evento(f"⚠️ IA: auditoría boot parcial con error (bg): {e}")
+    try:
+        agregar_evento("🏁 BOOT_03 fin (background).")
+    except Exception:
+        pass
+
 
 async def main():
     global salir, pausado, reinicio_manual, SALDO_INICIAL
@@ -17017,36 +17053,55 @@ async def main():
                     agregar_evento(_msg)
                 except Exception:
                     pass
+        print("🧭 BOOT: inicio reiniciar_completo()")
+        try:
+            agregar_evento("🧭 BOOT: inicio reiniciar_completo().")
+        except Exception:
+            pass
         reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=15, modo_suave=True)
+        print("✅ BOOT: fin reiniciar_completo()")
+        try:
+            agregar_evento("✅ BOOT: fin reiniciar_completo().")
+        except Exception:
+            pass
         loop = asyncio.get_running_loop()
         set_main_loop(loop)
-        await refresh_saldo_real(forzado=True)
+        print("🧭 BOOT: inicio refresh_saldo_real(forzado=True)")
+        try:
+            agregar_evento("🧭 BOOT: inicio refresh_saldo_real(forzado=True).")
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(refresh_saldo_real(forzado=True), timeout=5.0)
+            print("✅ BOOT: fin refresh_saldo_real(forzado=True)")
+            try:
+                agregar_evento("✅ BOOT: fin refresh_saldo_real(forzado=True).")
+            except Exception:
+                pass
+        except asyncio.TimeoutError:
+            print("⚠️ BOOT: timeout en refresh_saldo_real(forzado=True), continuo arranque.")
+            try:
+                agregar_evento("⚠️ BOOT: timeout saldo inicial; arranque continúa (saldo en background).")
+            except Exception:
+                pass
+            asyncio.create_task(refresh_saldo_real(forzado=True))
+        except Exception as e:
+            print(f"⚠️ BOOT: fallo refresh_saldo_real(forzado=True): {e}. Continúo arranque.")
+            try:
+                agregar_evento(f"⚠️ BOOT: fallo saldo inicial ({e}); arranque continúa.")
+            except Exception:
+                pass
         valor = obtener_valor_saldo()
         if valor is not None:
             inicializar_saldo_real(valor)
 
-        set_etapa("BOOT_03", "Backfill y primer entrenamiento")
-        # Backfill IA desde los logs enriquecidos
+        set_etapa("BOOT_03", "Backfill y primer entrenamiento (background)")
+        print("🧭 BOOT: BOOT_03 programado en background (no bloqueante).")
         try:
-            backfill_incremental(ultimas=1500)
-        except Exception as e:
-            agregar_evento(f"⚠️ IA: error en backfill inicial: {e}")
-
-        # Intentar un primer entrenamiento, si ya hay suficientes filas
-        try:
-            maybe_retrain(force=True)
-        except Exception as e:
-            agregar_evento(f"⚠️ IA: error al intentar entrenar tras el backfill: {e}")
-
-        # Diagnóstico BOOT de desalineación campeón/dataset + degradación temporal (no bloquea operativa)
-        try:
-            meta_boot = _ORACLE_CACHE.get("meta") or leer_model_meta() or {}
-            audit_boot = auditar_refresh_campeon_stale(meta_boot, force_log=True)
-            if bool(audit_boot.get("needs_review", False)):
-                maybe_retrain(force=True)
-            auditar_degradacion_temporal_modelo()
-        except Exception as e:
-            agregar_evento(f"⚠️ IA: auditoría boot parcial con error: {e}")
+            agregar_evento("🧭 BOOT: BOOT_03 en background (main loop continúa).")
+        except Exception:
+            pass
+        asyncio.create_task(_boot03_background_warmup())
 
         set_etapa("BOOT_04", "Sincronizando HUD con CSV")
         # Pasada inicial para sincronizar HUD con CSV existentes
