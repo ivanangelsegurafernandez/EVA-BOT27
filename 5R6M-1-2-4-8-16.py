@@ -13205,7 +13205,6 @@ def mostrar_panel(force: bool = False):
                         and (float(p_oper_b) >= float(thr_oper))
                     )
                     etiqueta_bot = f"C{'✅' if c_ok else '❌'}|O{'✅' if o_ok else '❌'}"
-                    st_b["hud_etiqueta_superior"] = etiqueta_bot
                     tags.append(f"{b}:{etiqueta_bot}")
                 tags_line = "🏷️ Etiquetas bot: " + " · ".join(tags)
                 print(padding + Fore.CYAN + tags_line)
@@ -13501,24 +13500,8 @@ def mostrar_panel(force: bool = False):
 
     for bot in BOT_NAMES:
         r_visual = list(estado_bots[bot].get("resultados_visual", []) or [])
-        r_session = list(estado_bots[bot].get("resultados", []) or [])
-        r_boot = list(estado_bots[bot].get("resultados_visual_boot", []) or [])
-        r_overlay = build_resultados_visual_overlay_from_label(bot)
-        if r_visual:
-            r = list(r_visual)
-            fuente_franja = "resultados_visual"
-        elif r_session:
-            r = list(r_session)
-            fuente_franja = "resultados"
-        elif r_boot:
-            r = list(r_boot)
-            fuente_franja = "resultados_visual_boot"
-        elif r_overlay:
-            r = list(r_overlay)
-            fuente_franja = "overlay_label"
-        else:
-            r = []
-            fuente_franja = "vacia"
+        r = list(r_visual)
+        fuente_franja = "resultados_visual" if r else "vacia"
         try:
             now_src = float(time.time())
             src_map = globals().setdefault("_HUD_FRANJA_SOURCE_LOG_TS", {})
@@ -13526,17 +13509,12 @@ def mostrar_panel(force: bool = False):
             if (now_src - last_src) >= 45.0:
                 if fuente_franja == "resultados_visual":
                     agregar_evento(f"👁️ {bot} franja visual usando resultados_visual")
-                elif fuente_franja == "resultados_visual_boot":
-                    agregar_evento(f"👁️ {bot} franja visual usando resultados_visual_boot (fallback)")
-                elif fuente_franja == "overlay_label":
-                    agregar_evento(f"👁️ {bot} franja visual usando overlay_label")
                 elif fuente_franja == "vacia":
-                    agregar_evento(f"👁️ {bot} franja visual vacía (sin datos de sesión ni boot)")
+                    agregar_evento(f"👁️ {bot} franja visual vacía")
                 src_map[bot] = now_src
         except Exception:
             pass
         token = "REAL" if owner_visual == bot else "DEMO"
-        estado_bots[bot]["token"] = token
         src = estado_bots[bot].get("fuente")
 
         # Token + origen
