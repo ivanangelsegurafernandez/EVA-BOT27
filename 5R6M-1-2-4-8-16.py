@@ -17069,7 +17069,7 @@ def _schedule_maybe_retrain_bg(force: bool = False, source: str = "tick") -> boo
 
 
 async def main():
-    global salir, pausado, reinicio_manual, SALDO_INICIAL
+    global salir, pausado, reinicio_manual, SALDO_INICIAL, LIMPIEZA_PANEL_HASTA
     global PENDIENTE_FORZAR_BOT, PENDIENTE_FORZAR_INICIO, PENDIENTE_FORZAR_EXPIRA, REAL_OWNER_LOCK
     global REAL_LOCK_MISMATCH_SINCE
 
@@ -17110,7 +17110,7 @@ async def main():
             agregar_evento("🧭 BOOT: inicio reiniciar_completo().")
         except Exception:
             pass
-        reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=15, modo_suave=True)
+        reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=0, modo_suave=True)
         print("✅ BOOT: fin reiniciar_completo()")
         try:
             agregar_evento("✅ BOOT: fin reiniciar_completo().")
@@ -17187,8 +17187,13 @@ async def main():
             pass
         try:
             if not MODAL_ACTIVO:
+                LIMPIEZA_PANEL_HASTA = 0.0
+                try:
+                    agregar_evento("🧭 BOOT: limpieza visual liberada para render temprano HUD.")
+                except Exception:
+                    pass
                 with RENDER_LOCK:
-                    mostrar_panel()
+                    mostrar_panel(force=True)
             print("✅ BOOT: primer render HUD completado.")
             try:
                 agregar_evento("✅ BOOT: primer render HUD completado.")
