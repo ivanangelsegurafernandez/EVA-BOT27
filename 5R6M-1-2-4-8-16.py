@@ -646,6 +646,10 @@ EMBUDO_FINAL_REAL_OK = "REAL_OK"
 EMBUDO_FINAL_REAL_MICRO = EMBUDO_FINAL_REAL_OK
 EMBUDO_FINAL_REAL_NORMAL = EMBUDO_FINAL_REAL_OK
 EMBUDO_FINAL_SHADOW_OK = EMBUDO_FINAL_WAIT_SOFT
+OVERRIDE_REZAGADA_ENABLE = True
+OVERRIDE_REZAGADA_MIN_VALID = 5
+OVERRIDE_REZAGADA_GREENS_OK = (4, 5)
+OVERRIDE_REZAGADA_REDS_OK = (1, 2)
 EMBUDO_CANDIDATE_RESCUE_ENABLE = True
 EMBUDO_CANDIDATE_RESCUE_MIN_PROB = 0.52
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER = False
@@ -15294,6 +15298,95 @@ def _embudo_main_decision_coherent(
         return False, ("main_reject:gap_guard" if not bool(guard_gap_ok) else "main_reject:guardrail"), ctx_strong
     return True, "main_ok", ctx_strong
 
+def _override_columna_rezagada_directa(candidatos: list, estado: dict, bot_names: list[str]) -> dict | None:
+    """Override directo a REAL por columna más reciente casi verde con 1-2 rojos rezagados."""
+    if not bool(OVERRIDE_REZAGADA_ENABLE):
+        return None
+    try:
+        bots = list(bot_names or [])
+        cols = _construir_matriz_resultados_columnas(estado if isinstance(estado, dict) else {}, bots, window=40)
+        if not cols:
+            return None
+        col = dict(cols[0] or {})
+        valids = int(col.get("total_validos", 0) or 0)
+        greens = int(col.get("total_verdes", 0) or 0)
+        reds = int(col.get("total_rojos", 0) or 0)
+        if valids < int(OVERRIDE_REZAGADA_MIN_VALID):
+            return None
+        if greens not in tuple(OVERRIDE_REZAGADA_GREENS_OK):
+            return None
+        if reds not in tuple(OVERRIDE_REZAGADA_REDS_OK):
+            return None
+        cells = dict(col.get("cells", {}) or {})
+        red_bots = [str(b) for b, m in cells.items() if str(b) in bots and m == "R"]
+        if len(red_bots) not in (1, 2):
+            return None
+
+        c_map = {str(c[1]): c for c in list(candidatos or []) if isinstance(c, (list, tuple)) and len(c) >= 3}
+
+        def _f(st: dict, *keys: str) -> float:
+            for k in keys:
+                v = st.get(k, None)
+                if isinstance(v, (int, float)):
+                    return float(v)
+            return 0.0
+
+        def _snapshot(bot: str) -> dict:
+            st = dict((estado.get(bot, {}) if isinstance(estado, dict) else {}) or {})
+            cand = c_map.get(str(bot))
+            prob_oper = float(cand[2]) if (cand is not None and len(cand) > 2 and isinstance(cand[2], (int, float))) else _f(
+                st, "prob_ia_oper", "ia_prob_operativa", "ia_prob_cal_model", "ia_prob", "probabilidad_ia"
+            )
+            return {
+                "bot": str(bot),
+                "prob_oper": float(prob_oper),
+                "score_hibrido": _f(st, "ia_score_hibrido"),
+                "hist_wr": _f(st, "porcentaje_exito", "ia_evidence_wr"),
+                "payout": _f(st, "payout"),
+                "ctx": _f(st, "mrv_score_zona", "ia_suceso_idx", "ia_regime_score"),
+            }
+
+        ranking_debug = [_snapshot(b) for b in red_bots]
+        if len(ranking_debug) == 1:
+            sel = ranking_debug[0]
+            sel_case = "1X"
+            reason = "columna_verde_1x_rezagada"
+        else:
+            ordered = sorted(
+                ranking_debug,
+                key=lambda r: (
+                    -float(r.get("prob_oper", 0.0) or 0.0),
+                    -float(r.get("score_hibrido", 0.0) or 0.0),
+                    -float(r.get("hist_wr", 0.0) or 0.0),
+                    -float(r.get("payout", 0.0) or 0.0),
+                    -float(r.get("ctx", 0.0) or 0.0),
+                    str(r.get("bot", "")),
+                ),
+            )
+            sel = dict(ordered[0] or {})
+            sel_case = "2X"
+            reason = "columna_verde_2x_rezagada_ranking"
+            ranking_debug = ordered
+
+        selected_bot = str(sel.get("bot", "") or "")
+        if selected_bot not in bots:
+            return None
+        return {
+            "triggered": True,
+            "selected_bot": selected_bot,
+            "selected_case": sel_case,
+            "greens": int(greens),
+            "reds": int(reds),
+            "valids": int(valids),
+            "red_bots": list(red_bots),
+            "ranking_debug": list(ranking_debug),
+            "selected_prob": float(sel.get("prob_oper", 0.0) or 0.0),
+            "selected_score_hibrido": float(sel.get("score_hibrido", 0.0) or 0.0),
+            "reason": str(reason),
+        }
+    except Exception:
+        return None
+
 
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
     """Embudo final: decisión principal por MRV+IA; dyn_gate/legacy solo guardrail/telemetría."""
@@ -17136,7 +17229,49 @@ async def main():
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
                         candidatos_pre_embudo = list(candidatos or [])
 
-                        embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
+                        override_rezagada = _override_columna_rezagada_directa(candidatos, estado_bots, BOT_NAMES)
+                        if isinstance(override_rezagada, dict) and bool(override_rezagada.get("triggered", False)):
+                            selected_bot = str(override_rezagada.get("selected_bot", "") or "").strip()
+                            selected_prob = float(override_rezagada.get("selected_prob", 0.0) or 0.0)
+                            rec = next((c for c in list(candidatos or []) if str(c[1]) == selected_bot), None)
+                            if rec is None:
+                                st_res = estado_bots.get(selected_bot, {}) if isinstance(estado_bots, dict) else {}
+                                rec = (
+                                    float(st_res.get("ia_score_hibrido", selected_prob) or selected_prob),
+                                    str(selected_bot),
+                                    float(selected_prob),
+                                    float(selected_prob),
+                                    float(st_res.get("ia_regime_score", 0.0) or 0.0),
+                                    int(st_res.get("ia_evidence_n", 0) or 0),
+                                    float(st_res.get("ia_evidence_wr", 0.0) or 0.0),
+                                    float(st_res.get("ia_evidence_lb", 0.0) or 0.0),
+                                )
+                            candidatos = [rec]
+                            embudo = _registrar_estado_embudo({
+                                "decision_final": EMBUDO_FINAL_REAL_OK,
+                                "decision_reason": "override_columna_rezagada_directa",
+                                "risk_mode": "REAL_OK",
+                                "soft_wait_reason": "",
+                                "hard_block_reason": "",
+                                "real_source": "OVERRIDE_COLUMNA_REZAGADA",
+                                "top1_bot": str(selected_bot),
+                                "top1_prob": float(selected_prob),
+                                "top2_bot": None,
+                                "top2_prob": 0.0,
+                                "gap_value": 0.0,
+                            })
+                            if str(override_rezagada.get("selected_case", "")) == "1X":
+                                agregar_evento(
+                                    f"🔥 Override columna rezagada: caso=1X bot={selected_bot} "
+                                    f"greens={int(override_rezagada.get('greens', 0) or 0)} reds={int(override_rezagada.get('reds', 0) or 0)} -> REAL directo"
+                                )
+                            else:
+                                agregar_evento(
+                                    f"🔥 Override columna rezagada: caso=2X bot={selected_bot} "
+                                    f"reds={list(override_rezagada.get('red_bots', []) or [])} -> gana por fuerza comparativa -> REAL directo"
+                                )
+                        else:
+                            embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
                         decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
                             agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
