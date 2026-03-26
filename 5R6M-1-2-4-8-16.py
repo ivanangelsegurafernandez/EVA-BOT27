@@ -593,6 +593,7 @@ PATTERN_COL80_HYBRID_DELTA_CAP = 0.012
 PATTERN_COL80_UNA_X_RESCUE_MAX_EXTRA_ROOF_PTS = 0.35
 FORCE_REAL_COLVERDE_ENABLE = True
 FORCE_REAL_COLVERDE_LOOKBACK = 3
+FORCE_REAL_COLVERDE_SOLO_MODE = True
 PATTERN_COL_LAST_STATE = {
     "green_ratio_col_actual": None,
     "total_verdes_col_actual": 0,
@@ -1562,6 +1563,9 @@ EMBUDO_DECISION_STATE = {
     "force_real_colverde_reason": "",
     "force_real_colverde_compare_detail": "",
     "force_real_colverde_selected_by": "",
+    "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
+    "real_authority": "FORCE_REAL_COLVERDE" if bool(FORCE_REAL_COLVERDE_SOLO_MODE) else "MIXED",
+    "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
 }
 
 try:
@@ -13200,13 +13204,20 @@ def mostrar_panel(force: bool = False):
             )
             print(
                 padding + Fore.CYAN +
+                f"🧷 FORCE_REAL_COLVERDE_SOLO_MODE={'ON' if int(emb.get('force_real_colverde_solo_mode',0) or 0) else 'OFF'} "
+                f"REAL_AUTHORITY={emb.get('real_authority','MIXED')} "
+                f"STANDBY_OTHERS={'ON' if int(emb.get('standby_others',0) or 0) else 'OFF'}"
+            )
+            print(
+                padding + Fore.CYAN +
                 f"🟥 FORCE_REAL_COLVERDE={emb.get('force_real_colverde_state','NONE')} "
                 f"greens={int(emb.get('force_real_colverde_green_count',0) or 0)} "
                 f"reds={int(emb.get('force_real_colverde_red_count',0) or 0)} "
                 f"target_bot={emb.get('force_real_colverde_target_bot') or '--'} "
                 f"selected_by={emb.get('force_real_colverde_selected_by') or '--'} "
                 f"reason={emb.get('force_real_colverde_reason') or '--'} "
-                f"impact={'REAL_DIRECT' if str(emb.get('force_real_colverde_state','NONE')) == 'ACTIVE' else '--'}"
+                f"impact={'REAL_DIRECT' if str(emb.get('force_real_colverde_state','NONE')) == 'ACTIVE' else 'NO_REAL'} "
+                f"others={'STANDBY' if int(emb.get('standby_others',0) or 0) else 'ACTIVE'}"
             )
 
             ref_racha = ultimo_bot_real if ultimo_bot_real in BOT_NAMES else "--"
@@ -15345,6 +15356,9 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
         "force_real_colverde_reason": "",
         "force_real_colverde_compare_detail": "",
         "force_real_colverde_selected_by": "",
+        "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
+        "real_authority": "FORCE_REAL_COLVERDE" if bool(FORCE_REAL_COLVERDE_SOLO_MODE) else "MIXED",
+        "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
     }
     try:
         if isinstance(EMBUDO_DECISION_STATE, dict):
@@ -15629,6 +15643,9 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 "force_real_colverde_reason": str(force_colverde.get("force_real_colverde_reason", "") or ""),
                 "force_real_colverde_compare_detail": str(force_colverde.get("force_real_colverde_compare_detail", "") or ""),
                 "force_real_colverde_selected_by": str(force_colverde.get("force_real_colverde_selected_by", "") or ""),
+                "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
+                "real_authority": "FORCE_REAL_COLVERDE" if bool(FORCE_REAL_COLVERDE_SOLO_MODE) else "MIXED",
+                "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
             })
 
         if (force_state == "ACTIVE") and (force_target in BOT_NAMES):
@@ -15662,6 +15679,41 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
                 "force_real_colverde_reason": str(force_colverde.get("force_real_colverde_reason", "") or ""),
                 "force_real_colverde_compare_detail": str(force_colverde.get("force_real_colverde_compare_detail", "") or ""),
                 "force_real_colverde_selected_by": str(force_colverde.get("force_real_colverde_selected_by", "") or ""),
+                "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
+                "real_authority": "FORCE_REAL_COLVERDE",
+                "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
+            })
+
+        if bool(FORCE_REAL_COLVERDE_SOLO_MODE):
+            return _registrar_estado_embudo({
+                "decision_final": EMBUDO_FINAL_WAIT_SOFT,
+                "decision_reason": "force_colverde_solo_no_match",
+                "gate_quality": "standby_others",
+                "risk_mode": "WAIT_SOFT",
+                "soft_wait_reason": "force_colverde_solo_no_match",
+                "hard_block_reason": "",
+                "top1_bot": top1_bot,
+                "top2_bot": top2_bot,
+                "gap_value": gap_value,
+                "top1_prob": top1_prob,
+                "top2_prob": top2_prob,
+                "degrade_from": "force_colverde_solo",
+                "ia_real_backed": 0,
+                "real_source": "OPERATIVO_NO_IA",
+                "ia_model_mature": int(ia_model_mature),
+                "legacy_estado_real": str(estado_real or "NORMAL"),
+                "legacy_pilot_governs": 0,
+                "force_real_colverde_enable": int(force_colverde.get("force_real_colverde_enable", 0) or 0),
+                "force_real_colverde_state": str(force_state),
+                "force_real_colverde_target_bot": str(force_target),
+                "force_real_colverde_red_count": int(force_colverde.get("force_real_colverde_red_count", 0) or 0),
+                "force_real_colverde_green_count": int(force_colverde.get("force_real_colverde_green_count", 0) or 0),
+                "force_real_colverde_reason": str(force_colverde.get("force_real_colverde_reason", "") or ""),
+                "force_real_colverde_compare_detail": str(force_colverde.get("force_real_colverde_compare_detail", "") or ""),
+                "force_real_colverde_selected_by": str(force_colverde.get("force_real_colverde_selected_by", "") or ""),
+                "force_real_colverde_solo_mode": 1,
+                "real_authority": "FORCE_REAL_COLVERDE",
+                "standby_others": 1,
             })
 
         decision = EMBUDO_FINAL_WAIT_SOFT
@@ -15900,6 +15952,9 @@ def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real:
             "force_real_colverde_reason": str(force_colverde.get("force_real_colverde_reason", "") or ""),
             "force_real_colverde_compare_detail": str(force_colverde.get("force_real_colverde_compare_detail", "") or ""),
             "force_real_colverde_selected_by": str(force_colverde.get("force_real_colverde_selected_by", "") or ""),
+            "force_real_colverde_solo_mode": int(FORCE_REAL_COLVERDE_SOLO_MODE),
+            "real_authority": "FORCE_REAL_COLVERDE" if bool(FORCE_REAL_COLVERDE_SOLO_MODE) else "MIXED",
+            "standby_others": int(bool(FORCE_REAL_COLVERDE_SOLO_MODE)),
         })
     except Exception:
         return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
@@ -17504,6 +17559,14 @@ async def main():
                             agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
                             candidatos = []
                         elif decision_final == EMBUDO_FINAL_WAIT_SOFT:
+                            solo_mode_active = bool(int(embudo.get("force_real_colverde_solo_mode", int(FORCE_REAL_COLVERDE_SOLO_MODE)) or 0))
+                            if solo_mode_active:
+                                agregar_evento(
+                                    f"🟥 FORCE_REAL_COLVERDE={embudo.get('force_real_colverde_state','NONE')} "
+                                    f"impact=NO_REAL others=STANDBY reason={embudo.get('decision_reason') or embudo.get('soft_wait_reason') or '--'}"
+                                )
+                                candidatos = []
+                                continue
                             rescue_applied = False
                             wait_reason_emb = str(embudo.get("soft_wait_reason") or embudo.get("decision_reason") or "")
                             top1_rescue = str(embudo.get("top1_bot") or "").strip()
