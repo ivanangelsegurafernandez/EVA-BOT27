@@ -16640,8 +16640,12 @@ def _cargar_datos_bot_sync(bot, token_actual):
             estado_bots[bot]["resultados"].append(resultado)
             rv = estado_bots[bot].setdefault("resultados_visual", [])
             rv.append(resultado)
-            if len(rv) > 120:
-                del rv[:-120]
+            if len(rv) > 40:
+                del rv[:-40]
+            try:
+                agregar_evento(f"➕ {bot} cierre nuevo añadido a sesión y franja visual")
+            except Exception:
+                pass
             estado_bots[bot]["tamano_muestra"] += 1
 
             if resultado == "GANANCIA":
@@ -17337,7 +17341,7 @@ async def main():
             pass
         if bool(HUD_SESSION_ONLY):
             try:
-                agregar_evento("📍 HUD_SESSION_ONLY activo: no se hidrata historial viejo.")
+                agregar_evento("📍 HUD_SESSION_ONLY activo: sin histórico visual al arranque")
             except Exception:
                 pass
             for _b in BOT_NAMES:
@@ -17345,10 +17349,7 @@ async def main():
                 SESSION_BASE_ROWS[_b] = int(base_rows)
                 SNAPSHOT_FILAS[_b] = int(base_rows)
                 estado_bots[_b]["resultados"] = []
-                try:
-                    hidratar_historial_visual_bot(_b, max_items=40)
-                except Exception:
-                    estado_bots[_b]["resultados_visual"] = []
+                estado_bots[_b]["resultados_visual"] = []
                 estado_bots[_b]["ultimo_resultado"] = None
                 estado_bots[_b]["ganancias"] = 0
                 estado_bots[_b]["perdidas"] = 0
@@ -17356,8 +17357,7 @@ async def main():
                 estado_bots[_b]["porcentaje_exito"] = None
                 estado_bots[_b]["historial_hidratado"] = True
                 try:
-                    vis_n = int(len(estado_bots[_b].get("resultados_visual", []) or []))
-                    agregar_evento(f"🧹 {_b} HUD sesión reiniciado; snapshot base={base_rows}; visual={vis_n}")
+                    agregar_evento(f"🧹 {_b} sesión HUD reiniciada en vacío")
                 except Exception:
                     pass
         loop = asyncio.get_running_loop()
