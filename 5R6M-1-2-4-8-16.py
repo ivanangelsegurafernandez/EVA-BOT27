@@ -17448,6 +17448,13 @@ async def main():
                 estado_bots[_b]["boot_visual_seed_logged"] = False
                 estado_bots[_b]["boot_visual_handover_logged"] = False
                 try:
+                    hidratar_historial_visual_bot(_b, 40)
+                except Exception as e:
+                    try:
+                        agregar_evento(f"⚠️ {_b} no se pudo hidratar resultados_visual al boot: {e}")
+                    except Exception:
+                        pass
+                try:
                     agregar_evento(f"🧹 {_b} sesión estadística sigue en cero")
                 except Exception:
                     pass
