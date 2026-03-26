@@ -1581,6 +1581,10 @@ estado_bots = {
     bot: {
         "resultados": [], 
         "resultados_visual": [],
+        "resultados_visual_boot": [],
+        "hud_etiqueta_superior": "",
+        "boot_visual_seed_logged": False,
+        "boot_visual_handover_logged": False,
         "token": "DEMO", 
         "trigger_real": False,
         "ganancias": 0, 
@@ -3310,6 +3314,33 @@ def inferir_resultado_cierre(fila_dict) -> str | None:
     except Exception:
         pass
     return None
+
+def _etiqueta_superior_a_resultado_visual(tag: str | None) -> str:
+    """
+    Convierte etiqueta visual superior del HUD a marca de franja inferior.
+    Política conservadora:
+      - doble confirmación positiva -> GANANCIA
+      - doble negativa -> PÉRDIDA
+      - mixto/ambiguo -> INDEFINIDO
+    """
+    raw = str(tag or "").strip()
+    if not raw:
+        return "INDEFINIDO"
+    t = normalize("NFKD", raw).encode("ASCII", "ignore").decode("ASCII").upper()
+    ok = ("C✅" in raw and "O✅" in raw) or ("COK" in t and "OOK" in t) or ("C1" in t and "O1" in t)
+    ko = ("C❌" in raw and "O❌" in raw) or ("CX" in t and "OX" in t) or ("C0" in t and "O0" in t)
+    if ok:
+        return "GANANCIA"
+    if ko:
+        return "PÉRDIDA"
+    return "INDEFINIDO"
+
+def seed_resultados_visual_desde_etiquetas(tag: str | None) -> str:
+    """
+    Helper puro: traduce una etiqueta superior a marca visual temporal.
+    No modifica estado interno ni acumula historial.
+    """
+    return _etiqueta_superior_a_resultado_visual(tag)
 
 _CIERRE_RECOVERY_LOG_TS = {}
 def _log_cierre_recovery_event(bot: str, kind: str, msg: str, cooldown_s: float = 20.0) -> None:
@@ -13159,7 +13190,9 @@ def mostrar_panel(force: bool = False):
                         and ia_prob_valida(b, max_age_s=12.0)
                         and (float(p_oper_b) >= float(thr_oper))
                     )
-                    tags.append(f"{b}:C{'✅' if c_ok else '❌'}|O{'✅' if o_ok else '❌'}")
+                    etiqueta_bot = f"C{'✅' if c_ok else '❌'}|O{'✅' if o_ok else '❌'}"
+                    st_b["hud_etiqueta_superior"] = etiqueta_bot
+                    tags.append(f"{b}:{etiqueta_bot}")
                 tags_line = "🏷️ Etiquetas bot: " + " · ".join(tags)
                 print(padding + Fore.CYAN + tags_line)
                 _runtime_audit_append(tags_line)
@@ -13442,9 +13475,19 @@ def mostrar_panel(force: bool = False):
 
     # Sincronía visual dura: si hay owner REAL en memoria, la tabla SIEMPRE lo refleja.
     owner_visual = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+    try:
+        now_hud = float(time.time())
+        last_hud_src = float(globals().get("_HUD_SOURCE_REAL_ONLY_LOG_TS", 0.0) or 0.0)
+        if (now_hud - last_hud_src) >= 30.0:
+            agregar_evento("🧹 HUD inferior: fuente = cierres reales de sesión")
+            agregar_evento("👁️ Etiqueta superior mantenida solo como telemetría")
+            globals()["_HUD_SOURCE_REAL_ONLY_LOG_TS"] = now_hud
+    except Exception:
+        pass
 
     for bot in BOT_NAMES:
-        r = list(estado_bots[bot].get("resultados_visual", estado_bots[bot].get("resultados", [])) or [])
+        r_session = list(estado_bots[bot].get("resultados", []) or [])
+        r = list(r_session)
         token = "REAL" if owner_visual == bot else "DEMO"
         estado_bots[bot]["token"] = token
         src = estado_bots[bot].get("fuente")
@@ -14343,12 +14386,15 @@ def resetear_incremental_y_modelos(borrar_modelos: bool = True):
 def resetear_estado_hud(estado_bots: dict):
     for bot in list(estado_bots.keys()):
         estado_bots[bot].update({
-            "resultados": [], "ganancias": 0, "perdidas": 0,
+            "resultados": [], "resultados_visual": [], "resultados_visual_boot": [], "ganancias": 0, "perdidas": 0,
             "porcentaje_exito": None, "tamano_muestra": 0,
             "prob_ia": None, "prob_ia_oper": None, "token": "DEMO",
             "fuente": None, "modo_ia": "low_data",
             "ia_seniales": 0, "ia_aciertos": 0, "ia_fallos": 0, "ia_senal_pendiente": False,
-            "ia_prob_senal": None
+            "ia_prob_senal": None,
+            "hud_etiqueta_superior": "",
+            "boot_visual_seed_logged": False,
+            "boot_visual_handover_logged": False
         })
 
 def limpieza_dura():
@@ -14624,8 +14670,17 @@ def backfill_incremental(ultimas=500):
                         continue
                     with open(inc, "a", newline="", encoding="utf-8") as f:
                         w = csv.DictWriter(f, fieldnames=cols)
+                        logged_schema_filter = False
                         for rd in nuevas_filas:
-                            w.writerow(rd)
+                            extras = [k for k in rd.keys() if k not in cols]
+                            if extras and (not logged_schema_filter):
+                                logged_schema_filter = True
+                                try:
+                                    agregar_evento("🛠️ Backfill dict filtrado al schema canónico")
+                                except Exception:
+                                    pass
+                            rd_safe = {k: rd.get(k, None) for k in cols}
+                            w.writerow(rd_safe)
                         f.flush(); os.fsync(f.fileno())
         agregar_evento("✅ IA: backfill incremental completado.")
     except Exception as e:
@@ -17350,14 +17405,18 @@ async def main():
                 SNAPSHOT_FILAS[_b] = int(base_rows)
                 estado_bots[_b]["resultados"] = []
                 estado_bots[_b]["resultados_visual"] = []
+                estado_bots[_b]["resultados_visual_boot"] = []
+                estado_bots[_b]["hud_etiqueta_superior"] = ""
                 estado_bots[_b]["ultimo_resultado"] = None
                 estado_bots[_b]["ganancias"] = 0
                 estado_bots[_b]["perdidas"] = 0
                 estado_bots[_b]["tamano_muestra"] = 0
                 estado_bots[_b]["porcentaje_exito"] = None
                 estado_bots[_b]["historial_hidratado"] = True
+                estado_bots[_b]["boot_visual_seed_logged"] = False
+                estado_bots[_b]["boot_visual_handover_logged"] = False
                 try:
-                    agregar_evento(f"🧹 {_b} sesión HUD reiniciada en vacío")
+                    agregar_evento(f"🧹 {_b} sesión estadística sigue en cero")
                 except Exception:
                     pass
         loop = asyncio.get_running_loop()
