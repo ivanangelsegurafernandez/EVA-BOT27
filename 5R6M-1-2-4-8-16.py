@@ -3342,6 +3342,20 @@ def seed_resultados_visual_desde_etiquetas(tag: str | None) -> str:
     """
     return _etiqueta_superior_a_resultado_visual(tag)
 
+def build_resultados_visual_overlay_from_label(bot: str) -> list[str]:
+    """
+    Construye overlay temporal para la franja inferior desde etiqueta superior.
+    Puro: no persiste ni modifica estado.
+    """
+    if bot not in BOT_NAMES:
+        return []
+    st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+    tag = st.get("hud_etiqueta_superior", None)
+    marca = seed_resultados_visual_desde_etiquetas(tag)
+    if marca in ("GANANCIA", "PÉRDIDA", "INDEFINIDO"):
+        return [str(marca)]
+    return []
+
 _CIERRE_RECOVERY_LOG_TS = {}
 def _log_cierre_recovery_event(bot: str, kind: str, msg: str, cooldown_s: float = 20.0) -> None:
     """Log mínimo con cooldown para evitar spam por cierres repetidos."""
@@ -13489,6 +13503,7 @@ def mostrar_panel(force: bool = False):
         r_visual = list(estado_bots[bot].get("resultados_visual", []) or [])
         r_session = list(estado_bots[bot].get("resultados", []) or [])
         r_boot = list(estado_bots[bot].get("resultados_visual_boot", []) or [])
+        r_overlay = build_resultados_visual_overlay_from_label(bot)
         if r_visual:
             r = list(r_visual)
             fuente_franja = "resultados_visual"
@@ -13498,6 +13513,9 @@ def mostrar_panel(force: bool = False):
         elif r_boot:
             r = list(r_boot)
             fuente_franja = "resultados_visual_boot"
+        elif r_overlay:
+            r = list(r_overlay)
+            fuente_franja = "overlay_label"
         else:
             r = []
             fuente_franja = "vacia"
@@ -13510,6 +13528,8 @@ def mostrar_panel(force: bool = False):
                     agregar_evento(f"👁️ {bot} franja visual usando resultados_visual")
                 elif fuente_franja == "resultados_visual_boot":
                     agregar_evento(f"👁️ {bot} franja visual usando resultados_visual_boot (fallback)")
+                elif fuente_franja == "overlay_label":
+                    agregar_evento(f"👁️ {bot} franja visual usando overlay_label")
                 elif fuente_franja == "vacia":
                     agregar_evento(f"👁️ {bot} franja visual vacía (sin datos de sesión ni boot)")
                 src_map[bot] = now_src
