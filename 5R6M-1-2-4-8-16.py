@@ -1479,6 +1479,8 @@ def write_token_atomic(path, content):
 # 3) fulll48: intermedio, baja muestra.
 # 4) fulll49/fulll46: sobreconfianza alta y peor hit-rate reciente.
 BOT_NAMES = ["fulll47", "fulll50", "fulll45", "fulll48", "fulll49", "fulll46"]
+HUD_SESSION_ONLY = True
+SESSION_BASE_ROWS = {bot: 0 for bot in BOT_NAMES}
 IA53_TRIGGERED = {bot: False for bot in BOT_NAMES}
 IA53_LAST_TS = {bot: 0.0 for bot in BOT_NAMES}
 TOKEN_FILE = "token_actual.txt"
@@ -16428,11 +16430,12 @@ def _cargar_datos_bot_sync(bot, token_actual):
     ruta = f"registro_enriquecido_{bot}.csv"
     if not os.path.exists(ruta):
         return
-    try:
-        if not bool(estado_bots.get(bot, {}).get("historial_hidratado", False)):
-            hidratar_historial_resultados_bot(bot, max_items=40)
-    except Exception:
-        pass
+    if not bool(HUD_SESSION_ONLY):
+        try:
+            if not bool(estado_bots.get(bot, {}).get("historial_hidratado", False)):
+                hidratar_historial_resultados_bot(bot, max_items=40)
+        except Exception:
+            pass
 
     try:
         snapshot = SNAPSHOT_FILAS.get(bot, 0)
@@ -17125,7 +17128,8 @@ async def _boot04_background_sync():
     token_actual_loop = "--"
     for bot in BOT_NAMES:
         try:
-            await asyncio.to_thread(hidratar_historial_resultados_bot, bot, 40)
+            if not bool(HUD_SESSION_ONLY):
+                await asyncio.to_thread(hidratar_historial_resultados_bot, bot, 40)
             await asyncio.wait_for(cargar_datos_bot(bot, token_actual_loop), timeout=2.0)
             try:
                 agregar_evento(f"✅ BOOT_04 sync inicial: {bot}")
@@ -17289,6 +17293,26 @@ async def main():
             agregar_evento("✅ BOOT: fin reiniciar_completo().")
         except Exception:
             pass
+        if bool(HUD_SESSION_ONLY):
+            try:
+                agregar_evento("📍 HUD_SESSION_ONLY activo: no se hidrata historial viejo.")
+            except Exception:
+                pass
+            for _b in BOT_NAMES:
+                base_rows = int(contar_filas_csv(_b) or 0)
+                SESSION_BASE_ROWS[_b] = int(base_rows)
+                SNAPSHOT_FILAS[_b] = int(base_rows)
+                estado_bots[_b]["resultados"] = []
+                estado_bots[_b]["ultimo_resultado"] = None
+                estado_bots[_b]["ganancias"] = 0
+                estado_bots[_b]["perdidas"] = 0
+                estado_bots[_b]["tamano_muestra"] = 0
+                estado_bots[_b]["porcentaje_exito"] = None
+                estado_bots[_b]["historial_hidratado"] = True
+                try:
+                    agregar_evento(f"🧹 {_b} HUD sesión reiniciado; snapshot base={base_rows}")
+                except Exception:
+                    pass
         loop = asyncio.get_running_loop()
         set_main_loop(loop)
         print("🧭 BOOT: inicio refresh_saldo_real(forzado=True)")
