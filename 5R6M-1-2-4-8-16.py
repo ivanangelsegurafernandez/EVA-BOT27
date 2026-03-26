@@ -16428,6 +16428,11 @@ def _cargar_datos_bot_sync(bot, token_actual):
     ruta = f"registro_enriquecido_{bot}.csv"
     if not os.path.exists(ruta):
         return
+    try:
+        if not bool(estado_bots.get(bot, {}).get("historial_hidratado", False)):
+            hidratar_historial_resultados_bot(bot, max_items=40)
+    except Exception:
+        pass
 
     try:
         snapshot = SNAPSHOT_FILAS.get(bot, 0)
@@ -17120,6 +17125,7 @@ async def _boot04_background_sync():
     token_actual_loop = "--"
     for bot in BOT_NAMES:
         try:
+            await asyncio.to_thread(hidratar_historial_resultados_bot, bot, 40)
             await asyncio.wait_for(cargar_datos_bot(bot, token_actual_loop), timeout=2.0)
             try:
                 agregar_evento(f"✅ BOOT_04 sync inicial: {bot}")
@@ -17140,6 +17146,64 @@ async def _boot04_background_sync():
         agregar_evento("🏁 BOOT_04 fin (background).")
     except Exception:
         pass
+
+def hidratar_historial_resultados_bot(bot: str, max_items: int = 40) -> int:
+    """Reconstruye historial visual desde cierres en CSV, independiente de SNAPSHOT incremental."""
+    b = str(bot)
+    if b not in BOT_NAMES:
+        return 0
+    st = estado_bots.get(b, {}) if isinstance(estado_bots, dict) else {}
+    if bool(st.get("historial_hidratado", False)):
+        return int(len(list(st.get("resultados", []) or [])))
+
+    ruta = f"registro_enriquecido_{b}.csv"
+    if not os.path.exists(ruta):
+        estado_bots[b]["historial_hidratado"] = True
+        return 0
+    try:
+        df = pd.read_csv(ruta, encoding="utf-8", on_bad_lines="skip")
+    except Exception:
+        estado_bots[b]["historial_hidratado"] = True
+        return 0
+    if df is None or df.empty:
+        estado_bots[b]["historial_hidratado"] = True
+        return 0
+
+    hist = []
+    for _, row in df.iterrows():
+        fila = canonicalizar_campos_bot_maestro(row.to_dict())
+        ts_raw = fila.get("trade_status", fila.get("status", fila.get("contract_status", "")))
+        ts = normalizar_trade_status(ts_raw)
+        if ts != "CERRADO":
+            continue
+        res = normalizar_resultado(fila.get("resultado", fila.get("result", "")))
+        if res not in ("GANANCIA", "PÉRDIDA"):
+            res = inferir_resultado_cierre(fila)
+        if res in ("GANANCIA", "PÉRDIDA"):
+            hist.append(str(res))
+
+    hist_tail = hist[-max(1, int(max_items)):] if hist else []
+    g = int(sum(1 for x in hist if x == "GANANCIA"))
+    p = int(sum(1 for x in hist if x == "PÉRDIDA"))
+    n = int(g + p)
+
+    estado_bots[b]["resultados"] = list(hist_tail)
+    estado_bots[b]["ultimo_resultado"] = (hist_tail[-1] if hist_tail else None)
+    estado_bots[b]["ganancias"] = int(g)
+    estado_bots[b]["perdidas"] = int(p)
+    estado_bots[b]["tamano_muestra"] = int(n)
+    estado_bots[b]["porcentaje_exito"] = ((float(g) / float(n)) * 100.0) if n > 0 else None
+    estado_bots[b]["historial_hidratado"] = True
+    try:
+        SNAPSHOT_FILAS[b] = int(len(df))
+    except Exception:
+        pass
+
+    if n > 0:
+        _log_cierre_recovery_event(b, "hydrated_ok", f"✅ {b} historial hidratado: {n} cierres / {len(hist_tail)} visuales", cooldown_s=120.0)
+    else:
+        _log_cierre_recovery_event(b, "hydrated_empty", f"⚠️ {b} sin cierres históricos hidratables", cooldown_s=120.0)
+    return int(len(hist_tail))
 
 _RETRAIN_BG_TASK = None
 _RETRAIN_BG_OMIT_LOG_TS = 0.0
