@@ -17015,6 +17015,36 @@ async def _boot03_background_warmup():
     except Exception:
         pass
 
+async def _boot04_background_sync():
+    """Sincronización inicial HUD/CSV en background para no bloquear arranque visible."""
+    try:
+        agregar_evento("🚀 BOOT_04 inicio (background): sincronización inicial HUD/CSV.")
+    except Exception:
+        pass
+    token_actual_loop = "--"
+    for bot in BOT_NAMES:
+        try:
+            await asyncio.wait_for(cargar_datos_bot(bot, token_actual_loop), timeout=2.0)
+            try:
+                agregar_evento(f"✅ BOOT_04 sync inicial: {bot}")
+            except Exception:
+                pass
+        except asyncio.TimeoutError:
+            try:
+                agregar_evento(f"⚠️ BOOT_04 timeout en sync inicial de {bot}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                agregar_evento(f"⚠️ BOOT_04 error en sync inicial de {bot}: {e}")
+            except Exception:
+                pass
+        await asyncio.sleep(0)
+    try:
+        agregar_evento("🏁 BOOT_04 fin (background).")
+    except Exception:
+        pass
+
 
 async def main():
     global salir, pausado, reinicio_manual, SALDO_INICIAL
@@ -17095,6 +17125,11 @@ async def main():
         if valor is not None:
             inicializar_saldo_real(valor)
 
+        print("🧭 BOOT: preparando BOOT_03 (background).")
+        try:
+            agregar_evento("🧭 BOOT: preparando BOOT_03 (background).")
+        except Exception:
+            pass
         set_etapa("BOOT_03", "Backfill y primer entrenamiento (background)")
         print("🧭 BOOT: BOOT_03 programado en background (no bloqueante).")
         try:
@@ -17102,12 +17137,54 @@ async def main():
         except Exception:
             pass
         asyncio.create_task(_boot03_background_warmup())
+        print("✅ BOOT: BOOT_03 programado.")
 
-        set_etapa("BOOT_04", "Sincronizando HUD con CSV")
-        # Pasada inicial para sincronizar HUD con CSV existentes
-        token_actual_loop = "--"  # Dummy para carga inicial
-        for bot in BOT_NAMES:
-            await cargar_datos_bot(bot, token_actual_loop)
+        print("🧭 BOOT: preparando BOOT_04 (background).")
+        try:
+            agregar_evento("🧭 BOOT: preparando BOOT_04 (background).")
+        except Exception:
+            pass
+        set_etapa("BOOT_04", "Sincronización inicial HUD/CSV (background)")
+        print("🧭 BOOT: BOOT_04 programado en background (no bloqueante).")
+        try:
+            agregar_evento("🧭 BOOT: BOOT_04 en background (main loop continúa).")
+        except Exception:
+            pass
+        asyncio.create_task(_boot04_background_sync())
+        print("✅ BOOT: BOOT_04 programado.")
+        await asyncio.sleep(0)
+
+        try:
+            set_etapa("BOOT_04A", "Primer render temprano HUD")
+        except Exception:
+            pass
+        print("🧭 BOOT: primer render HUD.")
+        try:
+            agregar_evento("🧭 BOOT: primer render HUD.")
+        except Exception:
+            pass
+        try:
+            if not MODAL_ACTIVO:
+                with RENDER_LOCK:
+                    mostrar_panel()
+            print("✅ BOOT: primer render HUD completado.")
+            try:
+                agregar_evento("✅ BOOT: primer render HUD completado.")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                agregar_evento(f"⚠️ Primer render HUD falló: {e}")
+            except Exception:
+                pass
+        await asyncio.sleep(0)
+
+        print("🧭 BOOT: entrando al while principal.")
+        try:
+            agregar_evento("🧭 BOOT: entrando al while principal.")
+        except Exception:
+            pass
+        first_loop_logged = False
 
         while True:
             if salir:
@@ -17122,6 +17199,13 @@ async def main():
                 await refresh_saldo_real(forzado=True)
 
             try:  
+                if not first_loop_logged:
+                    print("✅ TICK_00: loop principal vivo.")
+                    try:
+                        agregar_evento("✅ TICK_00: loop principal vivo.")
+                    except Exception:
+                        pass
+                    first_loop_logged = True
                 set_etapa("TICK_01")
                 token_actual_loop = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else (leer_token_actual() or next((b for b in BOT_NAMES if estado_bots.get(b, {}).get("token") == "REAL"), None))
 
