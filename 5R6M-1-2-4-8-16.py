@@ -16516,7 +16516,17 @@ def _cargar_datos_bot_sync(bot, token_actual):
                     cierre_recuperado = True
                     _log_cierre_recovery_event(bot, "recovered", f"✅ {bot} cierre recuperado por inferencia: {resultado}")
                 else:
-                    _log_cierre_recovery_event(bot, "uninferable", f"⚠️ {bot} cierre CERRADO sin resultado inferible")
+                    # Fallback final defensivo por aliases textuales simples.
+                    for _k in ("resultado", "result", "status", "contract_status"):
+                        _rn = normalizar_resultado(fila_dict.get(_k, ""))
+                        if _rn in ("GANANCIA", "PÉRDIDA"):
+                            resultado = _rn
+                            cierre_recuperado = True
+                            break
+                    if cierre_recuperado:
+                        _log_cierre_recovery_event(bot, "recovered_fallback", f"✅ {bot} cierre recuperado por fallback: {resultado}")
+                    else:
+                        _log_cierre_recovery_event(bot, "uninferable", f"⚠️ {bot} closed_without_inferable_result")
 
             try:
                 ep_dec = int(float(fila_dict.get("epoch", 0) or 0))
