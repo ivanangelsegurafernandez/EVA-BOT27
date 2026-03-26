@@ -3307,6 +3307,20 @@ def inferir_resultado_cierre(fila_dict) -> str | None:
     except Exception:
         pass
     return None
+
+_CIERRE_RECOVERY_LOG_TS = {}
+def _log_cierre_recovery_event(bot: str, kind: str, msg: str, cooldown_s: float = 20.0) -> None:
+    """Log mínimo con cooldown para evitar spam por cierres repetidos."""
+    try:
+        key = f"{str(bot)}|{str(kind)}"
+        now = float(time.time())
+        last = float(_CIERRE_RECOVERY_LOG_TS.get(key, 0.0) or 0.0)
+        if (now - last) < float(cooldown_s):
+            return
+        _CIERRE_RECOVERY_LOG_TS[key] = now
+        agregar_evento(str(msg))
+    except Exception:
+        pass
 def normalizar_trade_status(ts):
     """
     Normaliza trade_status a canónico del Maestro:
@@ -16487,7 +16501,12 @@ def _cargar_datos_bot_sync(bot, token_actual):
             except Exception:
                 pass
 
-            trade_status = normalizar_trade_status(fila_dict.get("trade_status", ""))
+            trade_status_raw = (
+                fila_dict.get("trade_status", None)
+                if fila_dict.get("trade_status", None) not in (None, "")
+                else fila_dict.get("status", fila_dict.get("contract_status", ""))
+            )
+            trade_status = normalizar_trade_status(trade_status_raw)
             resultado = normalizar_resultado(fila_dict.get("resultado", ""))
             cierre_recuperado = False
             if (trade_status == "CERRADO") and (resultado not in ("GANANCIA", "PÉRDIDA")):
@@ -16495,15 +16514,9 @@ def _cargar_datos_bot_sync(bot, token_actual):
                 if inferido in ("GANANCIA", "PÉRDIDA"):
                     resultado = str(inferido)
                     cierre_recuperado = True
-                    try:
-                        agregar_evento(f"✅ {bot} cierre recuperado por inferencia: {resultado}")
-                    except Exception:
-                        pass
+                    _log_cierre_recovery_event(bot, "recovered", f"✅ {bot} cierre recuperado por inferencia: {resultado}")
                 else:
-                    try:
-                        agregar_evento(f"⚠️ {bot} cierre CERRADO sin resultado inferible")
-                    except Exception:
-                        pass
+                    _log_cierre_recovery_event(bot, "uninferable", f"⚠️ {bot} cierre CERRADO sin resultado inferible")
 
             try:
                 ep_dec = int(float(fila_dict.get("epoch", 0) or 0))
