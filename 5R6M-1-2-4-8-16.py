@@ -387,7 +387,7 @@ IA_CALIB_GOAL_THRESHOLD = IA_OBJETIVO_REAL_THR  # objetivo real: medir cierres f
 IA_CALIB_MIN_CLOSED = 200  # mínimo recomendado para considerar estable la auditoría
 REAL_GO_N_MIN = 180
 REAL_GO_CLOSED_MIN = 50
-REAL_EARLY_MICRO_OVERRIDE_ENABLE = True
+REAL_EARLY_MICRO_OVERRIDE_ENABLE = False
 REAL_EARLY_MICRO_OVERRIDE_MIN_N = 100
 REAL_EARLY_MICRO_OVERRIDE_MIN_AUC = 0.65
 REAL_EARLY_MICRO_OVERRIDE_MIN_PROB_MARGIN = 0.00
@@ -470,7 +470,7 @@ LEGACY_ENABLE_PATTERN_COLUMNS = False
 LEGACY_ENABLE_SHADOW_MICRO = not LEGACY_QUARANTINE_ENABLE
 LEGACY_ENABLE_MICRO_STRONG_FALLBACK = not LEGACY_QUARANTINE_ENABLE
 LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE = not LEGACY_QUARANTINE_ENABLE
-AUTO_REAL_MICRO_EARLY_CONFIRM_ENABLE = bool(LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE)
+AUTO_REAL_MICRO_EARLY_CONFIRM_ENABLE = False
 AUTO_REAL_MICRO_EARLY_CONFIRM_MARGIN = 0.02
 AUTO_REAL_MICRO_EARLY_CONFIRM_DEFICIT_MAX = 1
 
@@ -646,11 +646,11 @@ EMBUDO_FINAL_REAL_OK = "REAL_OK"
 EMBUDO_FINAL_REAL_MICRO = EMBUDO_FINAL_REAL_OK
 EMBUDO_FINAL_REAL_NORMAL = EMBUDO_FINAL_REAL_OK
 EMBUDO_FINAL_SHADOW_OK = EMBUDO_FINAL_WAIT_SOFT
-OVERRIDE_REZAGADA_ENABLE = True
+OVERRIDE_REZAGADA_ENABLE = False
 OVERRIDE_REZAGADA_MIN_VALID = 5
 OVERRIDE_REZAGADA_GREENS_OK = (4, 5)
 OVERRIDE_REZAGADA_REDS_OK = (1, 2)
-EMBUDO_CANDIDATE_RESCUE_ENABLE = True
+EMBUDO_CANDIDATE_RESCUE_ENABLE = False
 EMBUDO_CANDIDATE_RESCUE_MIN_PROB = 0.52
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER = False
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK = True
@@ -659,7 +659,7 @@ EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS = 1.5
 EMBUDO_CANDIDATE_RESCUE_ALLOW_CONFIRM_PENDING = False
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER_OR_CONTEXT = True
 EMBUDO_CANDIDATE_RESCUE_BLOCK_ON_HARD_GUARD = True
-RED_BISAGRA_ENABLE = True
+RED_BISAGRA_ENABLE = False
 RED_BISAGRA_LOOKBACK = 8
 RED_BISAGRA_MIN_GREEN_RATIO = 0.66
 RED_BISAGRA_MIN_CONSEC_WINS_BEFORE_RED = 2
@@ -695,7 +695,7 @@ MRV_FEATURE_NAMES = [
 ]
 
 # === PERFIL_COMUN_FLEX: capa adicional de activación flexible por familias ===
-PERFIL_COMUN_FLEX_ENABLE = True
+PERFIL_COMUN_FLEX_ENABLE = False
 PERFIL_COMUN_FLEX_WINDOW = 40
 PERFIL_COMUN_FLEX_MIN_VALID = 18
 PERFIL_COMUN_FLEX_GREEN40_SOFT_MIN = 22
@@ -714,7 +714,7 @@ PERFIL_COMUN_FLEX_MRV_VIDA_MIN = 0.55
 PERFIL_COMUN_FLEX_MRV_RUPT_MAX = 0.68
 PERFIL_COMUN_FLEX_ESTADOS_OK = ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA")
 PERFIL_COMUN_FLEX_SHORT_VALID_MAX = 27
-PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE = True
+PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE = False
 PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_SCORE_MIN = 0.42
 PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_VIDA_MIN = 0.50
 PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_RUPT_MAX = 0.68
@@ -2626,8 +2626,8 @@ def _set_ui_token_holder(holder: str | None):
                 estado_bots[b]["remate_start"] = None
                 estado_bots[b]["remate_reason"] = ""
 
-                # Ciclo vuelve a default (solo al perder REAL)
-                estado_bots[b]["ciclo_actual"] = 1
+                # IMPORTANTE: no resetear ciclo martingala aquí.
+                # Este flujo es visual/sync de holder, no cierre legítimo de secuencia.
 
     except Exception:
         pass
@@ -2706,7 +2706,17 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
             return False
         _last_real_push_ts[bot] = now
 
-        ciclo_obj = max(1, min(int(ciclo), MAX_CICLOS))
+        if origen in ("orden_real", "manual", "token_sync"):
+            ciclo_obj = _marti_ciclo_operativo_actual()
+        else:
+            ciclo_obj = max(1, min(int(ciclo), MAX_CICLOS))
+        monto_obj = _marti_monto_por_ciclo(ciclo_obj)
+        try:
+            agregar_evento(
+                f"🧮 Martingala operativa: perdidas={int(marti_ciclos_perdidos)} -> ciclo={int(ciclo_obj)} -> monto={float(monto_obj):.2f}"
+            )
+        except Exception:
+            pass
 
         # Baseline REAL: a partir de aquí recién aceptamos cierres para este turno.
         try:
@@ -2765,6 +2775,12 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
         _set_ui_token_holder(bot)
         estado_bots[bot]["trigger_real"] = True
         estado_bots[bot]["ciclo_actual"] = ciclo_obj
+        try:
+            agregar_evento(
+                f"🚨 REAL activado: bot={bot} ciclo={int(ciclo_obj)} monto={float(monto_obj):.2f} origen={origen}"
+            )
+        except Exception:
+            pass
 
         # Congelar probabilidad de señal al entrar REAL (si no estaba ya fijada)
         # para evitar divergencia visual/ACK durante toda la operación.
@@ -3096,11 +3112,7 @@ async def escribir_token_actual(bot):
         except Exception:
             pass
 
-        ciclo_objetivo = estado_bots.get(bot, {}).get("ciclo_actual", 1)
-        try:
-            ciclo_objetivo = int(ciclo_objetivo)
-        except Exception:
-            ciclo_objetivo = 1
+        ciclo_objetivo = _marti_ciclo_operativo_actual()
 
         # ✅ origen "sync_ui": NO debe escribir orden_real.json
         activar_real_inmediato(bot, ciclo_objetivo, origen="token_sync")
@@ -3126,7 +3138,7 @@ def activar_remate(bot: str, reason: str):
 
 # Cerrar por WIN
 def cerrar_por_win(bot: str, reason: str):
-    global REAL_OWNER_LOCK, REAL_COOLDOWN_UNTIL_TS
+    global REAL_OWNER_LOCK, REAL_COOLDOWN_UNTIL_TS, marti_ciclos_perdidos, marti_paso
 
     # Liberar token REAL en archivo primero (commit de salida)
     liberado = False
@@ -3147,6 +3159,8 @@ def cerrar_por_win(bot: str, reason: str):
     # Liberación consolidada: recién aquí memoria/UI pasan a DEMO
     REAL_OWNER_LOCK = None
     REAL_COOLDOWN_UNTIL_TS = time.time() + float(_cooldown_post_trade_s())
+    marti_ciclos_perdidos = 0
+    marti_paso = 0
 
     # Limpieza total de “estado REAL” para evitar REAL fantasma
     try:
@@ -8640,9 +8654,10 @@ def cerrar_por_fin_de_ciclo(bot: str, reason: str):
 
     # Limpieza total de “estado REAL” para evitar HUD/estado fantasma
     try:
+        ciclo_mirror = _marti_ciclo_operativo_actual()
         estado_bots[bot]["token"] = "DEMO"
         estado_bots[bot]["trigger_real"] = False
-        estado_bots[bot]["ciclo_actual"] = 1
+        estado_bots[bot]["ciclo_actual"] = ciclo_mirror
         estado_bots[bot]["modo_real_anunciado"] = False
         estado_bots[bot]["fuente"] = None
 
@@ -8776,57 +8791,55 @@ def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_opera
         marti_ciclos_perdidos = 0
         marti_paso = 0
         bots_usados_en_esta_marti = []
+        if bot in BOT_NAMES:
+            estado_bots[bot]["ciclo_actual"] = 1
         _marti_audit_record("cierre_ganancia", ciclo=ciclo_operado, bot=bot, detalle="reinicio_a_C1")
         marti_audit_run_id = int(marti_audit_run_id) + 1
         marti_audit_ultimo_ciclo_ordenado = None
-        agregar_evento(f"✅ Martingala reiniciada en C1 por GANANCIA ({marti_audit_resumen_linea()}).")
+        agregar_evento("✅ WIN REAL: reset martingala -> ciclo=1")
     elif res == "PÉRDIDA":
         # Registrar el bot operado en la corrida activa para forzar rotación C2..C{MAX_CICLOS}.
         if bot in BOT_NAMES and bot not in bots_usados_en_esta_marti:
             bots_usados_en_esta_marti.append(bot)
 
-        # Robustez anti-desincronización:
-        # si conocemos el ciclo realmente operado, el próximo estado de pérdidas
-        # debe ser al menos ese ciclo (p.ej. perder en C2 => pérdidas=2 => próximo C3).
-        try:
-            ciclo_ref = int(ciclo_operado) if ciclo_operado is not None else 0
-        except Exception:
-            ciclo_ref = 0
-        marti_ciclos_perdidos = min(
-            MAX_CICLOS,
-            max(int(marti_ciclos_perdidos) + 1, max(0, ciclo_ref))
-        )
+        marti_ciclos_perdidos = min(MAX_CICLOS, int(marti_ciclos_perdidos) + 1)
         # Si ya culminó C{MAX_CICLOS}, reinicia a C1 para el siguiente turno.
         if int(marti_ciclos_perdidos) >= int(MAX_CICLOS):
             marti_ciclos_perdidos = 0
             marti_paso = 0
             bots_usados_en_esta_marti = []
+            if bot in BOT_NAMES:
+                estado_bots[bot]["ciclo_actual"] = 1
             _marti_audit_record("cierre_tope", ciclo=ciclo_operado, bot=bot, detalle=f"tope=C{int(MAX_CICLOS)}")
             marti_audit_run_id = int(marti_audit_run_id) + 1
             marti_audit_ultimo_ciclo_ordenado = None
-            try:
-                agregar_evento(
-                    f"🧯 Martingala C{int(MAX_CICLOS)}/C{int(MAX_CICLOS)} completada: reinicio automático a C1 ({marti_audit_resumen_linea()})."
-                )
-            except Exception:
-                pass
+            agregar_evento("💀 LOSS REAL final: fin de martingala -> reset ciclo=1")
         else:
             marti_paso = min(MAX_CICLOS - 1, int(marti_ciclos_perdidos))
+            prox_ciclo = _marti_ciclo_operativo_actual()
+            prox_monto = _marti_monto_por_ciclo(prox_ciclo)
+            if bot in BOT_NAMES:
+                estado_bots[bot]["ciclo_actual"] = prox_ciclo
+            agregar_evento(
+                f"❌ LOSS REAL: martingala avanza -> perdidas={int(marti_ciclos_perdidos)} próximo_ciclo={int(prox_ciclo)} monto={float(prox_monto):.2f}"
+            )
     else:
         return
-
-    ciclo_sig = int(marti_paso) + 1
-    bot_msg = f" [{bot}]" if bot else ""
-    if res == "PÉRDIDA" and bots_usados_en_esta_marti:
-        try:
-            usados = ",".join(bots_usados_en_esta_marti)
-            agregar_evento(f"🔁 Rotación martingala activa: usados={usados} | próximo ciclo=C{ciclo_sig}")
-        except Exception:
-            pass
-    agregar_evento(
-        f"🔁 Martingala{bot_msg}: resultado={res} | pérdidas seguidas={marti_ciclos_perdidos}/{MAX_CICLOS} | próximo ciclo={ciclo_sig}"
-    )
     agregar_evento(f"🧾 MARTI-AUDIT: {marti_audit_resumen_linea()}")
+
+def _marti_ciclo_operativo_actual() -> int:
+    """Fuente única de verdad del ciclo operativo REAL: pérdidas + 1."""
+    try:
+        return max(1, min(int(MAX_CICLOS), int(marti_ciclos_perdidos) + 1))
+    except Exception:
+        return 1
+
+def _marti_monto_por_ciclo(ciclo: int) -> float:
+    try:
+        idx = max(0, min(len(MARTI_ESCALADO) - 1, int(ciclo) - 1))
+        return float(MARTI_ESCALADO[idx])
+    except Exception:
+        return float(MARTI_ESCALADO[0])
 
 def ciclo_martingala_siguiente() -> int:
     """
@@ -8834,7 +8847,7 @@ def ciclo_martingala_siguiente() -> int:
     - ciclo = pérdidas_consecutivas + 1, con límites [1..MAX_CICLOS]
     """
     try:
-        return max(1, min(int(MAX_CICLOS), int(marti_ciclos_perdidos) + 1))
+        return _marti_ciclo_operativo_actual()
     except Exception:
         return 1
 
@@ -16895,9 +16908,9 @@ async def main():
                                 if res in ("GANANCIA", "PÉRDIDA"):
                                     registrar_resultado_real(res, bot=bot, ciclo_operado=ciclo)
                                     if res == "GANANCIA":
-                                        cerrar_por_fin_de_ciclo(bot, "Ganancia en REAL (fin de turno)")
+                                        cerrar_por_win(bot, "Ganancia en REAL (fin de turno)")
                                     else:
-                                        cerrar_por_fin_de_ciclo(bot, "Pérdida en REAL (fin de turno)")
+                                        cerrar_por_fin_de_ciclo(bot, "Pérdida en REAL (avance de ciclo)" if int(marti_ciclos_perdidos) > 0 else "Pérdida final en REAL (fin de secuencia)")
                                     activo_real = None
                                     break
 
