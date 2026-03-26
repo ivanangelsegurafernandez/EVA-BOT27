@@ -3335,28 +3335,12 @@ def _etiqueta_superior_a_resultado_visual(tag: str | None) -> str:
         return "PÉRDIDA"
     return "INDEFINIDO"
 
-def seed_resultados_visual_desde_etiquetas(bot: str, max_items: int = 40) -> int:
+def seed_resultados_visual_desde_etiquetas(tag: str | None) -> str:
     """
-    Siembra franja visual de boot usando la misma etiqueta que consume el HUD superior.
-    NO toca contadores de sesión.
+    Helper puro: traduce una etiqueta superior a marca visual temporal.
+    No modifica estado interno ni acumula historial.
     """
-    if bot not in BOT_NAMES:
-        return 0
-    st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
-    rb = list(st.get("resultados_visual_boot", []) or [])
-    tag = st.get("hud_etiqueta_superior", None)
-    marca = _etiqueta_superior_a_resultado_visual(tag)
-    if marca in ("GANANCIA", "PÉRDIDA", "INDEFINIDO"):
-        rb.append(marca)
-        rb = rb[-max(1, int(max_items)):]
-        st["resultados_visual_boot"] = rb
-        if not bool(st.get("boot_visual_seed_logged", False)):
-            try:
-                agregar_evento(f"👁️ {bot} semilla visual boot cargada: {len(rb)} marcas")
-            except Exception:
-                pass
-            st["boot_visual_seed_logged"] = True
-    return int(len(rb))
+    return _etiqueta_superior_a_resultado_visual(tag)
 
 _CIERRE_RECOVERY_LOG_TS = {}
 def _log_cierre_recovery_event(bot: str, kind: str, msg: str, cooldown_s: float = 20.0) -> None:
@@ -13491,18 +13475,19 @@ def mostrar_panel(force: bool = False):
 
     # Sincronía visual dura: si hay owner REAL en memoria, la tabla SIEMPRE lo refleja.
     owner_visual = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+    try:
+        now_hud = float(time.time())
+        last_hud_src = float(globals().get("_HUD_SOURCE_REAL_ONLY_LOG_TS", 0.0) or 0.0)
+        if (now_hud - last_hud_src) >= 30.0:
+            agregar_evento("🧹 HUD inferior: fuente = cierres reales de sesión")
+            agregar_evento("👁️ Etiqueta superior mantenida solo como telemetría")
+            globals()["_HUD_SOURCE_REAL_ONLY_LOG_TS"] = now_hud
+    except Exception:
+        pass
 
     for bot in BOT_NAMES:
-        seed_resultados_visual_desde_etiquetas(bot, max_items=40)
         r_session = list(estado_bots[bot].get("resultados", []) or [])
-        r_boot = list(estado_bots[bot].get("resultados_visual_boot", []) or [])
-        if r_session and (not bool(estado_bots[bot].get("boot_visual_handover_logged", False))):
-            try:
-                agregar_evento(f"➕ {bot} sesión real toma control de la franja visual")
-            except Exception:
-                pass
-            estado_bots[bot]["boot_visual_handover_logged"] = True
-        r = (r_session if r_session else r_boot)
+        r = list(r_session)
         token = "REAL" if owner_visual == bot else "DEMO"
         estado_bots[bot]["token"] = token
         src = estado_bots[bot].get("fuente")
@@ -14691,7 +14676,7 @@ def backfill_incremental(ultimas=500):
                             if extras and (not logged_schema_filter):
                                 logged_schema_filter = True
                                 try:
-                                    agregar_evento("🛠️ backfill dict filtrado al schema canónico")
+                                    agregar_evento("🛠️ Backfill dict filtrado al schema canónico")
                                 except Exception:
                                     pass
                             rd_safe = {k: rd.get(k, None) for k in cols}
