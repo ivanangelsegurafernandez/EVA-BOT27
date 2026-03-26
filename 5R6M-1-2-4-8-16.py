@@ -3315,6 +3315,47 @@ def inferir_resultado_cierre(fila_dict) -> str | None:
         pass
     return None
 
+def _etiqueta_superior_a_resultado_visual(tag: str | None) -> str:
+    """
+    Convierte etiqueta visual superior del HUD a marca de franja inferior.
+    Política conservadora:
+      - doble confirmación positiva -> GANANCIA
+      - doble negativa -> PÉRDIDA
+      - mixto/ambiguo -> INDEFINIDO
+    """
+    raw = str(tag or "").strip()
+    if not raw:
+        return "INDEFINIDO"
+    t = normalize("NFKD", raw).encode("ASCII", "ignore").decode("ASCII").upper()
+    ok = ("C✅" in raw and "O✅" in raw) or ("COK" in t and "OOK" in t) or ("C1" in t and "O1" in t)
+    ko = ("C❌" in raw and "O❌" in raw) or ("CX" in t and "OX" in t) or ("C0" in t and "O0" in t)
+    if ok:
+        return "GANANCIA"
+    if ko:
+        return "PÉRDIDA"
+    return "INDEFINIDO"
+
+def seed_resultados_visual_desde_etiquetas(tag: str | None) -> str:
+    """
+    Helper puro: traduce una etiqueta superior a marca visual temporal.
+    No modifica estado interno ni acumula historial.
+    """
+    return _etiqueta_superior_a_resultado_visual(tag)
+
+def build_resultados_visual_overlay_from_label(bot: str) -> list[str]:
+    """
+    Construye overlay temporal para la franja inferior desde etiqueta superior.
+    Puro: no persiste ni modifica estado.
+    """
+    if bot not in BOT_NAMES:
+        return []
+    st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
+    tag = st.get("hud_etiqueta_superior", None)
+    marca = seed_resultados_visual_desde_etiquetas(tag)
+    if marca in ("GANANCIA", "PÉRDIDA", "INDEFINIDO"):
+        return [str(marca)]
+    return []
+
 _CIERRE_RECOVERY_LOG_TS = {}
 def _log_cierre_recovery_event(bot: str, kind: str, msg: str, cooldown_s: float = 20.0) -> None:
     """Log mínimo con cooldown para evitar spam por cierres repetidos."""
@@ -16676,11 +16717,18 @@ def _cargar_datos_bot_sync(bot, token_actual):
             if cierre_recuperado:
                 fila_dict["resultado"] = str(resultado)
             estado_bots[bot]["ultimo_resultado"] = resultado
+            previo_n = int(len(list(estado_bots[bot].get("resultados", []) or [])))
             estado_bots[bot]["resultados"].append(resultado)
             rv = estado_bots[bot].setdefault("resultados_visual", [])
             rv.append(resultado)
             if len(rv) > 40:
                 del rv[:-40]
+            if previo_n == 0 and (not bool(estado_bots[bot].get("boot_visual_handover_logged", False))):
+                try:
+                    agregar_evento(f"➕ {bot} sesión real toma control de la franja visual")
+                except Exception:
+                    pass
+                estado_bots[bot]["boot_visual_handover_logged"] = True
             try:
                 agregar_evento(f"➕ {bot} cierre nuevo añadido a sesión y franja visual")
             except Exception:
