@@ -3250,11 +3250,63 @@ def normalizar_resultado(texto):
     t = normalize("NFKD", raw).encode("ASCII", "ignore").decode("ASCII").strip().upper()
 
     # Nota: después de ASCII, "PÉRDIDA" se vuelve "PERDIDA"
-    if "PERD" in t or "LOSS" in t:
+    if t in {"W", "WIN", "GREEN", "PROFIT"}:
+        return "GANANCIA"
+    if t in {"L", "LOSS", "LOSE", "RED"}:
         return "PÉRDIDA"
-    if "GAN" in t or "WIN" in t:
+    if "PERD" in t or "LOSS" in t or "LOSE" in t or t.endswith(" RED"):
+        return "PÉRDIDA"
+    if "GAN" in t or "WIN" in t or "PROFIT" in t or t.endswith(" GREEN"):
         return "GANANCIA"
     return "INDEFINIDO"
+
+def inferir_resultado_cierre(fila_dict) -> str | None:
+    """Intenta recuperar GANANCIA/PÉRDIDA en filas CERRADO sin resultado canónico."""
+    d = fila_dict if isinstance(fila_dict, dict) else {}
+
+    for k in ("resultado", "result", "status", "contract_status"):
+        rn = normalizar_resultado(d.get(k))
+        if rn in ("GANANCIA", "PÉRDIDA"):
+            return rn
+
+    for k in ("won", "win", "loss", "result_bin"):
+        v = d.get(k, None)
+        if v is None or str(v).strip() == "":
+            continue
+        sv = str(v).strip().upper()
+        if sv in {"1", "TRUE", "T", "YES", "Y"}:
+            return "GANANCIA" if k != "loss" else "PÉRDIDA"
+        if sv in {"0", "FALSE", "F", "NO", "N"}:
+            return "PÉRDIDA" if k != "loss" else "GANANCIA"
+        try:
+            iv = int(float(sv))
+            if iv == 1:
+                return "GANANCIA" if k != "loss" else "PÉRDIDA"
+            if iv == 0:
+                return "PÉRDIDA" if k != "loss" else "GANANCIA"
+        except Exception:
+            pass
+
+    for k in ("profit", "pnl", "profit_amount"):
+        try:
+            x = float(d.get(k))
+            if x > 0:
+                return "GANANCIA"
+            if x < 0:
+                return "PÉRDIDA"
+        except Exception:
+            pass
+
+    try:
+        sell = float(d.get("sell_price"))
+        buy = float(d.get("buy_price"))
+        if sell > buy:
+            return "GANANCIA"
+        if sell < buy:
+            return "PÉRDIDA"
+    except Exception:
+        pass
+    return None
 def normalizar_trade_status(ts):
     """
     Normaliza trade_status a canónico del Maestro:
@@ -16435,8 +16487,23 @@ def _cargar_datos_bot_sync(bot, token_actual):
             except Exception:
                 pass
 
-            trade_status = str(fila_dict.get("trade_status", "")).strip().upper()
+            trade_status = normalizar_trade_status(fila_dict.get("trade_status", ""))
             resultado = normalizar_resultado(fila_dict.get("resultado", ""))
+            cierre_recuperado = False
+            if (trade_status == "CERRADO") and (resultado not in ("GANANCIA", "PÉRDIDA")):
+                inferido = inferir_resultado_cierre(fila_dict)
+                if inferido in ("GANANCIA", "PÉRDIDA"):
+                    resultado = str(inferido)
+                    cierre_recuperado = True
+                    try:
+                        agregar_evento(f"✅ {bot} cierre recuperado por inferencia: {resultado}")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        agregar_evento(f"⚠️ {bot} cierre CERRADO sin resultado inferible")
+                    except Exception:
+                        pass
 
             try:
                 ep_dec = int(float(fila_dict.get("epoch", 0) or 0))
@@ -16465,6 +16532,7 @@ def _cargar_datos_bot_sync(bot, token_actual):
 
                 # Si el bot marcó CERRADO pero no trajo resultado válido,
                 # cerramos señal pendiente (si existía) sin contaminar historial.
+                # OJO: aquí solo entra si YA falló la inferencia de cierre.
                 if trade_status == "CERRADO":
                     if estado_bots[bot].get("ia_senal_pendiente"):
                         estado_bots[bot]["ia_senal_pendiente"] = False
@@ -16534,6 +16602,8 @@ def _cargar_datos_bot_sync(bot, token_actual):
             #    - Aquí sí actualizamos historial y estadísticas reales
             # =========================
             _registrar_cierre_ctt(bot, fila_dict, resultado)
+            if cierre_recuperado:
+                fila_dict["resultado"] = str(resultado)
             estado_bots[bot]["ultimo_resultado"] = resultado
             estado_bots[bot]["resultados"].append(resultado)
             estado_bots[bot]["tamano_muestra"] += 1
