@@ -1580,6 +1580,7 @@ except NameError:
 estado_bots = {
     bot: {
         "resultados": [], 
+        "resultados_visual": [],
         "token": "DEMO", 
         "trigger_real": False,
         "ganancias": 0, 
@@ -13443,7 +13444,7 @@ def mostrar_panel(force: bool = False):
     owner_visual = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
 
     for bot in BOT_NAMES:
-        r = estado_bots[bot]["resultados"]
+        r = list(estado_bots[bot].get("resultados_visual", estado_bots[bot].get("resultados", [])) or [])
         token = "REAL" if owner_visual == bot else "DEMO"
         estado_bots[bot]["token"] = token
         src = estado_bots[bot].get("fuente")
@@ -16637,6 +16638,10 @@ def _cargar_datos_bot_sync(bot, token_actual):
                 fila_dict["resultado"] = str(resultado)
             estado_bots[bot]["ultimo_resultado"] = resultado
             estado_bots[bot]["resultados"].append(resultado)
+            rv = estado_bots[bot].setdefault("resultados_visual", [])
+            rv.append(resultado)
+            if len(rv) > 120:
+                del rv[:-120]
             estado_bots[bot]["tamano_muestra"] += 1
 
             if resultado == "GANANCIA":
@@ -17209,6 +17214,43 @@ def hidratar_historial_resultados_bot(bot: str, max_items: int = 40) -> int:
         _log_cierre_recovery_event(b, "hydrated_empty", f"⚠️ {b} sin cierres históricos hidratables", cooldown_s=120.0)
     return int(len(hist_tail))
 
+def hidratar_historial_visual_bot(bot: str, max_items: int = 40) -> int:
+    """Hidrata SOLO la franja visual de resultados (sin tocar contadores de sesión)."""
+    b = str(bot)
+    if b not in BOT_NAMES:
+        return 0
+    ruta = f"registro_enriquecido_{b}.csv"
+    if not os.path.exists(ruta):
+        estado_bots[b]["resultados_visual"] = []
+        return 0
+    try:
+        df = pd.read_csv(ruta, encoding="utf-8", on_bad_lines="skip")
+    except Exception:
+        estado_bots[b]["resultados_visual"] = []
+        return 0
+    if df is None or df.empty:
+        estado_bots[b]["resultados_visual"] = []
+        return 0
+
+    visual = []
+    for _, row in df.iterrows():
+        fila = canonicalizar_campos_bot_maestro(row.to_dict())
+        ts_raw = fila.get("trade_status", fila.get("status", fila.get("contract_status", "")))
+        if normalizar_trade_status(ts_raw) != "CERRADO":
+            continue
+        res = normalizar_resultado(fila.get("resultado", fila.get("result", "")))
+        if res not in ("GANANCIA", "PÉRDIDA"):
+            res = inferir_resultado_cierre(fila)
+        if res in ("GANANCIA", "PÉRDIDA"):
+            visual.append(str(res))
+    visual_tail = visual[-max(1, int(max_items)):] if visual else []
+    estado_bots[b]["resultados_visual"] = list(visual_tail)
+    if len(visual_tail) > 0:
+        _log_cierre_recovery_event(b, "visual_hydrated", f"✅ {b} historial visual hidratado: {len(visual_tail)}", cooldown_s=120.0)
+    else:
+        _log_cierre_recovery_event(b, "visual_empty", f"⚠️ {b} sin historial visual hidratable", cooldown_s=120.0)
+    return int(len(visual_tail))
+
 _RETRAIN_BG_TASK = None
 _RETRAIN_BG_OMIT_LOG_TS = 0.0
 def _schedule_maybe_retrain_bg(force: bool = False, source: str = "tick") -> bool:
@@ -17303,6 +17345,10 @@ async def main():
                 SESSION_BASE_ROWS[_b] = int(base_rows)
                 SNAPSHOT_FILAS[_b] = int(base_rows)
                 estado_bots[_b]["resultados"] = []
+                try:
+                    hidratar_historial_visual_bot(_b, max_items=40)
+                except Exception:
+                    estado_bots[_b]["resultados_visual"] = []
                 estado_bots[_b]["ultimo_resultado"] = None
                 estado_bots[_b]["ganancias"] = 0
                 estado_bots[_b]["perdidas"] = 0
@@ -17310,7 +17356,8 @@ async def main():
                 estado_bots[_b]["porcentaje_exito"] = None
                 estado_bots[_b]["historial_hidratado"] = True
                 try:
-                    agregar_evento(f"🧹 {_b} HUD sesión reiniciado; snapshot base={base_rows}")
+                    vis_n = int(len(estado_bots[_b].get("resultados_visual", []) or []))
+                    agregar_evento(f"🧹 {_b} HUD sesión reiniciado; snapshot base={base_rows}; visual={vis_n}")
                 except Exception:
                     pass
         loop = asyncio.get_running_loop()
