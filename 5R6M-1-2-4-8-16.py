@@ -17338,8 +17338,35 @@ async def main():
                                 if live_pre:
                                     top1_rescue = str(live_pre[0][0] or "").strip()
                                     top1_prob_rescue = float(live_pre[0][1] or 0.0)
+                            if top1_rescue in BOT_NAMES:
+                                rec = rec_pre if rec_pre is not None else next((c for c in list(candidatos_pre_embudo or []) if str(c[1]) == top1_rescue), None)
+                                if rec is None:
+                                    st_res = estado_bots.get(top1_rescue, {}) if isinstance(estado_bots, dict) else {}
+                                    rec = (
+                                        float(top1_prob_rescue),
+                                        str(top1_rescue),
+                                        float(top1_prob_rescue),
+                                        float(top1_prob_rescue),
+                                        float(st_res.get("ia_regime_score", 0.0) or 0.0),
+                                        int(st_res.get("ia_evidence_n", 0) or 0),
+                                        float(st_res.get("ia_evidence_wr", 0.0) or 0.0),
+                                        float(st_res.get("ia_evidence_lb", 0.0) or 0.0),
+                                    )
+                                candidatos = [rec]
+                                embudo = _registrar_estado_embudo({
+                                    "decision_final": EMBUDO_FINAL_REAL_OK,
+                                    "decision_reason": "wait_soft_promote_valid_candidate",
+                                    "soft_wait_reason": "",
+                                    "risk_mode": "REAL_OK",
+                                    "gate_quality": "candidate_ok",
+                                    "hard_block_reason": "",
+                                    "top1_bot": str(top1_rescue),
+                                    "top1_prob": float(top1_prob_rescue),
+                                })
+                                rescue_applied = True
                             can_rescue_wait = bool(
-                                EMBUDO_CANDIDATE_RESCUE_ENABLE
+                                (not rescue_applied)
+                                and EMBUDO_CANDIDATE_RESCUE_ENABLE
                                 and (top1_rescue in BOT_NAMES)
                                 and (top1_prob_rescue >= float(EMBUDO_CANDIDATE_RESCUE_MIN_PROB))
                             )
