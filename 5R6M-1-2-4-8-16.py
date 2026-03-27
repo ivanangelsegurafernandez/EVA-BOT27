@@ -378,7 +378,7 @@ AUTO_REAL_LIVE_MIN_BOTS = 3   # mínimos bots con prob viva para calibración po
 IA_METRIC_THRESHOLD = AUTO_REAL_THR_MIN
 # Modo clásico: activación REAL con umbral operativo vigente (hoy 65%, con techo dinámico base 70%).
 # Mantiene lock de un solo bot en REAL y ciclo martingala global en HUD.
-REAL_CLASSIC_GATE = True
+REAL_CLASSIC_GATE = False
 
 # ✅ Umbral SOLO para auditoría/calibración (señales CERRADAS en ia_signals_log)
 # Esto es lo que querías: contar cierres desde 60% sin afectar la operativa.
@@ -669,8 +669,8 @@ RED_BISAGRA_MIN_SCORE_RESCUE = 0.62
 RED_BISAGRA_RESCUE_MIN_PROB = 0.53
 RED_BISAGRA_RESCUE_MAX_EXTRA_ROOF_PTS = 1.20
 RED_BISAGRA_REQUIRE_PATTERN_OK = True
-EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = True
-EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = True
+EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = False
+EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = False
 IA_PROB_POLARIZE_ENABLE = True
 IA_PROB_POLARIZE_FACTOR_RELIABLE = 1.25
 IA_PROB_POLARIZE_FACTOR_UNRELIABLE = 2.05
