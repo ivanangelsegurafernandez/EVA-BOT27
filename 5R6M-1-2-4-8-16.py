@@ -1339,10 +1339,14 @@ saldo_real = "--"
 SALDO_INICIAL = None
 META = None
 META_OBJETIVO_PCT = 0.15  # política vigente: meta operativa +15%
-SALDO_STATUS = "UNKNOWN"  # KNOWN | UNKNOWN
+SALDO_STATUS = "UNKNOWN"  # KNOWN | STALE | UNKNOWN
 SALDO_STATUS_REASON = "BOOTSTRAP_PENDING"
 SALDO_STATUS_DETAIL = ""
 SALDO_STATUS_TS = 0.0
+SALDO_LAST_VALID_VALUE = None
+SALDO_LAST_VALID_TS = 0.0
+SALDO_LAST_EVENT_KEY = ""
+SALDO_LAST_EVENT_TS = 0.0
 meta_mostrada = False
 eventos_recentes = deque(maxlen=8)
 reinicio_forzado = asyncio.Event()
@@ -8135,6 +8139,17 @@ def detectar_cierre_martingala(bot, min_fila=None, require_closed=True, require_
     - expected_ciclo: si existe columna de ciclo, exige coincidencia con ese ciclo.
     """
     path = f"registro_enriquecido_{bot}.csv"
+    diag_cache = globals().setdefault("_CLOSE_DIAG_LAST", {})
+    now_diag = float(time.time())
+    def _diag(msg: str, key: str = ""):
+        try:
+            k = f"{bot}|{key or msg}"
+            prev = float(diag_cache.get(k, 0.0) or 0.0)
+            if (now_diag - prev) >= 20.0:
+                diag_cache[k] = now_diag
+                agregar_evento(f"🔎 CIERRE REAL {bot}: {msg}")
+        except Exception:
+            pass
     if not os.path.exists(path):
         return None
 
@@ -8185,6 +8200,15 @@ def detectar_cierre_martingala(bot, min_fila=None, require_closed=True, require_
 
     if i_res is None:
         return None
+    if require_closed and i_status is None:
+        _diag("fila cierre descartada: falta trade_status", key="missing_trade_status")
+        return None
+    if require_real_token and i_token is None:
+        _diag("fila cierre descartada: falta token/cuenta REAL", key="missing_real_token")
+        return None
+    if (expected_ciclo is not None) and (i_ciclo is None):
+        _diag("fila cierre descartada: falta ciclo_actual/ciclo_martingala", key="missing_ciclo")
+        return None
 
     # Recorremos desde el final (último evento primero)
     for ridx in range(len(rows) - 1, 0, -1):
@@ -8202,20 +8226,25 @@ def detectar_cierre_martingala(bot, min_fila=None, require_closed=True, require_
                 pass
 
         # trade_status si aplica
-        if require_closed and (i_status is not None) and (i_status < len(row)):
-            st = str(row[i_status]).strip().upper()
+        if require_closed and (i_status is not None):
+            st = str(row[i_status]).strip().upper() if i_status < len(row) else ""
+            if not st:
+                _diag(f"fila {fila_num} descartada: trade_status vacío", key="empty_trade_status")
+                continue
             if st not in ("CERRADO", "CLOSED"):
                 continue
 
         # Si el CSV informa token/cuenta, en REAL ignoramos cierres explícitos de DEMO.
-        if require_real_token and (i_token is not None) and (i_token < len(row)):
-            tok_raw = str(row[i_token] or "").strip().upper()
-            if tok_raw:
-                # Heurística robusta: DEMO en Deriv suele venir como VRTC*
-                es_demo = ("DEMO" in tok_raw) or tok_raw.startswith("VRTC")
-                es_real = ("REAL" in tok_raw) or tok_raw.startswith("CR")
-                if es_demo and not es_real:
-                    continue
+        if require_real_token and (i_token is not None):
+            tok_raw = str(row[i_token] or "").strip().upper() if i_token < len(row) else ""
+            if not tok_raw:
+                _diag(f"fila {fila_num} descartada: token/cuenta vacío", key="empty_real_token")
+                continue
+            # Heurística robusta: DEMO en Deriv suele venir como VRTC*
+            es_demo = ("DEMO" in tok_raw) or tok_raw.startswith("VRTC")
+            es_real = ("REAL" in tok_raw) or tok_raw.startswith("CR")
+            if es_demo and not es_real:
+                continue
 
         # resultado
         try:
@@ -8256,10 +8285,12 @@ def detectar_cierre_martingala(bot, min_fila=None, require_closed=True, require_
         if expected_ciclo is not None:
             try:
                 if ciclo is None:
+                    _diag(f"fila {fila_num} descartada: ciclo vacío y expected={expected_ciclo}", key="empty_expected_ciclo")
                     continue
                 if int(ciclo) != int(expected_ciclo):
                     continue
             except Exception:
+                _diag(f"fila {fila_num} descartada: ciclo inválido y expected={expected_ciclo}", key="invalid_expected_ciclo")
                 continue
 
         # payout_total: preferimos extractor (maneja legacy y ratio)
@@ -12314,14 +12345,16 @@ def mostrar_panel(force: bool = False):
     # Saldo actual (estado estructurado)
     try:
         valor = obtener_valor_saldo()
-        saldo_known = (valor is not None) and (str(SALDO_STATUS).upper() == "KNOWN")
-        if saldo_known:
+        status_now = str(SALDO_STATUS).upper()
+        if valor is not None:
             saldo_str = f"{float(valor):.2f}"
-            saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str}"
+            if status_now == "STALE":
+                age_s = max(0, int(time.time() - float(globals().get("SALDO_LAST_VALID_TS", 0.0) or 0.0)))
+                saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str} [STALE {age_s}s]"
+            else:
+                saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str}"
         else:
-            reason_txt = _saldo_status_text(SALDO_STATUS_REASON)
-            detail_txt = f" ({SALDO_STATUS_DETAIL})" if str(SALDO_STATUS_DETAIL or "").strip() else ""
-            saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: -- [{reason_txt}{detail_txt}]"
+            saldo_line = "💰 SALDO EN CUENTA REAL DERIV: -- [SALDO NO DISPONIBLE]"
     except Exception:
         valor = None
         saldo_line = "💰 SALDO EN CUENTA REAL DERIV: -- [SALDO NO DISPONIBLE]"
@@ -13565,6 +13598,15 @@ def forzar_real_manual(bot: str, ciclo: int):
                 pass
 
 
+        requerido = float(MARTI_ESCALADO[ciclo - 1])
+        val = obtener_valor_saldo()
+        if val is None:
+            agregar_evento(f"⛔ Forzar REAL bloqueado en {bot}: saldo no disponible para ciclo #{ciclo}.")
+            return
+        if float(val) < float(requerido):
+            agregar_evento(f"⛔ Forzar REAL bloqueado en {bot}: saldo insuficiente {float(val):.2f} < {float(requerido):.2f} para ciclo #{ciclo}.")
+            return
+
         if not escribir_orden_real(bot, ciclo):
             agregar_evento(f"🔒 Forzar REAL bloqueado para {bot.upper()}: ya hay otro bot en REAL.")
             return
@@ -13574,13 +13616,6 @@ def forzar_real_manual(bot: str, ciclo: int):
         global marti_paso
         marti_paso = ciclo - 1
         estado_bots[bot]["fuente"] = "MANUAL"
-
-        requerido = float(MARTI_ESCALADO[ciclo - 1])
-        val = obtener_valor_saldo()
-        if val is None:
-            agregar_evento(f"⚠️ Saldo no disponible para validar ciclo #{ciclo} en {bot}: {_saldo_status_text(SALDO_STATUS_REASON)}.")
-        elif val < requerido:
-            agregar_evento(f"⚠️ Saldo < requerido para ciclo #{ciclo} en {bot} (pide {requerido}). Intentando igual.")
 
         # escribir_orden_real(...) ya dejó token+HUD sincronizados; evitamos doble token_sync.
         agregar_evento(f"⚡ Forzar REAL: {bot} → ciclo #{ciclo} (fuente=MANUAL)")
@@ -13607,8 +13642,7 @@ def evaluar_semaforo():
         return "🟡", "AVISO", f"Token en uso por {owner}."
     if saldo_val is None:
         reason_txt = _saldo_status_text(SALDO_STATUS_REASON)
-        detail_txt = f" ({SALDO_STATUS_DETAIL})" if str(SALDO_STATUS_DETAIL or "").strip() else ""
-        return "🟡", "SALDO DESCONOCIDO", f"{reason_txt}{detail_txt}."
+        return "🟡", "SALDO DESCONOCIDO", f"{reason_txt}."
     if saldo_val < costo_c1:
         falta = costo_c1 - saldo_val
         return "🟡", "AVISO", f"Saldo < C1 ({costo_c1:.2f}). Faltan {falta:.2f} USD."
@@ -15509,12 +15543,14 @@ def _saldo_status_text(reason: str | None = None) -> str:
         "BALANCE_NOT_READ": "BALANCE NO LEÍDO",
         "BALANCE_PARSE_FAILED": "BALANCE INVÁLIDO",
         "EXCEPTION": "ERROR DE LECTURA DE SALDO",
+        "STALE_READ_FAILED": "SALDO DESACTUALIZADO",
     }
     return mapping.get(r, f"SALDO NO DISPONIBLE ({r})")
 
 
 def _set_saldo_status(status: str, reason: str, detail: str = "", announce: bool = False):
     global SALDO_STATUS, SALDO_STATUS_REASON, SALDO_STATUS_DETAIL, SALDO_STATUS_TS, saldo_real
+    global SALDO_LAST_EVENT_KEY, SALDO_LAST_EVENT_TS
     status = str(status).strip().upper()
     reason = str(reason).strip().upper()
     detail = str(detail or "").strip()
@@ -15527,24 +15563,29 @@ def _set_saldo_status(status: str, reason: str, detail: str = "", announce: bool
     SALDO_STATUS_REASON = reason
     SALDO_STATUS_DETAIL = detail
     SALDO_STATUS_TS = float(time.time())
-    if status != "KNOWN":
+    if status == "UNKNOWN" and globals().get("SALDO_LAST_VALID_VALUE", None) is None:
         saldo_real = "--"
     if announce and changed:
         msg = f"💳 {_saldo_status_text(reason)}"
         if detail:
             msg += f": {detail}"
-        agregar_evento(msg)
+        key = f"{status}|{reason}|{detail[:180]}"
+        now = float(time.time())
+        if (key != str(SALDO_LAST_EVENT_KEY)) or ((now - float(SALDO_LAST_EVENT_TS or 0.0)) >= 25.0):
+            SALDO_LAST_EVENT_KEY = key
+            SALDO_LAST_EVENT_TS = now
+            agregar_evento(msg)
 
 
 # Obtener saldo real
 async def obtener_saldo_real():
-    global saldo_real, ULTIMA_ACT_SALDO
+    global saldo_real, ULTIMA_ACT_SALDO, SALDO_LAST_VALID_VALUE, SALDO_LAST_VALID_TS
     token_demo, token_real = leer_tokens_usuario()
     if not token_real:
-        _set_saldo_status("UNKNOWN", "TOKEN_REAL_MISSING", announce=True)
+        _set_saldo_status("STALE" if SALDO_LAST_VALID_VALUE is not None else "UNKNOWN", "TOKEN_REAL_MISSING", announce=True)
         return
     if not WEBSOCKETS_OK:
-        _set_saldo_status("UNKNOWN", "WEBSOCKET_UNAVAILABLE", announce=True)
+        _set_saldo_status("STALE" if SALDO_LAST_VALID_VALUE is not None else "UNKNOWN", "WEBSOCKET_UNAVAILABLE", announce=True)
         return
     try:
         async with websockets.connect(DERIV_WS_URL) as ws:
@@ -15553,14 +15594,14 @@ async def obtener_saldo_real():
             resp = json.loads(await ws.recv())
             if "error" in resp:
                 detail = str((resp.get("error") or {}).get("message") or "auth rechazado")
-                _set_saldo_status("UNKNOWN", "AUTH_FAILED", detail=detail, announce=True)
+                _set_saldo_status("STALE" if SALDO_LAST_VALID_VALUE is not None else "UNKNOWN", "AUTH_FAILED", detail=detail, announce=True)
                 return
             bal_msg = json.dumps({"balance": 1, "subscribe": 1})
             await ws.send(bal_msg)
             resp = json.loads(await ws.recv())
             if "error" in resp:
                 detail = str((resp.get("error") or {}).get("message") or "balance rechazado")
-                _set_saldo_status("UNKNOWN", "BALANCE_FAILED", detail=detail, announce=True)
+                _set_saldo_status("STALE" if SALDO_LAST_VALID_VALUE is not None else "UNKNOWN", "BALANCE_FAILED", detail=detail, announce=True)
                 return
             balance_obj = resp.get("balance")
             if isinstance(balance_obj, dict) and ("balance" in balance_obj):
@@ -15571,13 +15612,15 @@ async def obtener_saldo_real():
                     return
                 saldo_real = f"{val:.2f}"
                 ULTIMA_ACT_SALDO = time.time()
+                SALDO_LAST_VALID_VALUE = float(val)
+                SALDO_LAST_VALID_TS = float(ULTIMA_ACT_SALDO)
                 _set_saldo_status("KNOWN", "OK", announce=False)
                 if SALDO_INICIAL is None:
                     inicializar_saldo_real(val)
                 return
-            _set_saldo_status("UNKNOWN", "BALANCE_NOT_READ", detail="respuesta sin campo balance", announce=True)
+            _set_saldo_status("STALE" if SALDO_LAST_VALID_VALUE is not None else "UNKNOWN", "BALANCE_NOT_READ", detail="respuesta sin campo balance", announce=True)
     except Exception as e:
-        _set_saldo_status("UNKNOWN", "EXCEPTION", detail=str(e), announce=True)
+        _set_saldo_status("STALE" if SALDO_LAST_VALID_VALUE is not None else "UNKNOWN", "EXCEPTION", detail=str(e), announce=True)
 
 async def refresh_saldo_real(forzado=False):
     global ULTIMA_ACT_SALDO
@@ -15585,13 +15628,21 @@ async def refresh_saldo_real(forzado=False):
         await obtener_saldo_real()
 
 def obtener_valor_saldo():
-    global saldo_real, SALDO_STATUS
-    if str(SALDO_STATUS).upper() != "KNOWN":
-        return None
+    global saldo_real, SALDO_STATUS, SALDO_LAST_VALID_VALUE
     try:
-        return float(saldo_real)
+        val = float(saldo_real)
+        if np.isfinite(val):
+            return val
     except:
-        return None
+        pass
+    if SALDO_LAST_VALID_VALUE is not None:
+        try:
+            val_last = float(SALDO_LAST_VALID_VALUE)
+            if np.isfinite(val_last):
+                return val_last
+        except Exception:
+            pass
+    return None
 
 def inicializar_saldo_real(valor):
     global SALDO_INICIAL, META
@@ -16044,6 +16095,13 @@ async def main():
                                     estado_bots[bot]["real_timeout_first_warn"] = ahora
                                     agregar_evento(f"⏱️ Seguridad: {bot} sin actividad reciente en REAL. Esperando cierre por {REAL_STUCK_FORCE_RELEASE_S}s antes de liberar.")
                                 elif (ahora - first_warn) > REAL_STUCK_FORCE_RELEASE_S:
+                                    try:
+                                        agregar_evento(
+                                            f"🔎 CIERRE REAL {bot}: timeout sin cierre válido "
+                                            f"(require_closed=True, require_real_token=True, expected_ciclo={estado_bots.get(bot, {}).get('ciclo_actual', None)})"
+                                        )
+                                    except Exception:
+                                        pass
                                     agregar_evento(f"🧯 Timeout REAL en {bot}: sin cierre confirmado. Liberando a DEMO sin avanzar martingala.")
                                     agregar_evento(
                                         f"MARTI_MAESTRO: timeout/indefinido -> conserva ciclo {_marti_ciclo_tag(_marti_ciclo_operativo_actual())} y vuelve a DEMO"
