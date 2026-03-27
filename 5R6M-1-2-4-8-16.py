@@ -2627,6 +2627,9 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
             agregar_evento(
                 f"🚨 REAL activado: bot={bot} ciclo={int(ciclo_obj)} monto={float(monto_obj):.2f} origen={origen}"
             )
+            agregar_evento(
+                f"MARTI_MAESTRO: entrada REAL bot={bot} ciclo=C{int(ciclo_obj)} monto={int(float(monto_obj)) if float(monto_obj).is_integer() else float(monto_obj):g}"
+            )
         except Exception:
             pass
 
@@ -3059,6 +3062,7 @@ def cerrar_por_win(bot: str, reason: str):
 
     try:
         agregar_evento(f"✅ WIN: REAL liberado para {bot.upper()} ({reason})")
+        agregar_evento(f"MARTI_MAESTRO: bot={bot} vuelve a DEMO tras cierre REAL")
     except Exception:
         pass
 
@@ -8559,6 +8563,7 @@ def cerrar_por_fin_de_ciclo(bot: str, reason: str):
     # Log visual
     try:
         agregar_evento(f"🔓 Cuenta REAL liberada para {bot.upper()} ({reason})")
+        agregar_evento(f"MARTI_MAESTRO: bot={bot} vuelve a DEMO tras cierre REAL")
     except Exception:
         pass
 
@@ -8619,6 +8624,14 @@ def marti_audit_resumen_linea() -> str:
         return "Audit run#? desvíos=? último=--"
 
 
+def _marti_ciclo_tag(ciclo: int | None) -> str:
+    try:
+        c = max(1, min(int(MAX_CICLOS), int(ciclo or 1)))
+    except Exception:
+        c = 1
+    return f"C{int(c)}"
+
+
 def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_operado: int | None = None):
     """
     Actualiza el contador global de ciclos martingala para el HUD y la próxima
@@ -8635,6 +8648,8 @@ def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_opera
     if bot in BOT_NAMES:
         ultimo_bot_real = bot
 
+    ciclo_real = max(1, min(int(MAX_CICLOS), int(ciclo_operado or _marti_ciclo_operativo_actual())))
+
     if res == "GANANCIA":
         marti_ciclos_perdidos = 0
         marti_paso = 0
@@ -8644,7 +8659,9 @@ def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_opera
         _marti_audit_record("cierre_ganancia", ciclo=ciclo_operado, bot=bot, detalle="reinicio_a_C1")
         marti_audit_run_id = int(marti_audit_run_id) + 1
         marti_audit_ultimo_ciclo_ordenado = None
-        agregar_evento("✅ WIN REAL: reset martingala -> ciclo=1")
+        agregar_evento(
+            f"MARTI_MAESTRO: WIN bot={str(bot or '--')} ciclo={_marti_ciclo_tag(ciclo_real)} -> reset a C1 y vuelve a DEMO"
+        )
     elif res == "PÉRDIDA":
         # Registrar el bot operado en la corrida activa para forzar rotación C2..C{MAX_CICLOS}.
         if bot in BOT_NAMES and bot not in bots_usados_en_esta_marti:
@@ -8661,15 +8678,16 @@ def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_opera
             _marti_audit_record("cierre_tope", ciclo=ciclo_operado, bot=bot, detalle=f"tope=C{int(MAX_CICLOS)}")
             marti_audit_run_id = int(marti_audit_run_id) + 1
             marti_audit_ultimo_ciclo_ordenado = None
-            agregar_evento("💀 LOSS REAL final: fin de martingala -> reset ciclo=1")
+            agregar_evento(
+                f"MARTI_MAESTRO: LOSS bot={str(bot or '--')} ciclo={_marti_ciclo_tag(ciclo_real)} -> reset a C1 y vuelve a DEMO"
+            )
         else:
             marti_paso = min(MAX_CICLOS - 1, int(marti_ciclos_perdidos))
             prox_ciclo = _marti_ciclo_operativo_actual()
-            prox_monto = _marti_monto_por_ciclo(prox_ciclo)
             if bot in BOT_NAMES:
                 estado_bots[bot]["ciclo_actual"] = prox_ciclo
             agregar_evento(
-                f"❌ LOSS REAL: martingala avanza -> perdidas={int(marti_ciclos_perdidos)} próximo_ciclo={int(prox_ciclo)} monto={float(prox_monto):.2f}"
+                f"MARTI_MAESTRO: LOSS bot={str(bot or '--')} ciclo={_marti_ciclo_tag(ciclo_real)} -> siguiente ciclo {_marti_ciclo_tag(prox_ciclo)} y vuelve a DEMO"
             )
     else:
         return
@@ -8734,9 +8752,8 @@ def reset_martingala_por_saldo(ciclo_objetivo: int, saldo_actual: float | None) 
     falta_msg = "saldo no disponible"
     if saldo is not None:
         falta_msg = f"faltan {(monto_necesario - saldo):.2f} USD"
-    agregar_evento(
-        f"🧯 Saldo insuficiente para C{ciclo} ({monto_necesario:.2f} USD): {falta_msg}. Reinicio automático a C1."
-    )
+    agregar_evento(f"MARTI_MAESTRO: saldo insuficiente para C{ciclo} -> reset a C1")
+    agregar_evento(f"🧯 Saldo insuficiente para C{ciclo} ({monto_necesario:.2f} USD): {falta_msg}. Reinicio automático a C1.")
     return True
 def elegir_candidato_rotacion_marti(
     candidatos: list,
@@ -16027,6 +16044,9 @@ async def main():
                                     agregar_evento(f"⏱️ Seguridad: {bot} sin actividad reciente en REAL. Esperando cierre por {REAL_STUCK_FORCE_RELEASE_S}s antes de liberar.")
                                 elif (ahora - first_warn) > REAL_STUCK_FORCE_RELEASE_S:
                                     agregar_evento(f"🧯 Timeout REAL en {bot}: sin cierre confirmado. Liberando a DEMO sin avanzar martingala.")
+                                    agregar_evento(
+                                        f"MARTI_MAESTRO: timeout/indefinido -> conserva ciclo {_marti_ciclo_tag(_marti_ciclo_operativo_actual())} y vuelve a DEMO"
+                                    )
                                     cerrar_por_fin_de_ciclo(bot, "Timeout sin cierre")
                                     activo_real = None
                                     break
@@ -16064,6 +16084,13 @@ async def main():
                                         cerrar_por_win(bot, "Ganancia en REAL (fin de turno)")
                                     else:
                                         cerrar_por_fin_de_ciclo(bot, "Pérdida en REAL (avance de ciclo)" if int(marti_ciclos_perdidos) > 0 else "Pérdida final en REAL (fin de secuencia)")
+                                    activo_real = None
+                                    break
+                                else:
+                                    agregar_evento(
+                                        f"MARTI_MAESTRO: timeout/indefinido -> conserva ciclo {_marti_ciclo_tag(_marti_ciclo_operativo_actual())} y vuelve a DEMO"
+                                    )
+                                    cerrar_por_fin_de_ciclo(bot, "Cierre indefinido en REAL (sin avanzar martingala)")
                                     activo_real = None
                                     break
 
@@ -16466,34 +16493,56 @@ async def main():
                                 ciclo_auto = 1
                             mejor_bot = str(selected_bot_operativo or "").strip()
                             mejor = next((c for c in candidatos if str(c[1]) == mejor_bot), None)
-                            if mejor is not None:
+                            monto = MARTI_ESCALADO[max(0, min(len(MARTI_ESCALADO)-1, ciclo_auto - 1))]
+                            ciclo_tag = _marti_ciclo_tag(ciclo_auto)
+
+                            if not mejor_bot or mejor is None:
+                                agregar_evento(
+                                    f"AUTO_REAL: trigger sin bot operativo válido (selected='{mejor_bot or '--'}')"
+                                )
+                            else:
                                 score_top, mejor_bot, prob, p_post, reg_score, ev_n, ev_wr, ev_lb = mejor
                                 agregar_evento(f"⚙️ IA AUTO (LOGICA_UNICA_REAL): {mejor_bot} p_oper={prob*100:.1f}% source={real_source_operativo}")
-                                monto = MARTI_ESCALADO[max(0, min(len(MARTI_ESCALADO)-1, ciclo_auto - 1))]
-                                val = obtener_valor_saldo()
-                                if val is None or val < monto:
-                                    pass
+                                agregar_evento(
+                                    f"AUTO_REAL: trigger recibido bot={mejor_bot} ciclo={ciclo_tag} monto={float(monto):.2f}"
+                                )
+
+                                owner_prev = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+                                owner_mem = next((b for b in BOT_NAMES if estado_bots.get(b, {}).get('token') == "REAL"), None)
+                                owner_activo = owner_prev if owner_prev in BOT_NAMES else (owner_mem if owner_mem in BOT_NAMES else None)
+                                if owner_activo and owner_activo != mejor_bot:
+                                    agregar_evento(
+                                        f"AUTO_REAL: cancelado por owner REAL activo={owner_activo}"
+                                    )
                                 else:
-                                    estado_bots[mejor_bot]["ia_senal_pendiente"] = True
-                                    estado_bots[mejor_bot]["ia_prob_senal"] = prob
-
-                                    # Handoff entre ciclos REAL: si quedó lock residual de otro bot,
-                                    # liberarlo antes de emitir la nueva orden para no bloquear rotación.
-                                    owner_prev = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else None
-                                    if owner_prev and owner_prev != mejor_bot and ciclo_auto > 1:
-                                        cerrar_por_fin_de_ciclo(owner_prev, f"Handoff rotación C{ciclo_auto}→{mejor_bot}")
-
-                                    ok_real = escribir_orden_real(mejor_bot, ciclo_auto)
-                                    if ok_real:
-                                        if False:
-                                            pass
-                                        estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
-                                        estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
-                                        activo_real = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else mejor_bot
-                                        marti_activa = True
+                                    val = obtener_valor_saldo()
+                                    if val is None:
+                                        agregar_evento(
+                                            f"AUTO_REAL: cancelado por saldo no disponible bot={mejor_bot} ciclo={ciclo_tag}"
+                                        )
+                                    elif float(val) < float(monto):
+                                        agregar_evento(
+                                            f"AUTO_REAL: cancelado por saldo insuficiente bot={mejor_bot} ciclo={ciclo_tag} saldo={float(val):.2f} monto={float(monto):.2f}"
+                                        )
                                     else:
-                                        estado_bots[mejor_bot]["ia_senal_pendiente"] = False
-                                        estado_bots[mejor_bot]["ia_prob_senal"] = None
+                                        estado_bots[mejor_bot]["ia_senal_pendiente"] = True
+                                        estado_bots[mejor_bot]["ia_prob_senal"] = prob
+
+                                        ok_real = escribir_orden_real(mejor_bot, ciclo_auto)
+                                        if ok_real:
+                                            estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
+                                            estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
+                                            activo_real = mejor_bot
+                                            marti_activa = True
+                                            agregar_evento(
+                                                f"AUTO_REAL: REAL activado bot={mejor_bot} ciclo={ciclo_tag} monto={float(monto):.2f}"
+                                            )
+                                        else:
+                                            estado_bots[mejor_bot]["ia_senal_pendiente"] = False
+                                            estado_bots[mejor_bot]["ia_prob_senal"] = None
+                                            agregar_evento(
+                                                f"AUTO_REAL: escribir_orden_real devolvió False bot={mejor_bot} ciclo={ciclo_tag}"
+                                            )
                         else:
                             max_prob = max((_prob_ia_operativa_bot(bot, default=0.0) for bot in BOT_NAMES if estado_bots[bot]["ia_ready"]), default=0)
                             if max_prob < umbral_ia_real:
