@@ -378,7 +378,7 @@ AUTO_REAL_LIVE_MIN_BOTS = 3   # mínimos bots con prob viva para calibración po
 IA_METRIC_THRESHOLD = AUTO_REAL_THR_MIN
 # Modo clásico: activación REAL con umbral operativo vigente (hoy 65%, con techo dinámico base 70%).
 # Mantiene lock de un solo bot en REAL y ciclo martingala global en HUD.
-REAL_CLASSIC_GATE = False
+REAL_CLASSIC_GATE = True
 
 # ✅ Umbral SOLO para auditoría/calibración (señales CERRADAS en ia_signals_log)
 # Esto es lo que querías: contar cierres desde 60% sin afectar la operativa.
@@ -387,7 +387,7 @@ IA_CALIB_GOAL_THRESHOLD = IA_OBJETIVO_REAL_THR  # objetivo real: medir cierres f
 IA_CALIB_MIN_CLOSED = 200  # mínimo recomendado para considerar estable la auditoría
 REAL_GO_N_MIN = 180
 REAL_GO_CLOSED_MIN = 50
-REAL_EARLY_MICRO_OVERRIDE_ENABLE = False
+REAL_EARLY_MICRO_OVERRIDE_ENABLE = True
 REAL_EARLY_MICRO_OVERRIDE_MIN_N = 100
 REAL_EARLY_MICRO_OVERRIDE_MIN_AUC = 0.65
 REAL_EARLY_MICRO_OVERRIDE_MIN_PROB_MARGIN = 0.00
@@ -470,7 +470,7 @@ LEGACY_ENABLE_PATTERN_COLUMNS = False
 LEGACY_ENABLE_SHADOW_MICRO = not LEGACY_QUARANTINE_ENABLE
 LEGACY_ENABLE_MICRO_STRONG_FALLBACK = not LEGACY_QUARANTINE_ENABLE
 LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE = not LEGACY_QUARANTINE_ENABLE
-AUTO_REAL_MICRO_EARLY_CONFIRM_ENABLE = False
+AUTO_REAL_MICRO_EARLY_CONFIRM_ENABLE = bool(LEGACY_ENABLE_EARLY_CONFIRM_OVERRIDE)
 AUTO_REAL_MICRO_EARLY_CONFIRM_MARGIN = 0.02
 AUTO_REAL_MICRO_EARLY_CONFIRM_DEFICIT_MAX = 1
 
@@ -646,11 +646,11 @@ EMBUDO_FINAL_REAL_OK = "REAL_OK"
 EMBUDO_FINAL_REAL_MICRO = EMBUDO_FINAL_REAL_OK
 EMBUDO_FINAL_REAL_NORMAL = EMBUDO_FINAL_REAL_OK
 EMBUDO_FINAL_SHADOW_OK = EMBUDO_FINAL_WAIT_SOFT
-OVERRIDE_REZAGADA_ENABLE = False
+OVERRIDE_REZAGADA_ENABLE = True
 OVERRIDE_REZAGADA_MIN_VALID = 5
 OVERRIDE_REZAGADA_GREENS_OK = (4, 5)
 OVERRIDE_REZAGADA_REDS_OK = (1, 2)
-EMBUDO_CANDIDATE_RESCUE_ENABLE = False
+EMBUDO_CANDIDATE_RESCUE_ENABLE = True
 EMBUDO_CANDIDATE_RESCUE_MIN_PROB = 0.52
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER = False
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK = True
@@ -659,7 +659,7 @@ EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS = 1.5
 EMBUDO_CANDIDATE_RESCUE_ALLOW_CONFIRM_PENDING = False
 EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER_OR_CONTEXT = True
 EMBUDO_CANDIDATE_RESCUE_BLOCK_ON_HARD_GUARD = True
-RED_BISAGRA_ENABLE = False
+RED_BISAGRA_ENABLE = True
 RED_BISAGRA_LOOKBACK = 8
 RED_BISAGRA_MIN_GREEN_RATIO = 0.66
 RED_BISAGRA_MIN_CONSEC_WINS_BEFORE_RED = 2
@@ -669,15 +669,15 @@ RED_BISAGRA_MIN_SCORE_RESCUE = 0.62
 RED_BISAGRA_RESCUE_MIN_PROB = 0.53
 RED_BISAGRA_RESCUE_MAX_EXTRA_ROOF_PTS = 1.20
 RED_BISAGRA_REQUIRE_PATTERN_OK = True
-EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = False
-EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = False
+EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = True
+EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = True
 IA_PROB_POLARIZE_ENABLE = True
 IA_PROB_POLARIZE_FACTOR_RELIABLE = 1.25
 IA_PROB_POLARIZE_FACTOR_UNRELIABLE = 2.05
 IA_PROB_POLARIZE_CENTER = 0.50
 
 # === MRV: Motor de Régimen Verde (motor estructural) ===
-MRV_ENABLE = False
+MRV_ENABLE = True
 MRV_WINDOW_SHORT = 8
 MRV_WINDOW_MED = 16
 MRV_MIN_HISTORY = 6
@@ -695,7 +695,7 @@ MRV_FEATURE_NAMES = [
 ]
 
 # === PERFIL_COMUN_FLEX: capa adicional de activación flexible por familias ===
-PERFIL_COMUN_FLEX_ENABLE = False
+PERFIL_COMUN_FLEX_ENABLE = True
 PERFIL_COMUN_FLEX_WINDOW = 40
 PERFIL_COMUN_FLEX_MIN_VALID = 18
 PERFIL_COMUN_FLEX_GREEN40_SOFT_MIN = 22
@@ -714,7 +714,7 @@ PERFIL_COMUN_FLEX_MRV_VIDA_MIN = 0.55
 PERFIL_COMUN_FLEX_MRV_RUPT_MAX = 0.68
 PERFIL_COMUN_FLEX_ESTADOS_OK = ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA")
 PERFIL_COMUN_FLEX_SHORT_VALID_MAX = 27
-PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE = False
+PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE = True
 PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_SCORE_MIN = 0.42
 PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_VIDA_MIN = 0.50
 PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_RUPT_MAX = 0.68
@@ -17289,19 +17289,6 @@ async def main():
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
                             agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
                             candidatos = []
-                        elif decision_final == EMBUDO_FINAL_WAIT_SOFT and candidatos_pre_embudo:
-                            candidatos = candidatos_pre_embudo[:1]
-                            top1_keep = candidatos[0]
-                            embudo = _registrar_estado_embudo({
-                                "decision_final": EMBUDO_FINAL_REAL_OK,
-                                "decision_reason": "wait_soft_bypass_pre_embudo",
-                                "soft_wait_reason": "",
-                                "risk_mode": "REAL_OK",
-                                "gate_quality": "bypass_pre_embudo",
-                                "hard_block_reason": "",
-                                "top1_bot": str(top1_keep[1]),
-                                "top1_prob": float(top1_keep[2]),
-                            })
                         elif decision_final == EMBUDO_FINAL_WAIT_SOFT:
                             rescue_applied = False
                             wait_reason_emb = str(embudo.get("soft_wait_reason") or embudo.get("decision_reason") or "")
@@ -17312,9 +17299,18 @@ async def main():
                                 rec_pre = candidatos_pre_embudo[0]
                                 top1_rescue = str(rec_pre[1] or "").strip()
                                 top1_prob_rescue = float(rec_pre[2] or 0.0)
+                            if (not top1_rescue):
+                                live_pre = []
+                                for _b in BOT_NAMES:
+                                    _p = _prob_ia_operativa_bot(_b, default=None)
+                                    if isinstance(_p, (int, float)):
+                                        live_pre.append((str(_b), float(_p)))
+                                live_pre.sort(key=lambda t: float(t[1]), reverse=True)
+                                if live_pre:
+                                    top1_rescue = str(live_pre[0][0] or "").strip()
+                                    top1_prob_rescue = float(live_pre[0][1] or 0.0)
                             can_rescue_wait = bool(
-                                (not rescue_applied)
-                                and EMBUDO_CANDIDATE_RESCUE_ENABLE
+                                EMBUDO_CANDIDATE_RESCUE_ENABLE
                                 and (top1_rescue in BOT_NAMES)
                                 and (top1_prob_rescue >= float(EMBUDO_CANDIDATE_RESCUE_MIN_PROB))
                             )
