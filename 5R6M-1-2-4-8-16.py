@@ -16390,6 +16390,7 @@ async def main():
                         logica_unica_real = _resolver_logica_unica_real(candidatos, estado_bots, BOT_NAMES, emitir_log=True)
                         selected_bot_operativo = ""
                         selected_prob_operativo = 0.0
+                        real_source_operativo = "LOGICA_UNICA_REAL"
                         if bool(logica_unica_real.get("triggered", False)):
                             selected_bot = str(logica_unica_real.get("selected_bot") or "").strip()
                             rec = next((c for c in list(candidatos or []) if str(c[1]) == selected_bot), None)
@@ -16412,6 +16413,8 @@ async def main():
                             candidatos = [rec]
                             selected_bot_operativo = str(selected_bot)
                             selected_prob_operativo = float(selected_prob)
+                            if isinstance(estado_bots, dict) and selected_bot_operativo in estado_bots:
+                                estado_bots[selected_bot_operativo]["real_source"] = str(real_source_operativo)
                         else:
                             candidatos = []
 
@@ -16454,7 +16457,7 @@ async def main():
 
                         if candidatos and not MODO_REAL_MANUAL:
                             agregar_evento(
-                                f"🧭 LOGICA_UNICA_REAL lista: bot={selected_bot_operativo or '--'} p_oper={selected_prob_operativo*100:.1f}%"
+                                f"🧭 LOGICA_UNICA_REAL lista: bot={selected_bot_operativo or '--'} p_oper={selected_prob_operativo*100:.1f}% source={real_source_operativo}"
                             )
 
                         if candidatos and not MODO_REAL_MANUAL:
@@ -16465,7 +16468,7 @@ async def main():
                             mejor = next((c for c in candidatos if str(c[1]) == mejor_bot), None)
                             if mejor is not None:
                                 score_top, mejor_bot, prob, p_post, reg_score, ev_n, ev_wr, ev_lb = mejor
-                                agregar_evento(f"⚙️ IA AUTO (LOGICA_UNICA_REAL): {mejor_bot} p_oper={prob*100:.1f}%")
+                                agregar_evento(f"⚙️ IA AUTO (LOGICA_UNICA_REAL): {mejor_bot} p_oper={prob*100:.1f}% source={real_source_operativo}")
                                 monto = MARTI_ESCALADO[max(0, min(len(MARTI_ESCALADO)-1, ciclo_auto - 1))]
                                 val = obtener_valor_saldo()
                                 if val is None or val < monto:
