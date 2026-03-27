@@ -169,8 +169,10 @@ racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de P�
 primer_ingreso_real = False  # Sonido solo 1 vez por ventana
 
 # Variables persistentes para saldos últimos válidos
-saldo_demo_last = 0.0
-saldo_real_last = 0.0
+saldo_demo_last = None
+saldo_real_last = None
+saldo_demo_last_ts = 0.0
+saldo_real_last_ts = 0.0
 real_activado_en_bot = 0.0  # BLOQUE 5: Global for activation timestamp
 
 # BLOQUE 2: Commit guard for REAL operations
@@ -1461,12 +1463,13 @@ async def vigilar_token():
                 reinicio_forzado.set()
 
 async def consultar_saldo_real(ws):
-    global saldo_real_last
+    global saldo_real_last, saldo_real_last_ts
     try:
         data = await api_call(ws, {"balance": 1}, expect_msg_type="balance", timeout=6.0)
         b = data.get("balance", {}).get("balance")
         if b is not None:
             saldo_real_last = float(b)
+            saldo_real_last_ts = float(time.time())
             return saldo_real_last
         if _print_once("saldo-real-empty-main", ttl=20):
             print(Fore.YELLOW + "Balance REAL no disponible (respuesta vacía). Intento conexión dedicada...")
@@ -1481,12 +1484,16 @@ async def consultar_saldo_real(ws):
             b2 = data2.get("balance", {}).get("balance")
             if b2 is not None:
                 saldo_real_last = float(b2)
+                saldo_real_last_ts = float(time.time())
                 return saldo_real_last
     except Exception as e2:
         if _print_once("saldo-real-error-dedicada", ttl=20):
             print(Fore.RED + Style.BRIGHT + f"[ERROR] al consultar saldo REAL (dedicada): {e2}")
     if _print_once("saldo-real-no-disponible-final", ttl=20):
-        print(Fore.YELLOW + "Balance REAL no disponible. Uso último valor válido y **no compro** si no alcanza.")
+        if isinstance(saldo_real_last, (int, float)):
+            print(Fore.YELLOW + "Balance REAL no disponible. Uso último valor válido cacheado.")
+        else:
+            print(Fore.YELLOW + "Balance REAL no disponible y sin histórico válido.")
     return saldo_real_last
 
 # ==================== LÓGICA DE OPERACIÓN ====================
@@ -1919,6 +1926,9 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 payout_mult_f = float(payout_ratio_total or 0.0)
             except Exception:
                 payout_mult_f = 0.0
+            payout_total_f = max(0.0, float(payout_total_f))
+            payout_mult_f = max(0.0, float(payout_mult_f))
+            result_bin_val = 1 if resultado == "GANANCIA" else 0 if resultado == "PÉRDIDA" else ""
             puntaje01 = _norm_puntaje_01(condiciones)  # helper REAL del bot
             trade_uid_final = str(trade_uid or "").strip()
             if not trade_uid_final:
@@ -1943,7 +1953,7 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 "payout_total": float(round(payout_total_f, 2)),
                 "payout_multiplier": float(round(payout_mult_f, 6)),
                 "puntaje_estrategia": float(round(float(puntaje01), 6)),
-                "result_bin": 1 if resultado == "GANANCIA" else 0 if resultado == "PÉRDIDA" else "",
+                "result_bin": result_bin_val,
                 "trade_status": "CERRADO",
                 "epoch": int(epoch_val),
                 "ts": ts_val,
@@ -2001,13 +2011,20 @@ async def leer_csv():
         return []
 
 async def mostrar_saldos():
-    global saldo_demo_last, saldo_real_last, _last_saldo_ts
+    global saldo_demo_last, saldo_real_last, _last_saldo_ts, saldo_demo_last_ts, saldo_real_last_ts
     print(Fore.GREEN + Style.BRIGHT + "\nConsultando Saldos")
+
+    def _fmt_saldo(label: str, val, ts: float):
+        if isinstance(val, (int, float)):
+            age = max(0, int(time.time() - float(ts or 0.0)))
+            stale_tag = f" [STALE {age}s]" if age > int(REFRESCO_SALDO) else ""
+            return f"{label}: {float(val):.2f} USD{stale_tag}"
+        return f"{label}: -- [SALDO NO DISPONIBLE]"
 
     # BLOQUE 8: Rate-limit with cache
     if time.time() - _last_saldo_ts < REFRESCO_SALDO:
-        print(Fore.LIGHTBLUE_EX + Style.BRIGHT + f"Saldo cuenta DEMO (cached): {saldo_demo_last:.2f} USD")
-        print(Fore.YELLOW + Style.BRIGHT + f"Saldo cuenta REAL (cached): {saldo_real_last:.2f} USD")
+        print(Fore.LIGHTBLUE_EX + Style.BRIGHT + _fmt_saldo("Saldo cuenta DEMO (cached)", saldo_demo_last, saldo_demo_last_ts))
+        print(Fore.YELLOW + Style.BRIGHT + _fmt_saldo("Saldo cuenta REAL (cached)", saldo_real_last, saldo_real_last_ts))
         print(Fore.GREEN + "─" * 80)
         return
 
@@ -2023,6 +2040,7 @@ async def mostrar_saldos():
             if b is not None:
                 saldo_demo = float(b)
                 saldo_demo_last = saldo_demo
+                saldo_demo_last_ts = float(time.time())
             else:
                 if _print_once("saldo-demo-empty", ttl=REFRESCO_SALDO):
                     print(Fore.YELLOW + "Balance DEMO no disponible, usando último valor válido.")
@@ -2040,6 +2058,7 @@ async def mostrar_saldos():
             if b is not None:
                 saldo_real = float(b)
                 saldo_real_last = saldo_real
+                saldo_real_last_ts = float(time.time())
             else:
                 if _print_once("saldo-real-empty", ttl=REFRESCO_SALDO):
                     print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
@@ -2048,8 +2067,8 @@ async def mostrar_saldos():
             print(Fore.YELLOW + Style.BRIGHT + f"[WARN] saldo REAL: {type(e).__name__}: {e!r}")
             print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
 
-    print(Fore.LIGHTBLUE_EX + Style.BRIGHT + f"Saldo cuenta DEMO: {saldo_demo:.2f} USD")
-    print(Fore.YELLOW + Style.BRIGHT + f"Saldo cuenta REAL: {saldo_real:.2f} USD")
+    print(Fore.LIGHTBLUE_EX + Style.BRIGHT + _fmt_saldo("Saldo cuenta DEMO", saldo_demo, saldo_demo_last_ts))
+    print(Fore.YELLOW + Style.BRIGHT + _fmt_saldo("Saldo cuenta REAL", saldo_real, saldo_real_last_ts))
     print(Fore.GREEN + "─" * 80)
     print(Fore.GREEN + "─" * 80)
     _last_saldo_ts = time.time()
@@ -2221,7 +2240,17 @@ async def ejecutar_panel():
                 # ========= SALDO REAL (si aplica) =========
                 if modo_real:
                     saldo = await consultar_saldo_real(ws)
-                    if saldo < monto:
+                    if not isinstance(saldo, (int, float)):
+                        estado_bot["intentos_saldo"] += 1
+                        print(Fore.RED + Style.BRIGHT + "Saldo REAL no disponible. Bloqueando compra hasta refrescar balance.")
+                        if estado_bot["intentos_saldo"] > 3:
+                            release_real_token_if_owned()
+                            estado_bot["intentos_saldo"] = 0
+                            reinicio_forzado.set()
+                        else:
+                            await asyncio.sleep(12 + random.uniform(0.0, 0.5))
+                        continue
+                    if float(saldo) < float(monto):
                         estado_bot["intentos_saldo"] += 1
                         if estado_bot["intentos_saldo"] > 3:
                             print(Fore.RED + Style.BRIGHT + "Saldo no recuperado tras 3 intentos. Paso a DEMO.")
