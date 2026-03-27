@@ -12285,172 +12285,6 @@ def aplicar_ajuste_patron_score(pattern_eval: dict) -> tuple[float, float, float
         penal += float(PATTERN_COL_PENAL_LATE_CHASE)
     return float(bonus), float(penal), float(bonus - penal)
 
-def _resultado_to_mark(x):
-    raw = str(x or "").strip().upper()
-    if raw in {"GANANCIA", "G", "WIN", "W", "✓", "✔", "✅", "🟢"}:
-        return "G"
-    if raw in {"PÉRDIDA", "PERDIDA", "P", "LOSS", "L", "X", "✗", "❌", "🔴"}:
-        return "R"
-    return None
-
-def _construir_matriz_resultados_columnas(estado: dict, bots: list[str], window: int = 40) -> list[dict]:
-    """
-    Construye matriz por columnas cerradas:
-      - filas: bots
-      - columnas: de más reciente [0] a más antigua [window-1]
-    Cada columna incluye `cells` (bot->G/R/None) y métricas base.
-    """
-    cols = []
-    w = max(1, int(window))
-    for off in range(w):
-        cells = {}
-        validos = verdes = rojos = 0
-        for b in list(bots or []):
-            rr = list((estado.get(b, {}) or {}).get("resultados", []) or [])
-            val = rr[-1 - off] if off < len(rr) else None
-            mark = _resultado_to_mark(val)
-            cells[b] = mark
-            if mark == "G":
-                validos += 1
-                verdes += 1
-            elif mark == "R":
-                validos += 1
-                rojos += 1
-        ratio = (float(verdes) / float(validos)) if validos > 0 else None
-        cols.append({
-            "offset": int(off),
-            "cells": cells,
-            "total_validos": int(validos),
-            "total_verdes": int(verdes),
-            "total_rojos": int(rojos),
-            "green_ratio": ratio,
-        })
-    return cols
-
-def evaluar_patron_columna_verde(col_data: dict, thr80: float = 0.80, thr90: float = 0.90) -> dict:
-    validos = int((col_data or {}).get("total_validos", 0) or 0)
-    verdes = int((col_data or {}).get("total_verdes", 0) or 0)
-    rojos = int((col_data or {}).get("total_rojos", 0) or 0)
-    ratio = (float(verdes) / float(validos)) if validos > 0 else None
-    es80 = bool((ratio is not None) and (float(ratio) >= float(thr80)))
-    es90 = bool((ratio is not None) and (float(ratio) >= float(thr90)))
-    return {
-        "total_validos": validos,
-        "total_verdes": verdes,
-        "total_rojos": rojos,
-        "green_ratio": ratio,
-        "es_col80": es80,
-        "es_col90": es90,
-    }
-
-def calcular_rebote_x_to_check_historico(columnas: list[dict], lookback: int = 12) -> dict:
-    """
-    Convención temporal de matriz:
-      - offset 0 = columna operativa actual (más reciente cerrada)
-      - offset creciente = columnas más antiguas
-    Antifuga estricta:
-      - NO se usa ningún par que toque offset 0
-      - SOLO se usan pares históricos completos j -> j-1 con j >= 2
-    """
-    hist = []
-    cols = list(columnas or [])
-    max_j = min(len(cols) - 1, max(2, int(lookback)))
-    for j in range(2, max_j + 1):
-        col_j = cols[j] if j < len(cols) else {}
-        col_next = cols[j - 1] if (j - 1) < len(cols) else {}
-        cells_j = dict((col_j or {}).get("cells", {}) or {})
-        cells_next = dict((col_next or {}).get("cells", {}) or {})
-        x_total = 0
-        x_rebota = 0
-        for bot, mark in cells_j.items():
-            if mark != "R":
-                continue
-            mark_next = cells_next.get(bot, None)
-            if mark_next is None:
-                continue
-            x_total += 1
-            if mark_next == "G":
-                x_rebota += 1
-        rate = (float(x_rebota) / float(x_total)) if x_total > 0 else None
-        hist.append({"j": int(j), "x_totales": int(x_total), "x_rebotan": int(x_rebota), "rebote_rate_j": rate})
-    total_x_hist = sum(int(h.get("x_totales", 0) or 0) for h in hist)
-    total_x_rebote_hist = sum(int(h.get("x_rebotan", 0) or 0) for h in hist)
-    rate_hist = (float(total_x_rebote_hist) / float(total_x_hist)) if total_x_hist > 0 else None
-    rates_simple = [float(h["rebote_rate_j"]) for h in hist if h.get("rebote_rate_j") is not None]
-    rate_simple = (sum(rates_simple) / float(len(rates_simple))) if rates_simple else None
-    return {
-        "pairs": hist,
-        "rebote_rate_hist": rate_hist,
-        "rebote_rate_hist_simple": rate_simple,  # solo debug
-        "rebote_samples_hist": int(total_x_hist),
-        "total_x_hist": int(total_x_hist),
-        "total_x_rebote_hist": int(total_x_rebote_hist),
-    }
-
-def calcular_strong_streak(columnas_stats: list[dict], thr: float = 0.80) -> int:
-    streak = 0
-    for c in list(columnas_stats or []):
-        ratio = c.get("green_ratio", None)
-        if (ratio is None) or (float(ratio) < float(thr)):
-            break
-        streak += 1
-    return int(streak)
-
-def clasificar_estado_patron(col_actual: dict, col_anterior: dict, rebote_rate_hist: float | None, rebote_samples_hist: int) -> dict:
-    ratio = col_actual.get("green_ratio", None)
-    col80 = bool(col_actual.get("es_col80", False))
-    col90 = bool(col_actual.get("es_col90", False))
-    prev90 = bool((col_anterior or {}).get("es_col90", False))
-    strong_streak_80 = int(col_actual.get("strong_streak_80", 0) or 0)
-    strong_streak_90 = int(col_actual.get("strong_streak_90", 0) or 0)
-    late_chase = bool(
-        (strong_streak_80 >= int(PATTERN_STRONG_STREAK_BLOCK))
-        or (strong_streak_90 >= 1)
-    )
-    sat_activa = bool(col90 or late_chase)
-    rebote_ok = bool(
-        col80
-        and (not sat_activa)
-        and (rebote_rate_hist is not None)
-        and (float(rebote_rate_hist) >= float(PATTERN_REBOTE_MIN))
-        and (int(rebote_samples_hist) >= int(PATTERN_REBOTE_MIN_SAMPLES))
-    )
-    continuidad_ok = bool(col80 and (not col90) and (not prev90) and (not late_chase))
-
-    if sat_activa:
-        state = "SATURACION"
-    elif rebote_ok:
-        state = "REBOTE"
-    elif continuidad_ok:
-        state = "CONTINUIDAD"
-    else:
-        state = "BLOQUEADO"
-    return {
-        "pattern_state": state,
-        "late_chase": late_chase,
-        "saturacion_activa": sat_activa,
-        "continuidad_ok": continuidad_ok,
-        "rebote_ok": rebote_ok,
-        "green_ratio_col_actual": ratio,
-        "strong_streak_80": strong_streak_80,
-        "strong_streak_90": strong_streak_90,
-    }
-
-def aplicar_ajuste_patron_score(pattern_eval: dict) -> tuple[float, float, float]:
-    state = str((pattern_eval or {}).get("pattern_state", "BLOQUEADO"))
-    late_chase = bool((pattern_eval or {}).get("late_chase", False))
-    bonus = 0.0
-    penal = 0.0
-    if state == "CONTINUIDAD":
-        bonus += float(PATTERN_COL_BONUS_CONTINUIDAD)
-    elif state == "REBOTE":
-        bonus += float(PATTERN_COL_BONUS_REBOTE)
-    elif state == "SATURACION":
-        penal += float(PATTERN_COL_PENAL_SATURACION)
-    if late_chase:
-        penal += float(PATTERN_COL_PENAL_LATE_CHASE)
-    return float(bonus), float(penal), float(bonus - penal)
-
 def _racha_actual_color(resultados):
     r = list(resultados or [])
     largo = 0
@@ -13873,16 +13707,10 @@ PENDIENTE_FORZAR_EXPIRA = 0.0
 FORZAR_LOCK = threading.Lock()
 
 def condiciones_seguras_para(bot: str) -> bool:
-    # Fuente operativa única: prob_ia_oper + estado final del embudo
-    thr = float(get_umbral_operativo())
-    prob = float(_prob_ia_operativa_bot(bot, default=0.0) or 0.0)
-    n = int(estado_bots.get(bot, {}).get("tamano_muestra", 0) or 0)
-    emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
-    dec = str(emb.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
-    top1 = str(emb.get("top1_bot") or "")
-    if top1 and bot != top1:
+    decision = _resolver_logica_unica_real([], estado_bots, BOT_NAMES, emitir_log=False)
+    if not bool(decision.get("triggered", False)):
         return False
-    return (n >= ORACULO_N_MIN) and (prob >= thr) and (dec == EMBUDO_FINAL_REAL_OK)
+    return str(decision.get("selected_bot") or "") == str(bot or "")
 
 # forzar_real_manual
 def forzar_real_manual(bot: str, ciclo: int):
@@ -15311,94 +15139,124 @@ def _embudo_main_decision_coherent(
         return False, ("main_reject:gap_guard" if not bool(guard_gap_ok) else "main_reject:guardrail"), ctx_strong
     return True, "main_ok", ctx_strong
 
-def _override_columna_rezagada_directa(candidatos: list, estado: dict, bot_names: list[str]) -> dict | None:
-    """Override directo a REAL por columna más reciente casi verde con 1-2 rojos rezagados."""
-    if not bool(OVERRIDE_REZAGADA_ENABLE):
-        return None
+def _rankear_x_localmente(red_bots: list[str], cols: list[dict]) -> list[dict]:
+    """Ranking estructural local (solo matriz/columna inmediata) para resolver caso 2X."""
+    out = []
+    columnas = list(cols or [])
+    for bot in list(red_bots or []):
+        b = str(bot)
+        marks = [str((col or {}).get("cells", {}).get(b) or "") for col in columnas[:6]]
+        while len(marks) < 6:
+            marks.append("")
+        prev_1 = marks[1]
+        prev_2 = marks[2]
+        verdes_recientes = sum(1 for m in marks[1:6] if m == "G")
+        rojas_recientes = sum(1 for m in marks[1:6] if m == "R")
+        racha_roja_previa = 0
+        for m in marks[1:6]:
+            if m == "R":
+                racha_roja_previa += 1
+            else:
+                break
+        score = (
+            (100 if prev_1 == "G" else 0)
+            + (20 * int(verdes_recientes))
+            + (5 if prev_2 == "G" else 0)
+            - (12 * int(racha_roja_previa))
+            - (3 * int(rojas_recientes))
+        )
+        out.append({
+            "bot": b,
+            "score_local": float(score),
+            "prev_1": prev_1,
+            "prev_2": prev_2,
+            "verdes_recientes": int(verdes_recientes),
+            "rojas_recientes": int(rojas_recientes),
+            "racha_roja_previa": int(racha_roja_previa),
+        })
+    out.sort(key=lambda r: (-float(r.get("score_local", 0.0) or 0.0), str(r.get("bot", ""))))
+    return out
+
+
+def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[str], emitir_log: bool = True) -> dict:
+    """Única ruta operativa para promover a REAL: columna actual verde + 1/2 X."""
+    out = {
+        "triggered": False,
+        "selected_bot": None,
+        "selected_case": None,
+        "reason": "estructura_insuficiente",
+        "valids": 0,
+        "greens": 0,
+        "reds": 0,
+        "red_bots": [],
+        "ranking_debug": [],
+    }
     try:
         bots = list(bot_names or [])
         cols = _construir_matriz_resultados_columnas(estado if isinstance(estado, dict) else {}, bots, window=40)
         if not cols:
-            return None
+            out["reason"] = "estructura_insuficiente"
+            return out
         col = dict(cols[0] or {})
         valids = int(col.get("total_validos", 0) or 0)
         greens = int(col.get("total_verdes", 0) or 0)
         reds = int(col.get("total_rojos", 0) or 0)
-        if valids < int(OVERRIDE_REZAGADA_MIN_VALID):
-            return None
-        if greens not in tuple(OVERRIDE_REZAGADA_GREENS_OK):
-            return None
-        if reds not in tuple(OVERRIDE_REZAGADA_REDS_OK):
-            return None
+        out["valids"] = int(valids)
+        out["greens"] = int(greens)
+        out["reds"] = int(reds)
+
+        if valids < 5:
+            out["reason"] = "estructura_insuficiente"
+            return out
+        eval_col = evaluar_patron_columna_verde(col)
+        if not bool(eval_col.get("es_col80", False)):
+            out["reason"] = "columna_no_verde"
+            return out
+        if reds > 2:
+            out["reason"] = "mas_de_2_X"
+            return out
+        if reds not in (1, 2):
+            out["reason"] = "sin_columna_verde_valida"
+            return out
+
         cells = dict(col.get("cells", {}) or {})
         red_bots = [str(b) for b, m in cells.items() if str(b) in bots and m == "R"]
-        if len(red_bots) not in (1, 2):
-            return None
+        out["red_bots"] = list(red_bots)
+        if len(red_bots) != reds:
+            out["reason"] = "estructura_insuficiente"
+            return out
 
-        c_map = {str(c[1]): c for c in list(candidatos or []) if isinstance(c, (list, tuple)) and len(c) >= 3}
-
-        def _f(st: dict, *keys: str) -> float:
-            for k in keys:
-                v = st.get(k, None)
-                if isinstance(v, (int, float)):
-                    return float(v)
-            return 0.0
-
-        def _snapshot(bot: str) -> dict:
-            st = dict((estado.get(bot, {}) if isinstance(estado, dict) else {}) or {})
-            cand = c_map.get(str(bot))
-            prob_oper = float(cand[2]) if (cand is not None and len(cand) > 2 and isinstance(cand[2], (int, float))) else _f(
-                st, "prob_ia_oper", "ia_prob_operativa", "ia_prob_cal_model", "ia_prob", "probabilidad_ia"
-            )
-            return {
-                "bot": str(bot),
-                "prob_oper": float(prob_oper),
-                "score_hibrido": _f(st, "ia_score_hibrido"),
-                "hist_wr": _f(st, "porcentaje_exito", "ia_evidence_wr"),
-                "payout": _f(st, "payout"),
-                "ctx": _f(st, "mrv_score_zona", "ia_suceso_idx", "ia_regime_score"),
-            }
-
-        ranking_debug = [_snapshot(b) for b in red_bots]
-        if len(ranking_debug) == 1:
-            sel = ranking_debug[0]
-            sel_case = "1X"
-            reason = "columna_verde_1x_rezagada"
+        if reds == 1:
+            out["triggered"] = True
+            out["selected_bot"] = str(red_bots[0])
+            out["selected_case"] = "1X"
+            out["reason"] = "columna_verde_1X"
         else:
-            ordered = sorted(
-                ranking_debug,
-                key=lambda r: (
-                    -float(r.get("prob_oper", 0.0) or 0.0),
-                    -float(r.get("score_hibrido", 0.0) or 0.0),
-                    -float(r.get("hist_wr", 0.0) or 0.0),
-                    -float(r.get("payout", 0.0) or 0.0),
-                    -float(r.get("ctx", 0.0) or 0.0),
-                    str(r.get("bot", "")),
-                ),
-            )
-            sel = dict(ordered[0] or {})
-            sel_case = "2X"
-            reason = "columna_verde_2x_rezagada_ranking"
-            ranking_debug = ordered
+            ranking = _rankear_x_localmente(red_bots, cols)
+            if not ranking:
+                out["reason"] = "estructura_insuficiente"
+                return out
+            out["ranking_debug"] = list(ranking)
+            out["triggered"] = True
+            out["selected_bot"] = str(ranking[0].get("bot") or "")
+            out["selected_case"] = "2X"
+            out["reason"] = "columna_verde_2X_fuerza_local"
 
-        selected_bot = str(sel.get("bot", "") or "")
-        if selected_bot not in bots:
-            return None
-        return {
-            "triggered": True,
-            "selected_bot": selected_bot,
-            "selected_case": sel_case,
-            "greens": int(greens),
-            "reds": int(reds),
-            "valids": int(valids),
-            "red_bots": list(red_bots),
-            "ranking_debug": list(ranking_debug),
-            "selected_prob": float(sel.get("prob_oper", 0.0) or 0.0),
-            "selected_score_hibrido": float(sel.get("score_hibrido", 0.0) or 0.0),
-            "reason": str(reason),
-        }
+        if bool(emitir_log):
+            if bool(out.get("triggered")):
+                if str(out.get("selected_case", "")) == "1X":
+                    agregar_evento(f"LOGICA_UNICA_REAL: caso=1X bot={out.get('selected_bot')}")
+                else:
+                    motivo = str(out.get("reason", ""))
+                    agregar_evento(f"LOGICA_UNICA_REAL: caso=2X bot={out.get('selected_bot')} motivo={motivo}")
+            else:
+                agregar_evento(f"LOGICA_UNICA_REAL: {out.get('reason', 'estructura_insuficiente')}")
+        return out
     except Exception:
-        return None
+        out["reason"] = "estructura_insuficiente"
+        if bool(emitir_log):
+            agregar_evento("LOGICA_UNICA_REAL: estructura_insuficiente")
+        return out
 
 
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
@@ -17232,22 +17090,17 @@ async def main():
                                     )
                                 DYN_ROOF_STATE["last_low_balance_warn_ts"] = float(ahora_warn)
 
-                        # Estado operativo REAL (SOMBRA -> MICRO -> NORMAL)
-                        try:
-                            estado_real = _resolver_estado_real(None)
-                        except Exception:
-                            estado_real = "SHADOW"
-
                         if candidatos:
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
-                        candidatos_pre_embudo = list(candidatos or [])
-
-                        override_rezagada = _override_columna_rezagada_directa(candidatos, estado_bots, BOT_NAMES)
-                        if isinstance(override_rezagada, dict) and bool(override_rezagada.get("triggered", False)):
-                            selected_bot = str(override_rezagada.get("selected_bot", "") or "").strip()
-                            selected_prob = float(override_rezagada.get("selected_prob", 0.0) or 0.0)
+                        logica_unica_real = _resolver_logica_unica_real(candidatos, estado_bots, BOT_NAMES, emitir_log=True)
+                        if bool(logica_unica_real.get("triggered", False)):
+                            selected_bot = str(logica_unica_real.get("selected_bot") or "").strip()
                             rec = next((c for c in list(candidatos or []) if str(c[1]) == selected_bot), None)
-                            if rec is None:
+                            selected_prob = 0.0
+                            if rec is not None and len(rec) > 2 and isinstance(rec[2], (int, float)):
+                                selected_prob = float(rec[2] or 0.0)
+                            else:
+                                selected_prob = float(_prob_ia_operativa_bot(selected_bot, default=0.0) or 0.0)
                                 st_res = estado_bots.get(selected_bot, {}) if isinstance(estado_bots, dict) else {}
                                 rec = (
                                     float(st_res.get("ia_score_hibrido", selected_prob) or selected_prob),
@@ -17262,105 +17115,34 @@ async def main():
                             candidatos = [rec]
                             embudo = _registrar_estado_embudo({
                                 "decision_final": EMBUDO_FINAL_REAL_OK,
-                                "decision_reason": "override_columna_rezagada_directa",
+                                "decision_reason": str(logica_unica_real.get("reason") or "logica_unica_real"),
                                 "risk_mode": "REAL_OK",
                                 "soft_wait_reason": "",
                                 "hard_block_reason": "",
-                                "real_source": "OVERRIDE_COLUMNA_REZAGADA",
+                                "gate_quality": "strong",
+                                "real_source": "LOGICA_UNICA_REAL",
                                 "top1_bot": str(selected_bot),
                                 "top1_prob": float(selected_prob),
                                 "top2_bot": None,
                                 "top2_prob": 0.0,
                                 "gap_value": 0.0,
                             })
-                            if str(override_rezagada.get("selected_case", "")) == "1X":
-                                agregar_evento(
-                                    f"🔥 Override columna rezagada: caso=1X bot={selected_bot} "
-                                    f"greens={int(override_rezagada.get('greens', 0) or 0)} reds={int(override_rezagada.get('reds', 0) or 0)} -> REAL directo"
-                                )
-                            else:
-                                agregar_evento(
-                                    f"🔥 Override columna rezagada: caso=2X bot={selected_bot} "
-                                    f"reds={list(override_rezagada.get('red_bots', []) or [])} -> gana por fuerza comparativa -> REAL directo"
-                                )
                         else:
-                            embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
-                        decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
-                        if decision_final == EMBUDO_FINAL_BLOCK_HARD:
-                            agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
                             candidatos = []
-                        elif decision_final == EMBUDO_FINAL_WAIT_SOFT:
-                            rescue_applied = False
-                            wait_reason_emb = str(embudo.get("soft_wait_reason") or embudo.get("decision_reason") or "")
-                            top1_rescue = str(embudo.get("top1_bot") or "").strip()
-                            top1_prob_rescue = float(embudo.get("top1_prob", 0.0) or 0.0)
-                            rec_pre = None
-                            if (not top1_rescue) and candidatos_pre_embudo:
-                                rec_pre = candidatos_pre_embudo[0]
-                                top1_rescue = str(rec_pre[1] or "").strip()
-                                top1_prob_rescue = float(rec_pre[2] or 0.0)
-                            if (not top1_rescue):
-                                live_pre = []
-                                for _b in BOT_NAMES:
-                                    _p = _prob_ia_operativa_bot(_b, default=None)
-                                    if isinstance(_p, (int, float)):
-                                        live_pre.append((str(_b), float(_p)))
-                                live_pre.sort(key=lambda t: float(t[1]), reverse=True)
-                                if live_pre:
-                                    top1_rescue = str(live_pre[0][0] or "").strip()
-                                    top1_prob_rescue = float(live_pre[0][1] or 0.0)
-                            can_rescue_wait = bool(
-                                EMBUDO_CANDIDATE_RESCUE_ENABLE
-                                and (top1_rescue in BOT_NAMES)
-                                and (top1_prob_rescue >= float(EMBUDO_CANDIDATE_RESCUE_MIN_PROB))
-                            )
-                            rescue_reason = "rescue_reject:not_evaluated"
-                            roof_deficit_pts = 0.0
-                            if can_rescue_wait:
-                                can_rescue_wait, rescue_reason, roof_deficit_pts = _candidate_rescue_ok(
-                                    embudo=embudo,
-                                    dyn_gate=dyn_gate,
-                                    top1_bot=top1_rescue,
-                                    top1_prob=float(top1_prob_rescue),
-                                )
-                            if can_rescue_wait:
-                                rec = rec_pre if rec_pre is not None else next((c for c in list(candidatos_pre_embudo or []) if str(c[1]) == top1_rescue), None)
-                                if rec is None:
-                                    st_res = estado_bots.get(top1_rescue, {}) if isinstance(estado_bots, dict) else {}
-                                    rec = (
-                                        float(top1_prob_rescue),
-                                        str(top1_rescue),
-                                        float(top1_prob_rescue),
-                                        float(top1_prob_rescue),
-                                        float(st_res.get("ia_regime_score", 0.0) or 0.0),
-                                        int(st_res.get("ia_evidence_n", 0) or 0),
-                                        float(st_res.get("ia_evidence_wr", 0.0) or 0.0),
-                                        float(st_res.get("ia_evidence_lb", 0.0) or 0.0),
-                                    )
-                                candidatos = [rec]
-                                embudo = _registrar_estado_embudo({
-                                    "decision_final": EMBUDO_FINAL_REAL_OK,
-                                    "decision_reason": str(rescue_reason),
-                                    "soft_wait_reason": "",
-                                    "risk_mode": "REAL_MICRO",
-                                    "gate_quality": "rescue_ok",
-                                    "hard_block_reason": "",
-                                    "top1_bot": str(top1_rescue),
-                                    "top1_prob": float(top1_prob_rescue),
-                                })
-                                rescue_applied = True
-                                agregar_evento(f"🛟 EMBUDO RESCUE OK: bot={top1_rescue} p={top1_prob_rescue*100:.1f}% roof_def={roof_deficit_pts:.1f}pts why={rescue_reason}.")
-                            if not rescue_applied:
-                                embudo = _registrar_estado_embudo({
-                                    "decision_final": EMBUDO_FINAL_WAIT_SOFT,
-                                    "decision_reason": str(rescue_reason),
-                                    "soft_wait_reason": str(rescue_reason),
-                                    "gate_quality": "wait",
-                                })
-                                agregar_evento(f"⏳ EMBUDO WAIT: {rescue_reason} bot={top1_rescue or '--'} p={top1_prob_rescue*100:.1f}% roof_def={roof_deficit_pts:.1f}pts.")
-                                candidatos = []
-                        elif decision_final == EMBUDO_FINAL_REAL_OK:
-                            candidatos = candidatos[:1]
+                            embudo = _registrar_estado_embudo({
+                                "decision_final": EMBUDO_FINAL_WAIT_SOFT,
+                                "decision_reason": str(logica_unica_real.get("reason") or "sin_columna_verde_valida"),
+                                "soft_wait_reason": str(logica_unica_real.get("reason") or "sin_columna_verde_valida"),
+                                "risk_mode": "WAIT_SOFT",
+                                "gate_quality": "wait",
+                                "hard_block_reason": "",
+                                "top1_bot": None,
+                                "top1_prob": 0.0,
+                                "top2_bot": None,
+                                "top2_prob": 0.0,
+                                "gap_value": 0.0,
+                                "real_source": "LOGICA_UNICA_REAL",
+                            })
 
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
                         # Si la IA detecta señal y tú estás en manual, preselecciona el mejor bot y abre la ventana
