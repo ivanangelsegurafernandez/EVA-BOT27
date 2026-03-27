@@ -650,25 +650,6 @@ OVERRIDE_REZAGADA_ENABLE = True
 OVERRIDE_REZAGADA_MIN_VALID = 5
 OVERRIDE_REZAGADA_GREENS_OK = (4, 5)
 OVERRIDE_REZAGADA_REDS_OK = (1, 2)
-EMBUDO_CANDIDATE_RESCUE_ENABLE = True
-EMBUDO_CANDIDATE_RESCUE_MIN_PROB = 0.52
-EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER = False
-EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK = True
-EMBUDO_CANDIDATE_RESCUE_ONLY_WHEN_WAIT_SOFT = True
-EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS = 1.5
-EMBUDO_CANDIDATE_RESCUE_ALLOW_CONFIRM_PENDING = False
-EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER_OR_CONTEXT = True
-EMBUDO_CANDIDATE_RESCUE_BLOCK_ON_HARD_GUARD = True
-RED_BISAGRA_ENABLE = True
-RED_BISAGRA_LOOKBACK = 8
-RED_BISAGRA_MIN_GREEN_RATIO = 0.66
-RED_BISAGRA_MIN_CONSEC_WINS_BEFORE_RED = 2
-RED_BISAGRA_REQUIRED_TAIL_RED_STREAK = 1
-RED_BISAGRA_MAX_RED_CLUSTERS = 1
-RED_BISAGRA_MIN_SCORE_RESCUE = 0.62
-RED_BISAGRA_RESCUE_MIN_PROB = 0.53
-RED_BISAGRA_RESCUE_MAX_EXTRA_ROOF_PTS = 1.20
-RED_BISAGRA_REQUIRE_PATTERN_OK = True
 EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = True
 EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = True
 IA_PROB_POLARIZE_ENABLE = True
@@ -677,7 +658,7 @@ IA_PROB_POLARIZE_FACTOR_UNRELIABLE = 2.05
 IA_PROB_POLARIZE_CENTER = 0.50
 
 # === MRV: Motor de Régimen Verde (motor estructural) ===
-MRV_ENABLE = True
+MRV_ENABLE = False  # desactivado: no gobierna promoción a REAL
 MRV_WINDOW_SHORT = 8
 MRV_WINDOW_MED = 16
 MRV_MIN_HISTORY = 6
@@ -695,7 +676,7 @@ MRV_FEATURE_NAMES = [
 ]
 
 # === PERFIL_COMUN_FLEX: capa adicional de activación flexible por familias ===
-PERFIL_COMUN_FLEX_ENABLE = True
+PERFIL_COMUN_FLEX_ENABLE = False  # desactivado: no gobierna promoción a REAL
 PERFIL_COMUN_FLEX_WINDOW = 40
 PERFIL_COMUN_FLEX_MIN_VALID = 18
 PERFIL_COMUN_FLEX_GREEN40_SOFT_MIN = 22
@@ -739,124 +720,6 @@ def _mrv_default_payload(now_ts: float | None = None, reason: str = "default") -
         "mrv_fragmentacion": 0.50,
         "mrv_fallback_reason": str(reason),
     }
-
-
-def _result_to_bin(x):
-    sx = str(x or "").strip().upper()
-    if sx in ("GANANCIA", "WIN", "G", "VERDE", "GREEN", "W"):
-        return 1
-    if sx in ("PÉRDIDA", "PERDIDA", "LOSS", "L", "R", "ROJO", "RED"):
-        return 0
-    return None
-
-
-def _tail_red_streak(seq_bin) -> int:
-    n = 0
-    for v in reversed(list(seq_bin or [])):
-        if int(v) == 0:
-            n += 1
-        else:
-            break
-    return int(n)
-
-
-def _count_red_clusters(seq_bin) -> int:
-    c = 0
-    prev_red = False
-    for v in list(seq_bin or []):
-        is_red = int(v) == 0
-        if is_red and (not prev_red):
-            c += 1
-        prev_red = is_red
-    return int(c)
-
-
-def _consecutive_wins_before_last_red(seq_bin) -> int:
-    vals = list(seq_bin or [])
-    if not vals or int(vals[-1]) != 0:
-        return 0
-    c = 0
-    idx = len(vals) - 2
-    while idx >= 0 and int(vals[idx]) == 1:
-        c += 1
-        idx -= 1
-    return int(c)
-
-
-def _compute_red_bisagra(bot: str) -> dict:
-    payload = {
-        "red_bisagra_score": 0.0,
-        "red_bisagra_ok": False,
-        "red_bisagra_last_is_red": False,
-        "red_bisagra_tail_red_streak": 0,
-        "red_bisagra_green_ratio": 0.0,
-        "red_bisagra_consec_wins_before_red": 0,
-        "red_bisagra_red_clusters": 0,
-        "red_bisagra_reason": "disabled",
-    }
-    if not bool(RED_BISAGRA_ENABLE):
-        return payload
-    try:
-        st = estado_bots.get(bot, {}) if isinstance(estado_bots, dict) else {}
-        rr = list(st.get("resultados", []) or [])
-        valid = []
-        for x in rr:
-            b = _result_to_bin(x)
-            if b is not None:
-                valid.append(int(b))
-        lookback = int(max(1, int(RED_BISAGRA_LOOKBACK)))
-        if len(valid) < lookback:
-            payload["red_bisagra_reason"] = f"muestra_insuficiente:{len(valid)}/{lookback}"
-            return payload
-        seq = valid[-lookback:]
-        last_is_red = bool(seq and int(seq[-1]) == 0)
-        tail_red = int(_tail_red_streak(seq))
-        green_ratio = float(sum(1 for v in seq if int(v) == 1) / max(1, len(seq)))
-        wins_before_red = int(_consecutive_wins_before_last_red(seq))
-        red_clusters = int(_count_red_clusters(seq))
-        payload.update({
-            "red_bisagra_last_is_red": last_is_red,
-            "red_bisagra_tail_red_streak": tail_red,
-            "red_bisagra_green_ratio": green_ratio,
-            "red_bisagra_consec_wins_before_red": wins_before_red,
-            "red_bisagra_red_clusters": red_clusters,
-        })
-        if not last_is_red:
-            payload["red_bisagra_reason"] = "last_not_red"
-            return payload
-        if tail_red != int(RED_BISAGRA_REQUIRED_TAIL_RED_STREAK):
-            payload["red_bisagra_reason"] = f"tail_red_streak!={int(RED_BISAGRA_REQUIRED_TAIL_RED_STREAK)}"
-            return payload
-        if green_ratio < float(RED_BISAGRA_MIN_GREEN_RATIO):
-            payload["red_bisagra_reason"] = "green_ratio_low"
-            return payload
-        if wins_before_red < int(RED_BISAGRA_MIN_CONSEC_WINS_BEFORE_RED):
-            payload["red_bisagra_reason"] = "wins_before_red_low"
-            return payload
-        if red_clusters > int(RED_BISAGRA_MAX_RED_CLUSTERS):
-            payload["red_bisagra_reason"] = "red_clusters_high"
-            return payload
-
-        wins_norm = min(float(wins_before_red) / 4.0, 1.0)
-        cluster_component = 1.0 - min(
-            float(red_clusters) / max(1.0, float(int(RED_BISAGRA_MAX_RED_CLUSTERS) + 1)),
-            1.0,
-        )
-        isolated_red_bonus = 1.0 if tail_red == 1 else 0.0
-        score = (
-            0.40 * float(green_ratio)
-            + 0.25 * float(wins_norm)
-            + 0.20 * float(isolated_red_bonus)
-            + 0.15 * float(cluster_component)
-        )
-        score = float(max(0.0, min(1.0, score)))
-        payload["red_bisagra_score"] = score
-        payload["red_bisagra_ok"] = bool(score >= float(RED_BISAGRA_MIN_SCORE_RESCUE))
-        payload["red_bisagra_reason"] = "ok" if payload["red_bisagra_ok"] else "score_below_min_rescue"
-        return payload
-    except Exception as e:
-        payload["red_bisagra_reason"] = f"error:{type(e).__name__}"
-        return payload
 
 
 def _mrv_historico_bot(bot: str) -> dict:
@@ -1530,21 +1393,6 @@ CTT_STATE = {
 REAL_OWNER_LOCK = None  # owner REAL en memoria (evita carreras de lectura de archivo)
 REAL_LOCK_MISMATCH_SINCE = 0.0
 REAL_LOCK_RECONCILE_S = 6.0
-
-EMBUDO_DECISION_STATE = {
-    "decision_final": EMBUDO_FINAL_WAIT_SOFT,
-    "decision_reason": "init",
-    "gate_quality": "weak",
-    "risk_mode": "WAIT_SOFT",
-    "hard_block_reason": "",
-    "soft_wait_reason": "init",
-    "top1_bot": None,
-    "top2_bot": None,
-    "gap_value": 0.0,
-    "top1_prob": 0.0,
-    "top2_prob": 0.0,
-    "degrade_from": "none",
-}
 
 try:
     last_sig_por_bot
@@ -12285,172 +12133,6 @@ def aplicar_ajuste_patron_score(pattern_eval: dict) -> tuple[float, float, float
         penal += float(PATTERN_COL_PENAL_LATE_CHASE)
     return float(bonus), float(penal), float(bonus - penal)
 
-def _resultado_to_mark(x):
-    raw = str(x or "").strip().upper()
-    if raw in {"GANANCIA", "G", "WIN", "W", "✓", "✔", "✅", "🟢"}:
-        return "G"
-    if raw in {"PÉRDIDA", "PERDIDA", "P", "LOSS", "L", "X", "✗", "❌", "🔴"}:
-        return "R"
-    return None
-
-def _construir_matriz_resultados_columnas(estado: dict, bots: list[str], window: int = 40) -> list[dict]:
-    """
-    Construye matriz por columnas cerradas:
-      - filas: bots
-      - columnas: de más reciente [0] a más antigua [window-1]
-    Cada columna incluye `cells` (bot->G/R/None) y métricas base.
-    """
-    cols = []
-    w = max(1, int(window))
-    for off in range(w):
-        cells = {}
-        validos = verdes = rojos = 0
-        for b in list(bots or []):
-            rr = list((estado.get(b, {}) or {}).get("resultados", []) or [])
-            val = rr[-1 - off] if off < len(rr) else None
-            mark = _resultado_to_mark(val)
-            cells[b] = mark
-            if mark == "G":
-                validos += 1
-                verdes += 1
-            elif mark == "R":
-                validos += 1
-                rojos += 1
-        ratio = (float(verdes) / float(validos)) if validos > 0 else None
-        cols.append({
-            "offset": int(off),
-            "cells": cells,
-            "total_validos": int(validos),
-            "total_verdes": int(verdes),
-            "total_rojos": int(rojos),
-            "green_ratio": ratio,
-        })
-    return cols
-
-def evaluar_patron_columna_verde(col_data: dict, thr80: float = 0.80, thr90: float = 0.90) -> dict:
-    validos = int((col_data or {}).get("total_validos", 0) or 0)
-    verdes = int((col_data or {}).get("total_verdes", 0) or 0)
-    rojos = int((col_data or {}).get("total_rojos", 0) or 0)
-    ratio = (float(verdes) / float(validos)) if validos > 0 else None
-    es80 = bool((ratio is not None) and (float(ratio) >= float(thr80)))
-    es90 = bool((ratio is not None) and (float(ratio) >= float(thr90)))
-    return {
-        "total_validos": validos,
-        "total_verdes": verdes,
-        "total_rojos": rojos,
-        "green_ratio": ratio,
-        "es_col80": es80,
-        "es_col90": es90,
-    }
-
-def calcular_rebote_x_to_check_historico(columnas: list[dict], lookback: int = 12) -> dict:
-    """
-    Convención temporal de matriz:
-      - offset 0 = columna operativa actual (más reciente cerrada)
-      - offset creciente = columnas más antiguas
-    Antifuga estricta:
-      - NO se usa ningún par que toque offset 0
-      - SOLO se usan pares históricos completos j -> j-1 con j >= 2
-    """
-    hist = []
-    cols = list(columnas or [])
-    max_j = min(len(cols) - 1, max(2, int(lookback)))
-    for j in range(2, max_j + 1):
-        col_j = cols[j] if j < len(cols) else {}
-        col_next = cols[j - 1] if (j - 1) < len(cols) else {}
-        cells_j = dict((col_j or {}).get("cells", {}) or {})
-        cells_next = dict((col_next or {}).get("cells", {}) or {})
-        x_total = 0
-        x_rebota = 0
-        for bot, mark in cells_j.items():
-            if mark != "R":
-                continue
-            mark_next = cells_next.get(bot, None)
-            if mark_next is None:
-                continue
-            x_total += 1
-            if mark_next == "G":
-                x_rebota += 1
-        rate = (float(x_rebota) / float(x_total)) if x_total > 0 else None
-        hist.append({"j": int(j), "x_totales": int(x_total), "x_rebotan": int(x_rebota), "rebote_rate_j": rate})
-    total_x_hist = sum(int(h.get("x_totales", 0) or 0) for h in hist)
-    total_x_rebote_hist = sum(int(h.get("x_rebotan", 0) or 0) for h in hist)
-    rate_hist = (float(total_x_rebote_hist) / float(total_x_hist)) if total_x_hist > 0 else None
-    rates_simple = [float(h["rebote_rate_j"]) for h in hist if h.get("rebote_rate_j") is not None]
-    rate_simple = (sum(rates_simple) / float(len(rates_simple))) if rates_simple else None
-    return {
-        "pairs": hist,
-        "rebote_rate_hist": rate_hist,
-        "rebote_rate_hist_simple": rate_simple,  # solo debug
-        "rebote_samples_hist": int(total_x_hist),
-        "total_x_hist": int(total_x_hist),
-        "total_x_rebote_hist": int(total_x_rebote_hist),
-    }
-
-def calcular_strong_streak(columnas_stats: list[dict], thr: float = 0.80) -> int:
-    streak = 0
-    for c in list(columnas_stats or []):
-        ratio = c.get("green_ratio", None)
-        if (ratio is None) or (float(ratio) < float(thr)):
-            break
-        streak += 1
-    return int(streak)
-
-def clasificar_estado_patron(col_actual: dict, col_anterior: dict, rebote_rate_hist: float | None, rebote_samples_hist: int) -> dict:
-    ratio = col_actual.get("green_ratio", None)
-    col80 = bool(col_actual.get("es_col80", False))
-    col90 = bool(col_actual.get("es_col90", False))
-    prev90 = bool((col_anterior or {}).get("es_col90", False))
-    strong_streak_80 = int(col_actual.get("strong_streak_80", 0) or 0)
-    strong_streak_90 = int(col_actual.get("strong_streak_90", 0) or 0)
-    late_chase = bool(
-        (strong_streak_80 >= int(PATTERN_STRONG_STREAK_BLOCK))
-        or (strong_streak_90 >= 1)
-    )
-    sat_activa = bool(col90 or late_chase)
-    rebote_ok = bool(
-        col80
-        and (not sat_activa)
-        and (rebote_rate_hist is not None)
-        and (float(rebote_rate_hist) >= float(PATTERN_REBOTE_MIN))
-        and (int(rebote_samples_hist) >= int(PATTERN_REBOTE_MIN_SAMPLES))
-    )
-    continuidad_ok = bool(col80 and (not col90) and (not prev90) and (not late_chase))
-
-    if sat_activa:
-        state = "SATURACION"
-    elif rebote_ok:
-        state = "REBOTE"
-    elif continuidad_ok:
-        state = "CONTINUIDAD"
-    else:
-        state = "BLOQUEADO"
-    return {
-        "pattern_state": state,
-        "late_chase": late_chase,
-        "saturacion_activa": sat_activa,
-        "continuidad_ok": continuidad_ok,
-        "rebote_ok": rebote_ok,
-        "green_ratio_col_actual": ratio,
-        "strong_streak_80": strong_streak_80,
-        "strong_streak_90": strong_streak_90,
-    }
-
-def aplicar_ajuste_patron_score(pattern_eval: dict) -> tuple[float, float, float]:
-    state = str((pattern_eval or {}).get("pattern_state", "BLOQUEADO"))
-    late_chase = bool((pattern_eval or {}).get("late_chase", False))
-    bonus = 0.0
-    penal = 0.0
-    if state == "CONTINUIDAD":
-        bonus += float(PATTERN_COL_BONUS_CONTINUIDAD)
-    elif state == "REBOTE":
-        bonus += float(PATTERN_COL_BONUS_REBOTE)
-    elif state == "SATURACION":
-        penal += float(PATTERN_COL_PENAL_SATURACION)
-    if late_chase:
-        penal += float(PATTERN_COL_PENAL_LATE_CHASE)
-    return float(bonus), float(penal), float(bonus - penal)
-
 def _racha_actual_color(resultados):
     r = list(resultados or [])
     largo = 0
@@ -12971,47 +12653,18 @@ def mostrar_panel(force: bool = False):
             except Exception:
                 pass
 
-            emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
+            dec_uni = _resolver_logica_unica_real([], estado_bots, BOT_NAMES, emitir_log=False)
             print(
                 padding + Fore.CYAN +
-                f"🧪 Embudo: final={emb.get('decision_final','--')} risk={emb.get('risk_mode','--')} gate={emb.get('gate_quality','--')} "
-                f"top1={emb.get('top1_bot') or '--'}({float(emb.get('top1_prob',0.0) or 0.0)*100:.1f}%) "
-                f"top2={emb.get('top2_bot') or '--'} gap={float(emb.get('gap_value',0.0) or 0.0)*100:.1f}pp "
-                f"why={emb.get('decision_reason','--')} wait={emb.get('soft_wait_reason','') or '--'} "
-                f"hard={emb.get('hard_block_reason','') or '--'} deg={emb.get('degrade_from','--')}"
-            )
-            print(
-                padding + Fore.CYAN +
-                f"🧬 PFLEX: fam={emb.get('perfil_comun_flex_family','--')} "
-                f"score={float(emb.get('perfil_comun_flex_score',0.0) or 0.0):.2f} "
-                f"fam_score={float(emb.get('perfil_comun_flex_family_score',0.0) or 0.0):.2f} "
-                f"ia_floor={float(emb.get('perfil_comun_flex_ia_floor',0.0) or 0.0):.3f} "
-                f"ok={int(emb.get('perfil_comun_flex_ok',0) or 0)} "
-                f"valid40={int(emb.get('perfil_comun_flex_valid40',0) or 0)} "
-                f"rescC={int(emb.get('perfil_comun_flex_modec_rescue',0) or 0)} "
-                f"mrvN={int(emb.get('perfil_comun_flex_mrv_normal_ok',0) or 0)} "
-                f"mrvR={int(emb.get('perfil_comun_flex_mrv_rescue_ok',0) or 0)}"
-            )
-            print(
-                padding + Fore.CYAN +
-                f"🧩 EARLY-MICRO: ok={int(emb.get('early_micro_override_ok',0) or 0)} "
-                f"auc={float(emb.get('early_micro_override_auc',0.0) or 0.0):.3f} "
-                f"n={int(emb.get('early_micro_override_n',0) or 0)}"
+                f"🧪 LOGICA_UNICA_REAL: triggered={int(bool(dec_uni.get('triggered', False)))} "
+                f"bot={dec_uni.get('selected_bot') or '--'} caso={dec_uni.get('selected_case') or '--'} "
+                f"reason={dec_uni.get('reason') or '--'} valids={int(dec_uni.get('valids', 0) or 0)} "
+                f"greens={int(dec_uni.get('greens', 0) or 0)} reds={int(dec_uni.get('reds', 0) or 0)}"
             )
 
             ref_racha = ultimo_bot_real if ultimo_bot_real in BOT_NAMES else "--"
             elegido_tick = mejor[0] if isinstance(mejor, tuple) and len(mejor) >= 1 else "--"
             print(padding + Fore.CYAN + f"🧾 Contexto racha: ref={ref_racha} | elegido_tick={elegido_tick} | token_real={owner_txt}")
-            try:
-                top1_mrv = str(emb.get("top1_bot") or "")
-                st_mrv = estado_bots.get(top1_mrv, {}) if top1_mrv else {}
-                print(
-                    padding + Fore.CYAN +
-                    f"🟩 MRV: estado={st_mrv.get('mrv_estado','--')} score={float(st_mrv.get('mrv_score_zona',0.0) or 0.0):.2f} "
-                    f"rupt={float(st_mrv.get('mrv_p_ruptura_inmediata',0.0) or 0.0)*100:.0f}% vida={float(st_mrv.get('mrv_vida_util_restante',0.0) or 0.0):.1f}"
-                )
-            except Exception:
-                pass
         except Exception:
             pass
 
@@ -13072,46 +12725,6 @@ def mostrar_panel(force: bool = False):
             + f"late={'sí' if bool(pat.get('late_chase', False)) else 'no'} "
             + f"Δ={float(pat.get('pattern_delta', 0.0) or 0.0):+.2f}"
         )
-        try:
-            emb_rb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
-            bot_rb = str(emb_rb.get("top1_bot") or "").strip()
-            if bot_rb not in BOT_NAMES:
-                bot_rb = str(ultimo_bot_real) if str(ultimo_bot_real) in BOT_NAMES else ""
-            if bot_rb not in BOT_NAMES:
-                owner_rb = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
-                bot_rb = str(owner_rb) if str(owner_rb) in BOT_NAMES else ""
-            if bot_rb not in BOT_NAMES:
-                best_rb = ""
-                best_p = -1.0
-                for _b in BOT_NAMES:
-                    _p = _prob_ia_operativa_bot(_b, default=None)
-                    if isinstance(_p, (int, float)) and float(_p) > best_p:
-                        best_p = float(_p)
-                        best_rb = str(_b)
-                bot_rb = best_rb if best_rb in BOT_NAMES else ""
-
-            if bot_rb in BOT_NAMES:
-                st_rb = estado_bots.get(bot_rb, {}) if isinstance(estado_bots, dict) else {}
-                score_rb = float(st_rb.get("red_bisagra_score", 0.0) or 0.0)
-                ok_rb = bool(st_rb.get("red_bisagra_ok", False))
-                reason_rb = str(st_rb.get("red_bisagra_reason", "--") or "--")
-                if ok_rb:
-                    print(
-                        padding + Fore.CYAN
-                        + f"RB: bot={bot_rb} ok score={score_rb:.2f} gr={float(st_rb.get('red_bisagra_green_ratio',0.0) or 0.0):.2f} "
-                        + f"wbr={int(st_rb.get('red_bisagra_consec_wins_before_red',0) or 0)} "
-                        + f"rc={int(st_rb.get('red_bisagra_red_clusters',0) or 0)} "
-                        + f"tailR={int(st_rb.get('red_bisagra_tail_red_streak',0) or 0)}"
-                    )
-                else:
-                    print(
-                        padding + Fore.CYAN
-                        + f"RB: bot={bot_rb} no score={score_rb:.2f} motivo={reason_rb}"
-                    )
-            else:
-                print(padding + Fore.CYAN + "RB: n/a motivo=no_contexto")
-        except Exception:
-            print(padding + Fore.CYAN + "RB: n/a motivo=error_contexto")
     except Exception:
         pass
 
@@ -13873,16 +13486,10 @@ PENDIENTE_FORZAR_EXPIRA = 0.0
 FORZAR_LOCK = threading.Lock()
 
 def condiciones_seguras_para(bot: str) -> bool:
-    # Fuente operativa única: prob_ia_oper + estado final del embudo
-    thr = float(get_umbral_operativo())
-    prob = float(_prob_ia_operativa_bot(bot, default=0.0) or 0.0)
-    n = int(estado_bots.get(bot, {}).get("tamano_muestra", 0) or 0)
-    emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
-    dec = str(emb.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
-    top1 = str(emb.get("top1_bot") or "")
-    if top1 and bot != top1:
+    decision = _resolver_logica_unica_real([], estado_bots, BOT_NAMES, emitir_log=False)
+    if not bool(decision.get("triggered", False)):
         return False
-    return (n >= ORACULO_N_MIN) and (prob >= thr) and (dec == EMBUDO_FINAL_REAL_OK)
+    return str(decision.get("selected_bot") or "") == str(bot or "")
 
 # forzar_real_manual
 def forzar_real_manual(bot: str, ciclo: int):
@@ -13968,13 +13575,11 @@ def forzar_real_manual(bot: str, ciclo: int):
         FORZAR_LOCK.release()
 
 def evaluar_semaforo():
-    thr = float(get_umbral_operativo())
-    emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
-    dec = str(emb.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
-    reason = str(emb.get("decision_reason", "--"))
-    top1 = str(emb.get("top1_bot") or "")
-    prob = float(emb.get("top1_prob", 0.0) or 0.0)
-    n = int(estado_bots.get(top1, {}).get("tamano_muestra", 0) or 0) if top1 else 0
+    dec = _resolver_logica_unica_real([], estado_bots, BOT_NAMES, emitir_log=False)
+    reason = str(dec.get("reason") or "estructura_insuficiente")
+    top1 = str(dec.get("selected_bot") or "")
+    selected_case = str(dec.get("selected_case") or "--")
+    n = int(dec.get("valids", 0) or 0)
 
     owner = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
     saldo_val = obtener_valor_saldo()
@@ -13993,16 +13598,9 @@ def evaluar_semaforo():
     if saldo_val < costo:
         return "🟡", "AVISO", f"Saldo parcial: cubre C1 pero no C1..C{int(MAX_CICLOS)} ({costo:.2f})."
 
-    if dec == EMBUDO_FINAL_BLOCK_HARD:
-        return "🔴", "BLOQUEO", f"{emb.get('hard_block_reason') or reason}"
-    if dec == EMBUDO_FINAL_WAIT_SOFT:
-        return "🟡", "EN ESPERA", f"{emb.get('soft_wait_reason') or reason}"
-    if dec == EMBUDO_FINAL_REAL_OK:
-        if (not top1) or (prob < thr):
-            return "🟡", "EN ESPERA", f"Top1 no operativo ({top1 or '--'} p={prob:.0%}<{int(thr*100)}%)."
-        return "🟢", "SEÑAL LISTA", f"{top1} • ProbOper={prob:.0%} • n={n} • modo=REAL_OK"
-
-    return "🟡", "EN ESPERA", f"Sin decisión embudo ({reason})."
+    if not bool(dec.get("triggered", False)):
+        return "🟡", "EN ESPERA", f"{reason}"
+    return "🟢", "SEÑAL LISTA", f"{top1} • caso={selected_case} • valids={n}"
 
 # NUEVAS FUNCIONES PARA RESET
 RESET_ON_START = False  # Cambiado a False para mantener historial entre sesiones
@@ -15100,36 +14698,6 @@ def _actualizar_compuerta_techo_dinamico() -> dict:
         return out
 
 
-def _registrar_estado_embudo(data: dict | None = None) -> dict:
-    """Persistencia del estado unificado del embudo para HUD/eventos."""
-    global EMBUDO_DECISION_STATE
-    base = {
-        "decision_final": EMBUDO_FINAL_WAIT_SOFT,
-        "decision_reason": "init",
-        "gate_quality": "weak",
-        "risk_mode": "WAIT_SOFT",
-        "hard_block_reason": "",
-        "soft_wait_reason": "",
-        "top1_bot": None,
-        "top2_bot": None,
-        "gap_value": 0.0,
-        "top1_prob": 0.0,
-        "top2_prob": 0.0,
-        "degrade_from": "none",
-        "ia_real_backed": 0,
-        "real_source": "IA",
-        "ia_model_mature": 0,
-    }
-    try:
-        if isinstance(EMBUDO_DECISION_STATE, dict):
-            base.update(EMBUDO_DECISION_STATE)
-    except Exception:
-        pass
-    if isinstance(data, dict):
-        base.update(data)
-    EMBUDO_DECISION_STATE = base
-    return EMBUDO_DECISION_STATE
-
 def _perfil_comun_flex_eval(bot: str) -> dict:
     """Perfil flexible por similitud (familias de matriz), sin plantilla rígida."""
     out = {
@@ -15252,539 +14820,129 @@ def _perfil_comun_flex_eval(bot: str) -> dict:
         return out
 
 
-def _degradar_si_modelo_ia_inmaduro(
-    decision: str,
-    risk_mode: str,
-    degrade_from: str,
-    reason: str,
-    warmup_mode: bool,
-    model_family: str,
-    ia_model_mature: bool,
-    allow_operational_override: bool = False,
-) -> tuple[str, str, str, str]:
-    """Degrada decisión a WAIT cuando el modelo IA no está maduro."""
-    if ia_model_mature or decision != EMBUDO_FINAL_REAL_OK:
-        return decision, risk_mode, degrade_from, reason
-    # Escape hatch conservador: si la señal MRV+IA ya es muy fuerte, no congelar por horas.
-    if bool(allow_operational_override):
-        return decision, risk_mode, degrade_from, reason
-    decision = EMBUDO_FINAL_WAIT_SOFT
-    risk_mode = "WAIT_SOFT"
-    if warmup_mode:
-        return decision, risk_mode, "ia_immature_warmup", "ia_immature_warmup->wait"
-    if model_family == "sklearn_logreg_fallback":
-        return decision, risk_mode, "ia_immature_fallback", "ia_fallback->wait"
-    return decision, risk_mode, "ia_immature_unreliable", "ia_unreliable->wait"
+def _rankear_x_localmente(red_bots: list[str], cols: list[dict]) -> list[dict]:
+    """Ranking estructural local (solo matriz/columna inmediata) para resolver caso 2X."""
+    out = []
+    columnas = list(cols or [])
+    for bot in list(red_bots or []):
+        b = str(bot)
+        marks = [str((col or {}).get("cells", {}).get(b) or "") for col in columnas[:6]]
+        while len(marks) < 6:
+            marks.append("")
+        prev_1 = marks[1]
+        prev_2 = marks[2]
+        verdes_recientes = sum(1 for m in marks[1:6] if m == "G")
+        rojas_recientes = sum(1 for m in marks[1:6] if m == "R")
+        racha_roja_previa = 0
+        for m in marks[1:6]:
+            if m == "R":
+                racha_roja_previa += 1
+            else:
+                break
+        score = (
+            (100 if prev_1 == "G" else 0)
+            + (20 * int(verdes_recientes))
+            + (5 if prev_2 == "G" else 0)
+            - (12 * int(racha_roja_previa))
+            - (3 * int(rojas_recientes))
+        )
+        out.append({
+            "bot": b,
+            "score_local": float(score),
+            "prev_1": prev_1,
+            "prev_2": prev_2,
+            "verdes_recientes": int(verdes_recientes),
+            "rojas_recientes": int(rojas_recientes),
+            "racha_roja_previa": int(racha_roja_previa),
+        })
+    out.sort(key=lambda r: (-float(r.get("score_local", 0.0) or 0.0), str(r.get("bot", ""))))
+    return out
 
-def _embudo_main_decision_coherent(
-    decision: str,
-    risk_mode: str,
-    hard_guard_hard_block: bool,
-    cooldown_active: bool,
-    mode_c_pending: bool,
-    guardrail_ok: bool,
-    guardrail_ok_flex: bool,
-    guard_gap_ok: bool,
-    trigger_ok_live: bool,
-    trigger_force_live: bool,
-    mrv_score: float,
-    flex_ok: bool,
-    flex_score: float,
-) -> tuple[bool, str, bool]:
-    if decision != EMBUDO_FINAL_REAL_OK:
-        return True, "main_skip:not_real", False
-    if bool(hard_guard_hard_block):
-        return False, "main_reject:hard_block", False
-    if bool(cooldown_active):
-        return False, "main_reject:cooldown", False
-    if bool(EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING) and bool(mode_c_pending) and str(risk_mode) != "REAL_MICRO":
-        return False, "main_reject:mode_c_pending", False
-    ctx_strong = bool(
-        (float(mrv_score) >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
-        or (bool(flex_ok) and (float(flex_score) >= float(PERFIL_COMUN_FLEX_SCORE_STRONG)))
-    )
-    trig_ok = bool(trigger_ok_live or trigger_force_live)
-    if bool(EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT) and (not (trig_ok or ctx_strong)):
-        return False, "main_reject:no_trigger_no_context", ctx_strong
-    guard_main_ok = bool(guardrail_ok if str(risk_mode) == "REAL_OK" else guardrail_ok_flex)
-    if not bool(guard_main_ok):
-        return False, ("main_reject:gap_guard" if not bool(guard_gap_ok) else "main_reject:guardrail"), ctx_strong
-    return True, "main_ok", ctx_strong
 
-def _override_columna_rezagada_directa(candidatos: list, estado: dict, bot_names: list[str]) -> dict | None:
-    """Override directo a REAL por columna más reciente casi verde con 1-2 rojos rezagados."""
-    if not bool(OVERRIDE_REZAGADA_ENABLE):
-        return None
+def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[str], emitir_log: bool = True) -> dict:
+    """Única ruta operativa para promover a REAL: columna actual verde + 1/2 X."""
+    out = {
+        "triggered": False,
+        "selected_bot": None,
+        "selected_case": None,
+        "reason": "estructura_insuficiente",
+        "valids": 0,
+        "greens": 0,
+        "reds": 0,
+        "red_bots": [],
+        "ranking_debug": [],
+    }
     try:
         bots = list(bot_names or [])
         cols = _construir_matriz_resultados_columnas(estado if isinstance(estado, dict) else {}, bots, window=40)
         if not cols:
-            return None
+            out["reason"] = "estructura_insuficiente"
+            return out
         col = dict(cols[0] or {})
         valids = int(col.get("total_validos", 0) or 0)
         greens = int(col.get("total_verdes", 0) or 0)
         reds = int(col.get("total_rojos", 0) or 0)
-        if valids < int(OVERRIDE_REZAGADA_MIN_VALID):
-            return None
-        if greens not in tuple(OVERRIDE_REZAGADA_GREENS_OK):
-            return None
-        if reds not in tuple(OVERRIDE_REZAGADA_REDS_OK):
-            return None
+        out["valids"] = int(valids)
+        out["greens"] = int(greens)
+        out["reds"] = int(reds)
+
+        if valids < 5:
+            out["reason"] = "estructura_insuficiente"
+            return out
+        eval_col = evaluar_patron_columna_verde(col)
+        if not bool(eval_col.get("es_col80", False)):
+            out["reason"] = "columna_no_verde"
+            return out
+        if reds > 2:
+            out["reason"] = "mas_de_2_X"
+            return out
+        if reds == 0:
+            out["reason"] = "sin_rojos"
+            return out
+        if reds not in (1, 2):
+            out["reason"] = "sin_columna_verde_valida"
+            return out
+
         cells = dict(col.get("cells", {}) or {})
         red_bots = [str(b) for b, m in cells.items() if str(b) in bots and m == "R"]
-        if len(red_bots) not in (1, 2):
-            return None
+        out["red_bots"] = list(red_bots)
+        if len(red_bots) != reds:
+            out["reason"] = "estructura_insuficiente"
+            return out
 
-        c_map = {str(c[1]): c for c in list(candidatos or []) if isinstance(c, (list, tuple)) and len(c) >= 3}
-
-        def _f(st: dict, *keys: str) -> float:
-            for k in keys:
-                v = st.get(k, None)
-                if isinstance(v, (int, float)):
-                    return float(v)
-            return 0.0
-
-        def _snapshot(bot: str) -> dict:
-            st = dict((estado.get(bot, {}) if isinstance(estado, dict) else {}) or {})
-            cand = c_map.get(str(bot))
-            prob_oper = float(cand[2]) if (cand is not None and len(cand) > 2 and isinstance(cand[2], (int, float))) else _f(
-                st, "prob_ia_oper", "ia_prob_operativa", "ia_prob_cal_model", "ia_prob", "probabilidad_ia"
-            )
-            return {
-                "bot": str(bot),
-                "prob_oper": float(prob_oper),
-                "score_hibrido": _f(st, "ia_score_hibrido"),
-                "hist_wr": _f(st, "porcentaje_exito", "ia_evidence_wr"),
-                "payout": _f(st, "payout"),
-                "ctx": _f(st, "mrv_score_zona", "ia_suceso_idx", "ia_regime_score"),
-            }
-
-        ranking_debug = [_snapshot(b) for b in red_bots]
-        if len(ranking_debug) == 1:
-            sel = ranking_debug[0]
-            sel_case = "1X"
-            reason = "columna_verde_1x_rezagada"
+        if reds == 1:
+            out["triggered"] = True
+            out["selected_bot"] = str(red_bots[0])
+            out["selected_case"] = "1X"
+            out["reason"] = "columna_verde_1X"
         else:
-            ordered = sorted(
-                ranking_debug,
-                key=lambda r: (
-                    -float(r.get("prob_oper", 0.0) or 0.0),
-                    -float(r.get("score_hibrido", 0.0) or 0.0),
-                    -float(r.get("hist_wr", 0.0) or 0.0),
-                    -float(r.get("payout", 0.0) or 0.0),
-                    -float(r.get("ctx", 0.0) or 0.0),
-                    str(r.get("bot", "")),
-                ),
-            )
-            sel = dict(ordered[0] or {})
-            sel_case = "2X"
-            reason = "columna_verde_2x_rezagada_ranking"
-            ranking_debug = ordered
+            ranking = _rankear_x_localmente(red_bots, cols)
+            if not ranking:
+                out["reason"] = "sin_candidato_local"
+                return out
+            out["ranking_debug"] = list(ranking)
+            out["triggered"] = True
+            out["selected_bot"] = str(ranking[0].get("bot") or "")
+            out["selected_case"] = "2X"
+            out["reason"] = "columna_verde_2X_fuerza_local"
 
-        selected_bot = str(sel.get("bot", "") or "")
-        if selected_bot not in bots:
-            return None
-        return {
-            "triggered": True,
-            "selected_bot": selected_bot,
-            "selected_case": sel_case,
-            "greens": int(greens),
-            "reds": int(reds),
-            "valids": int(valids),
-            "red_bots": list(red_bots),
-            "ranking_debug": list(ranking_debug),
-            "selected_prob": float(sel.get("prob_oper", 0.0) or 0.0),
-            "selected_score_hibrido": float(sel.get("score_hibrido", 0.0) or 0.0),
-            "reason": str(reason),
-        }
-    except Exception:
-        return None
-
-
-def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
-    """Embudo final: decisión principal por MRV+IA; dyn_gate/legacy solo guardrail/telemetría."""
-    out = _registrar_estado_embudo({
-        "decision_final": EMBUDO_FINAL_WAIT_SOFT,
-        "decision_reason": "sin_candidatos",
-        "gate_quality": "wait",
-        "risk_mode": "WAIT_SOFT",
-        "soft_wait_reason": "sin_candidatos",
-        "hard_block_reason": "",
-        "top1_bot": None,
-        "top2_bot": None,
-        "gap_value": 0.0,
-        "top1_prob": 0.0,
-        "top2_prob": 0.0,
-        "degrade_from": "none",
-        "ia_real_backed": 0,
-        "real_source": "IA",
-        "ia_model_mature": 0,
-        "legacy_estado_real": str(estado_real or "NORMAL"),
-        "legacy_pilot_governs": 0,
-    })
-    if not candidatos:
+        if bool(emitir_log):
+            if bool(out.get("triggered")):
+                if str(out.get("selected_case", "")) == "1X":
+                    agregar_evento(f"LOGICA_UNICA_REAL: caso=1X bot={out.get('selected_bot')}")
+                else:
+                    motivo = str(out.get("reason", ""))
+                    agregar_evento(f"LOGICA_UNICA_REAL: caso=2X bot={out.get('selected_bot')} motivo={motivo}")
+            else:
+                agregar_evento(f"LOGICA_UNICA_REAL: {out.get('reason', 'estructura_insuficiente')}")
         return out
-    try:
-        ordered = sorted(candidatos, key=lambda x: float(x[2] if len(x) > 2 else 0.0), reverse=True)
-        top1 = ordered[0]
-        top2 = ordered[1] if len(ordered) > 1 else None
-        top1_bot = str(top1[1])
-        top1_prob = float(top1[2] or 0.0)
-        top2_bot = str(top2[1]) if top2 else None
-        top2_prob = float(top2[2] or 0.0) if top2 else 0.0
-        gap_value = float(top1_prob - top2_prob)
-
-        st_top = estado_bots.get(top1_bot, {}) if isinstance(estado_bots, dict) else {}
-        mrv_score = float(st_top.get("mrv_score_zona", 0.0) or 0.0)
-        mrv_rupt = float(st_top.get("mrv_p_ruptura_inmediata", 1.0) or 1.0)
-        mrv_vida = float(st_top.get("mrv_vida_util_restante", 0.0) or 0.0)
-        mrv_estado = str(st_top.get("mrv_estado", "ESPERA") or "ESPERA")
-        mrv_fallback_reason = str(st_top.get("mrv_fallback_reason", "") or "")
-
-        # Guardrails DYN_ROOF (secundarios): nunca reemplazan la calidad MRV+IA.
-        dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
-        guard_gap_ok = bool(dgate.get("gap_ok", True))
-        guard_anti_rafaga_ok = bool(dgate.get("crossed_up", True) or dgate.get("trigger_force", False) or dgate.get("trigger_ok", False))
-        cooldown_active = bool(time.time() < float(REAL_COOLDOWN_UNTIL_TS))
-
-        meta = meta_live if isinstance(meta_live, dict) else {}
-        n_samples = int(meta.get("n_samples", meta.get("n", 0)) or 0)
-        reliable = bool(meta.get("reliable", False))
-        auc = float(meta.get("auc", 0.0) or 0.0)
-        warmup_mode = bool(meta.get("warmup_mode", n_samples < int(TRAIN_WARMUP_MIN_ROWS)))
-        model_family = str(meta.get("model_family", "") or "").strip().lower()
-        ia_model_mature = bool((not warmup_mode) and reliable and (model_family != "sklearn_logreg_fallback"))
-
-        hard_guard_state = _estado_guardrail_ia_fuerte(force=False)
-        hard_guard_hard_block = bool(hard_guard_state.get("hard_block", False))
-        if hard_guard_hard_block and (not reliable) and (auc < 0.50) and (n_samples < int(TRAIN_WARMUP_MIN_ROWS)):
-            return _registrar_estado_embudo({
-                "decision_final": EMBUDO_FINAL_BLOCK_HARD,
-                "decision_reason": "guardrail_hard",
-                "gate_quality": "block",
-                "risk_mode": "BLOCK_HARD",
-                "hard_block_reason": "guardrail_hard",
-                "soft_wait_reason": "",
-                "top1_bot": top1_bot,
-                "top2_bot": top2_bot,
-                "gap_value": gap_value,
-                "top1_prob": top1_prob,
-                "top2_prob": top2_prob,
-                "degrade_from": "hard_guard",
-                "ia_real_backed": 0,
-                "real_source": "OPERATIVO_NO_IA",
-                "ia_model_mature": int(ia_model_mature),
-                "legacy_estado_real": str(estado_real or "NORMAL"),
-                "legacy_pilot_governs": 0,
-                "guardrail_gap_ok": int(guard_gap_ok),
-                "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
-            })
-
-        decision = EMBUDO_FINAL_WAIT_SOFT
-        risk_mode = "WAIT_SOFT"
-        reason = "mrv_wait"
-        wait_reason = "mrv_wait"
-        quality = "wait"
-
-        ia_floor = float(max(get_umbral_operativo(), AUTO_REAL_UNRELIABLE_GATE_MIN_PROB))
-        ia_floor_eff = float(max(0.0, ia_floor - float(IA_FLOOR_EDGE_TOL)))
-        ia_ok = bool(top1_prob >= ia_floor_eff)
-        flex_eval = _perfil_comun_flex_eval(top1_bot) if bool(PERFIL_COMUN_FLEX_ENABLE) else {"ok": False, "score": 0.0}
-        mrv_ok = bool(
-            (mrv_score >= float(MRV_SCORE_REAL_OK_MIN))
-            and (mrv_rupt <= float(MRV_RUPTURA_HARD_MAX))
-            and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
-            and (mrv_estado in ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA"))
-        )
-        # Fallback MRV explícito: no bloquear totalmente cuando la historia aún es insuficiente.
-        if (not mrv_ok) and (mrv_fallback_reason in ("low_history", "default")):
-            mrv_ok = bool(
-                (top1_prob >= float(max(0.62, ia_floor_eff + 0.01)))
-                and (mrv_rupt <= 0.62)
-                and (mrv_vida >= 0.60)
-                and (mrv_estado in ("PRE_ZONA", "ZONA_CONFIRMADA", "ZONA_MADURA", "ESPERA"))
-            )
-        gate_mode_live = str(dgate.get("gate_mode", "") or "")
-        confirm_streak_live = int(dgate.get("confirm_streak", 0) or 0)
-        confirm_need_live = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
-        trigger_ok_live = bool(dgate.get("trigger_ok", False))
-        trigger_force_live = bool(dgate.get("trigger_force", False))
-        valid40_live = int(flex_eval.get("valid_40", 0) or 0)
-        short_sample_flex = bool(
-            (valid40_live >= int(PERFIL_COMUN_FLEX_MIN_VALID))
-            and (valid40_live <= int(PERFIL_COMUN_FLEX_SHORT_VALID_MAX))
-        )
-        mode_c_pending = bool(
-            (gate_mode_live == "C")
-            and (confirm_streak_live < confirm_need_live)
-            and (not trigger_ok_live)
-        )
-        ia_floor_flex_base = float(max(float(PERFIL_COMUN_FLEX_IA_MIN_ABS), ia_floor_eff + float(PERFIL_COMUN_FLEX_IA_EDGE_RELAX)))
-        ia_floor_flex = float(ia_floor_flex_base)
-        if bool(PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE) and short_sample_flex and mode_c_pending:
-            ia_floor_flex = float(PERFIL_COMUN_FLEX_IA_MIN_ABS)
-        ia_ok_flex = bool(top1_prob >= ia_floor_flex)
-        mrv_ok_flex_normal = bool(
-            bool(flex_eval.get("ok", False))
-            and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_MIN))
-            and (mrv_score >= float(PERFIL_COMUN_FLEX_MRV_SCORE_MIN))
-            and (mrv_vida >= float(PERFIL_COMUN_FLEX_MRV_VIDA_MIN))
-            and (mrv_rupt <= float(PERFIL_COMUN_FLEX_MRV_RUPT_MAX))
-            and (mrv_estado in tuple(PERFIL_COMUN_FLEX_ESTADOS_OK))
-        )
-        mrv_ok_flex_rescue = bool(
-            bool(PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE)
-            and short_sample_flex
-            and mode_c_pending
-            and (str(flex_eval.get("family_label", "INVALIDA") or "INVALIDA") in tuple(PERFIL_COMUN_FLEX_MODE_C_RESCUE_FAMILIES_OK))
-            and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_MIN))
-            and (mrv_score >= float(PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_SCORE_MIN))
-            and (mrv_vida >= float(PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_VIDA_MIN))
-            and (mrv_rupt <= float(PERFIL_COMUN_FLEX_MODE_C_RESCUE_MRV_RUPT_MAX))
-            and (mrv_estado in tuple(PERFIL_COMUN_FLEX_ESTADOS_OK))
-        )
-        mrv_ok_flex = bool(mrv_ok_flex_normal or mrv_ok_flex_rescue)
-        if not bool(DYN_ROOF_GUARDRAIL_STRICT):
-            min_gap_relaxed = float(max(0.0, DYN_ROOF_GUARDRAIL_MIN_GAP_RELAXED))
-            guard_gap_ok = bool(guard_gap_ok or (gap_value >= min_gap_relaxed))
-            guard_anti_rafaga_ok = bool(
-                guard_anti_rafaga_ok
-                or (top1_prob >= float(ia_floor_eff + 0.04))
-                or (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
-            )
-        guardrail_ok = bool(guard_gap_ok and guard_anti_rafaga_ok and (not cooldown_active))
-        guardrail_ok_flex = bool(
-            guardrail_ok
-            or (
-                bool(PERFIL_COMUN_FLEX_MODE_C_RESCUE_ENABLE)
-                and short_sample_flex
-                and mode_c_pending
-                and (not cooldown_active)
-                and bool(guard_gap_ok)
-            )
-        )
-
-        if ia_ok and mrv_ok and guardrail_ok:
-            decision = EMBUDO_FINAL_REAL_OK
-            risk_mode = "REAL_OK"
-            reason = "mrv_ia_guard_ok"
-            wait_reason = ""
-            quality = "strong"
-        elif ia_ok_flex and mrv_ok_flex_rescue and (not mrv_ok_flex_normal) and guardrail_ok_flex:
-            decision = EMBUDO_FINAL_REAL_MICRO
-            reason = "perfil_comun_flex_modec_rescue"
-            wait_reason = ""
-            risk_mode = "REAL_MICRO"
-            quality = "moderate"
-        elif ia_ok_flex and mrv_ok_flex and guardrail_ok_flex:
-            decision = EMBUDO_FINAL_REAL_OK
-            reason = "perfil_comun_flex_ok"
-            wait_reason = ""
-            flex_score = float(flex_eval.get("score", 0.0) or 0.0)
-            risk_mode = "REAL_OK" if flex_score >= float(PERFIL_COMUN_FLEX_SCORE_STRONG) else "REAL_MICRO"
-            quality = "strong" if flex_score >= float(PERFIL_COMUN_FLEX_SCORE_STRONG) else "moderate"
-        else:
-            if not ia_ok:
-                wait_reason = "ia_floor_flex" if (not ia_ok_flex and bool(PERFIL_COMUN_FLEX_ENABLE)) else "ia_floor"
-            elif not mrv_ok:
-                wait_reason = "mrv_context_flex" if (not mrv_ok_flex and bool(PERFIL_COMUN_FLEX_ENABLE)) else "mrv_context"
-            elif cooldown_active:
-                wait_reason = "cooldown"
-            elif not guard_gap_ok:
-                wait_reason = "gap_guard"
-            elif not guard_anti_rafaga_ok:
-                wait_reason = "anti_rafaga"
-            reason = wait_reason
-
-        main_ok, main_reason, main_ctx_strong = _embudo_main_decision_coherent(
-            decision=decision,
-            risk_mode=risk_mode,
-            hard_guard_hard_block=hard_guard_hard_block,
-            cooldown_active=cooldown_active,
-            mode_c_pending=mode_c_pending,
-            guardrail_ok=guardrail_ok,
-            guardrail_ok_flex=guardrail_ok_flex,
-            guard_gap_ok=guard_gap_ok,
-            trigger_ok_live=trigger_ok_live,
-            trigger_force_live=trigger_force_live,
-            mrv_score=mrv_score,
-            flex_ok=bool(flex_eval.get("ok", False)),
-            flex_score=float(flex_eval.get("score", 0.0) or 0.0),
-        )
-        if (decision == EMBUDO_FINAL_REAL_OK) and (not bool(main_ok)):
-            decision = EMBUDO_FINAL_WAIT_SOFT
-            risk_mode = "WAIT_SOFT"
-            quality = "wait"
-            reason = str(main_reason)
-            wait_reason = str(main_reason)
-
-        strong_operational_override = bool(
-            decision == EMBUDO_FINAL_REAL_OK
-            and (n_samples >= 80)
-            and (top1_prob >= float(ia_floor_eff + 0.05))
-            and (
-                (
-                    (mrv_score >= float(MRV_SCORE_REAL_OK_MIN + 0.08))
-                    and (mrv_vida >= float(MRV_VIDA_MIN_REAL))
-                )
-                or (
-                    bool(PERFIL_COMUN_FLEX_ENABLE)
-                    and bool(flex_eval.get("ok", False))
-                    and (float(flex_eval.get("score", 0.0) or 0.0) >= float(PERFIL_COMUN_FLEX_SCORE_STRONG))
-                )
-            )
-        )
-        early_micro_override = bool(
-            bool(REAL_EARLY_MICRO_OVERRIDE_ENABLE)
-            and (decision == EMBUDO_FINAL_REAL_OK)
-            and (str(risk_mode) == "REAL_MICRO")
-            and (n_samples >= int(REAL_EARLY_MICRO_OVERRIDE_MIN_N))
-            and (auc >= float(REAL_EARLY_MICRO_OVERRIDE_MIN_AUC))
-            and (top1_prob >= float(ia_floor_eff + REAL_EARLY_MICRO_OVERRIDE_MIN_PROB_MARGIN))
-            and (bool(REAL_EARLY_MICRO_OVERRIDE_ALLOW_UNRELIABLE) or bool(reliable))
-            and ((not bool(REAL_EARLY_MICRO_OVERRIDE_REQUIRE_WARMUP_ONLY)) or bool(warmup_mode))
-        )
-
-        decision, risk_mode, degrade_from, reason = _degradar_si_modelo_ia_inmaduro(
-            decision=decision,
-            risk_mode=risk_mode,
-            degrade_from="none",
-            reason=reason,
-            warmup_mode=warmup_mode,
-            model_family=model_family,
-            ia_model_mature=ia_model_mature,
-            allow_operational_override=bool(main_ok and (strong_operational_override or early_micro_override)),
-        )
-        if decision != EMBUDO_FINAL_REAL_OK and not wait_reason:
-            wait_reason = reason
-
-        main_label = "MAIN OK" if decision == EMBUDO_FINAL_REAL_OK else "MAIN REJECT"
-        try:
-            agregar_evento(
-                f"🧭 {main_label}: bot={top1_bot} p={top1_prob*100:.1f}% risk={risk_mode} reason={reason} "
-                f"gap={gap_value*100:.1f}pp gap_ok={int(guard_gap_ok)} anti={int(guard_anti_rafaga_ok)} "
-                f"trig={int(trigger_ok_live or trigger_force_live)} ctx={int(main_ctx_strong)} mode_c_pending={int(mode_c_pending)} "
-                f"ovr={int(main_ok and (strong_operational_override or early_micro_override))}"
-            )
-        except Exception:
-            pass
-
-        ia_real_backed = int(decision == EMBUDO_FINAL_REAL_OK and ia_model_mature)
-        real_source = "IA" if ia_real_backed else "OPERATIVO_NO_IA"
-
-        return _registrar_estado_embudo({
-            "decision_final": decision,
-            "decision_reason": reason,
-            "gate_quality": quality,
-            "risk_mode": risk_mode,
-            "hard_block_reason": "",
-            "soft_wait_reason": wait_reason,
-            "top1_bot": top1_bot,
-            "top2_bot": top2_bot,
-            "gap_value": gap_value,
-            "top1_prob": top1_prob,
-            "top2_prob": top2_prob,
-            "degrade_from": degrade_from,
-            "ia_real_backed": int(ia_real_backed),
-            "real_source": str(real_source),
-            "ia_model_mature": int(ia_model_mature),
-            "legacy_estado_real": str(estado_real or "NORMAL"),
-            "legacy_pilot_governs": 0,
-            "guardrail_gap_ok": int(guard_gap_ok),
-            "guardrail_anti_rafaga_ok": int(guard_anti_rafaga_ok),
-            "ia_floor_eff": float(ia_floor_eff),
-            "perfil_comun_flex_ok": int(bool(flex_eval.get("ok", False))),
-            "perfil_comun_flex_score": float(flex_eval.get("score", 0.0) or 0.0),
-            "perfil_comun_flex_family": str(flex_eval.get("family_label", "INVALIDA") or "INVALIDA"),
-            "perfil_comun_flex_family_score": float(flex_eval.get("score_family", 0.0) or 0.0),
-            "perfil_comun_flex_ia_floor": float(ia_floor_flex),
-            "perfil_comun_flex_valid40": int(flex_eval.get("valid_40", 0) or 0),
-            "perfil_comun_flex_modec_rescue": int(bool(guardrail_ok_flex and (not guardrail_ok))),
-            "perfil_comun_flex_mrv_normal_ok": int(mrv_ok_flex_normal),
-            "perfil_comun_flex_mrv_rescue_ok": int(mrv_ok_flex_rescue),
-            "early_micro_override": int(early_micro_override),
-            "early_micro_override_ok": int(bool(early_micro_override)),
-            "early_micro_override_auc": float(auc or 0.0),
-            "early_micro_override_n": int(n_samples or 0),
-        })
     except Exception:
-        return _registrar_estado_embudo({"decision_final": EMBUDO_FINAL_WAIT_SOFT, "decision_reason": "embudo_err", "soft_wait_reason": "embudo_err"})
+        out["reason"] = "estructura_insuficiente"
+        if bool(emitir_log):
+            agregar_evento("LOGICA_UNICA_REAL: estructura_insuficiente")
+        return out
 
-def _candidate_rescue_ok(embudo: dict, dyn_gate: dict | None, top1_bot: str, top1_prob: float) -> tuple[bool, str, float]:
-    """Valida rescate post-embudo de forma coherente y auditable."""
-    emb = embudo if isinstance(embudo, dict) else {}
-    dgate = dyn_gate if isinstance(dyn_gate, dict) else {}
-    decision_now = str(emb.get("decision_final", EMBUDO_FINAL_WAIT_SOFT) or EMBUDO_FINAL_WAIT_SOFT)
-    wait_reason = str(emb.get("soft_wait_reason") or emb.get("decision_reason") or "")
-    hard_reason = str(emb.get("hard_block_reason") or "")
 
-    if decision_now == EMBUDO_FINAL_BLOCK_HARD:
-        return False, "rescue_reject:hard_block", 0.0
-    if bool(EMBUDO_CANDIDATE_RESCUE_ONLY_WHEN_WAIT_SOFT) and decision_now != EMBUDO_FINAL_WAIT_SOFT:
-        return False, "rescue_reject:not_wait_soft", 0.0
-    if not bool(("sin_candidatos" in wait_reason) or ("wait_soft" in wait_reason.lower()) or (decision_now == EMBUDO_FINAL_WAIT_SOFT)):
-        return False, "rescue_reject:not_soft_wait_reason", 0.0
-    if bool(EMBUDO_CANDIDATE_RESCUE_BLOCK_ON_HARD_GUARD):
-        hg = _estado_guardrail_ia_fuerte(force=False) if "_estado_guardrail_ia_fuerte" in globals() else {}
-        if bool((hg or {}).get("hard_block", False)) or str((hg or {}).get("level", "")).upper() == "RED":
-            return False, "rescue_reject:hard_block", 0.0
-    if bool(EMBUDO_CANDIDATE_RESCUE_REQUIRE_NO_HARD_BLOCK) and hard_reason:
-        return False, "rescue_reject:hard_block", 0.0
-    if (not str(top1_bot or "").strip()) or (float(top1_prob or 0.0) <= 0.0):
-        return False, "rescue_reject:no_top1", 0.0
-
-    roof_ref = float(dgate.get("roof_eff", dgate.get("roof", 0.0)) or 0.0)
-    roof_deficit_pts = max(0.0, float(roof_ref - float(top1_prob)) * 100.0) if roof_ref > 0.0 else 0.0
-    roof_def_base = float(EMBUDO_CANDIDATE_RESCUE_MAX_ROOF_DEFICIT_PTS)
-    roof_def_max = float(roof_def_base)
-    rb = estado_bots.get(top1_bot, {}) if isinstance(estado_bots, dict) else {}
-    rb_score = float(rb.get("red_bisagra_score", 0.0) or 0.0)
-    rb_ok = bool(rb.get("red_bisagra_ok", False))
-    rb_reason = str(rb.get("red_bisagra_reason", "") or "")
-    if (roof_deficit_pts > roof_def_base) and (roof_ref > 0.0):
-        can_rb_extra = False
-        if bool(RED_BISAGRA_ENABLE) and rb_ok:
-            mrv_score = float(rb.get("mrv_score_zona", 0.0) or 0.0)
-            mrv_vida = float(rb.get("mrv_vida_util_restante", 0.0) or 0.0)
-            mrv_rupt = float(rb.get("mrv_p_ruptura_inmediata", 1.0) or 1.0)
-            wait_has_roof = ("roof" in str(wait_reason).lower()) or ("roof_deficit" in str(wait_reason).lower())
-            pattern_src = emb.get("pattern_state", emb.get("perfil_comun_flex_family", None))
-            pattern_state = str(pattern_src).upper().strip() if pattern_src is not None else ""
-            pattern_ok = pattern_state in ("CONTINUIDAD", "REBOTE")
-            if bool(RED_BISAGRA_REQUIRE_PATTERN_OK) and (not pattern_state):
-                return False, "rescue_reject:red_bisagra_no_pattern_state", roof_deficit_pts
-            if bool(RED_BISAGRA_REQUIRE_PATTERN_OK) and (not pattern_ok):
-                return False, "rescue_reject:red_bisagra_pattern_not_ok", roof_deficit_pts
-            can_rb_extra = bool(
-                (decision_now == EMBUDO_FINAL_WAIT_SOFT)
-                and (not bool(hard_reason))
-                and wait_has_roof
-                and (float(top1_prob) >= float(RED_BISAGRA_RESCUE_MIN_PROB))
-                and (rb_score >= float(RED_BISAGRA_MIN_SCORE_RESCUE))
-                and (mrv_score >= 0.42)
-                and (mrv_vida >= 0.50)
-                and (mrv_rupt <= 0.68)
-            )
-        if can_rb_extra:
-            roof_def_max = roof_def_base + float(RED_BISAGRA_RESCUE_MAX_EXTRA_ROOF_PTS)
-        if roof_deficit_pts > roof_def_max:
-            if can_rb_extra:
-                return False, "rescue_reject:roof_deficit_even_with_red_bisagra", roof_deficit_pts
-            return False, "rescue_reject:roof_deficit", roof_deficit_pts
-
-    confirm_streak = int(dgate.get("confirm_streak", 0) or 0)
-    confirm_need = int(dgate.get("confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
-    confirm_pending = bool(confirm_streak < confirm_need)
-    if confirm_pending and (not bool(EMBUDO_CANDIDATE_RESCUE_ALLOW_CONFIRM_PENDING)):
-        return False, "rescue_reject:confirm_pending", roof_deficit_pts
-
-    trig_ok = bool(dgate.get("trigger_ok", False))
-    trig_force = bool(dgate.get("trigger_force", False))
-    ctx_ok = bool(int(emb.get("perfil_comun_flex_ok", 0) or 0) == 1)
-    if bool(EMBUDO_CANDIDATE_RESCUE_REQUIRE_TRIGGER_OR_CONTEXT) and (not (trig_ok or trig_force or ctx_ok)):
-        return False, "rescue_reject:no_trigger_no_context", roof_deficit_pts
-
-    return True, "rescue_ok:candidate_rescue_wait_soft", roof_deficit_pts
 
 
 def _umbral_senal_actual_hud() -> float:
@@ -16314,11 +15472,6 @@ async def cargar_datos_bot(bot, token_actual):
 
             estado_bots[bot]["token"] = "REAL" if effective_owner == bot else "DEMO"
             last_update_time[bot] = time.time()
-
-        try:
-            estado_bots[bot].update(_compute_red_bisagra(bot))
-        except Exception:
-            pass
 
         # Mantén tu pipeline incremental como estaba
         anexar_incremental_desde_bot(bot)
@@ -17232,22 +16385,19 @@ async def main():
                                     )
                                 DYN_ROOF_STATE["last_low_balance_warn_ts"] = float(ahora_warn)
 
-                        # Estado operativo REAL (SOMBRA -> MICRO -> NORMAL)
-                        try:
-                            estado_real = _resolver_estado_real(None)
-                        except Exception:
-                            estado_real = "SHADOW"
-
                         if candidatos:
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
-                        candidatos_pre_embudo = list(candidatos or [])
-
-                        override_rezagada = _override_columna_rezagada_directa(candidatos, estado_bots, BOT_NAMES)
-                        if isinstance(override_rezagada, dict) and bool(override_rezagada.get("triggered", False)):
-                            selected_bot = str(override_rezagada.get("selected_bot", "") or "").strip()
-                            selected_prob = float(override_rezagada.get("selected_prob", 0.0) or 0.0)
+                        logica_unica_real = _resolver_logica_unica_real(candidatos, estado_bots, BOT_NAMES, emitir_log=True)
+                        selected_bot_operativo = ""
+                        selected_prob_operativo = 0.0
+                        if bool(logica_unica_real.get("triggered", False)):
+                            selected_bot = str(logica_unica_real.get("selected_bot") or "").strip()
                             rec = next((c for c in list(candidatos or []) if str(c[1]) == selected_bot), None)
-                            if rec is None:
+                            selected_prob = 0.0
+                            if rec is not None and len(rec) > 2 and isinstance(rec[2], (int, float)):
+                                selected_prob = float(rec[2] or 0.0)
+                            else:
+                                selected_prob = float(_prob_ia_operativa_bot(selected_bot, default=0.0) or 0.0)
                                 st_res = estado_bots.get(selected_bot, {}) if isinstance(estado_bots, dict) else {}
                                 rec = (
                                     float(st_res.get("ia_score_hibrido", selected_prob) or selected_prob),
@@ -17260,107 +16410,10 @@ async def main():
                                     float(st_res.get("ia_evidence_lb", 0.0) or 0.0),
                                 )
                             candidatos = [rec]
-                            embudo = _registrar_estado_embudo({
-                                "decision_final": EMBUDO_FINAL_REAL_OK,
-                                "decision_reason": "override_columna_rezagada_directa",
-                                "risk_mode": "REAL_OK",
-                                "soft_wait_reason": "",
-                                "hard_block_reason": "",
-                                "real_source": "OVERRIDE_COLUMNA_REZAGADA",
-                                "top1_bot": str(selected_bot),
-                                "top1_prob": float(selected_prob),
-                                "top2_bot": None,
-                                "top2_prob": 0.0,
-                                "gap_value": 0.0,
-                            })
-                            if str(override_rezagada.get("selected_case", "")) == "1X":
-                                agregar_evento(
-                                    f"🔥 Override columna rezagada: caso=1X bot={selected_bot} "
-                                    f"greens={int(override_rezagada.get('greens', 0) or 0)} reds={int(override_rezagada.get('reds', 0) or 0)} -> REAL directo"
-                                )
-                            else:
-                                agregar_evento(
-                                    f"🔥 Override columna rezagada: caso=2X bot={selected_bot} "
-                                    f"reds={list(override_rezagada.get('red_bots', []) or [])} -> gana por fuerza comparativa -> REAL directo"
-                                )
+                            selected_bot_operativo = str(selected_bot)
+                            selected_prob_operativo = float(selected_prob)
                         else:
-                            embudo = _resolver_embudo_final(candidatos, dyn_gate, estado_real, resolver_canary_estado(leer_model_meta() or {}))
-                        decision_final = str(embudo.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
-                        if decision_final == EMBUDO_FINAL_BLOCK_HARD:
-                            agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
                             candidatos = []
-                        elif decision_final == EMBUDO_FINAL_WAIT_SOFT:
-                            rescue_applied = False
-                            wait_reason_emb = str(embudo.get("soft_wait_reason") or embudo.get("decision_reason") or "")
-                            top1_rescue = str(embudo.get("top1_bot") or "").strip()
-                            top1_prob_rescue = float(embudo.get("top1_prob", 0.0) or 0.0)
-                            rec_pre = None
-                            if (not top1_rescue) and candidatos_pre_embudo:
-                                rec_pre = candidatos_pre_embudo[0]
-                                top1_rescue = str(rec_pre[1] or "").strip()
-                                top1_prob_rescue = float(rec_pre[2] or 0.0)
-                            if (not top1_rescue):
-                                live_pre = []
-                                for _b in BOT_NAMES:
-                                    _p = _prob_ia_operativa_bot(_b, default=None)
-                                    if isinstance(_p, (int, float)):
-                                        live_pre.append((str(_b), float(_p)))
-                                live_pre.sort(key=lambda t: float(t[1]), reverse=True)
-                                if live_pre:
-                                    top1_rescue = str(live_pre[0][0] or "").strip()
-                                    top1_prob_rescue = float(live_pre[0][1] or 0.0)
-                            can_rescue_wait = bool(
-                                EMBUDO_CANDIDATE_RESCUE_ENABLE
-                                and (top1_rescue in BOT_NAMES)
-                                and (top1_prob_rescue >= float(EMBUDO_CANDIDATE_RESCUE_MIN_PROB))
-                            )
-                            rescue_reason = "rescue_reject:not_evaluated"
-                            roof_deficit_pts = 0.0
-                            if can_rescue_wait:
-                                can_rescue_wait, rescue_reason, roof_deficit_pts = _candidate_rescue_ok(
-                                    embudo=embudo,
-                                    dyn_gate=dyn_gate,
-                                    top1_bot=top1_rescue,
-                                    top1_prob=float(top1_prob_rescue),
-                                )
-                            if can_rescue_wait:
-                                rec = rec_pre if rec_pre is not None else next((c for c in list(candidatos_pre_embudo or []) if str(c[1]) == top1_rescue), None)
-                                if rec is None:
-                                    st_res = estado_bots.get(top1_rescue, {}) if isinstance(estado_bots, dict) else {}
-                                    rec = (
-                                        float(top1_prob_rescue),
-                                        str(top1_rescue),
-                                        float(top1_prob_rescue),
-                                        float(top1_prob_rescue),
-                                        float(st_res.get("ia_regime_score", 0.0) or 0.0),
-                                        int(st_res.get("ia_evidence_n", 0) or 0),
-                                        float(st_res.get("ia_evidence_wr", 0.0) or 0.0),
-                                        float(st_res.get("ia_evidence_lb", 0.0) or 0.0),
-                                    )
-                                candidatos = [rec]
-                                embudo = _registrar_estado_embudo({
-                                    "decision_final": EMBUDO_FINAL_REAL_OK,
-                                    "decision_reason": str(rescue_reason),
-                                    "soft_wait_reason": "",
-                                    "risk_mode": "REAL_MICRO",
-                                    "gate_quality": "rescue_ok",
-                                    "hard_block_reason": "",
-                                    "top1_bot": str(top1_rescue),
-                                    "top1_prob": float(top1_prob_rescue),
-                                })
-                                rescue_applied = True
-                                agregar_evento(f"🛟 EMBUDO RESCUE OK: bot={top1_rescue} p={top1_prob_rescue*100:.1f}% roof_def={roof_deficit_pts:.1f}pts why={rescue_reason}.")
-                            if not rescue_applied:
-                                embudo = _registrar_estado_embudo({
-                                    "decision_final": EMBUDO_FINAL_WAIT_SOFT,
-                                    "decision_reason": str(rescue_reason),
-                                    "soft_wait_reason": str(rescue_reason),
-                                    "gate_quality": "wait",
-                                })
-                                agregar_evento(f"⏳ EMBUDO WAIT: {rescue_reason} bot={top1_rescue or '--'} p={top1_prob_rescue*100:.1f}% roof_def={roof_deficit_pts:.1f}pts.")
-                                candidatos = []
-                        elif decision_final == EMBUDO_FINAL_REAL_OK:
-                            candidatos = candidatos[:1]
 
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
                         # Si la IA detecta señal y tú estás en manual, preselecciona el mejor bot y abre la ventana
@@ -17380,12 +16433,11 @@ async def main():
                                 ciclo_auto = ciclo_martingala_siguiente()
                                 if reset_martingala_por_saldo(ciclo_auto, saldo_val):
                                     ciclo_auto = 1
-                                emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
-                                mejor_bot = str(emb.get("top1_bot") or "").strip()
+                                mejor_bot = str(selected_bot_operativo or "").strip()
                                 mejor = next((c for c in candidatos if str(c[1]) == mejor_bot), None)
                                 if mejor is not None:
                                     score_top, mejor_bot, prob, p_post, reg_score, ev_n, ev_wr, ev_lb = mejor
-                                    agregar_evento(f"🧠 Embudo IA (manual): ganador único={mejor_bot} | p_oper={prob*100:.1f}% | risk={emb.get('risk_mode','--')}")
+                                    agregar_evento(f"🧠 LOGICA_UNICA_REAL (manual): ganador único={mejor_bot} | p_oper={prob*100:.1f}%")
                                     PENDIENTE_FORZAR_BOT = mejor_bot
                                     PENDIENTE_FORZAR_INICIO = ahora
                                     PENDIENTE_FORZAR_EXPIRA = ahora + VENTANA_DECISION_IA_S
@@ -17401,28 +16453,19 @@ async def main():
                         # ==================== /AUTO-PRESELECCIÓN ====================
 
                         if candidatos and not MODO_REAL_MANUAL:
-                            meta_live = resolver_canary_estado(leer_model_meta() or {})
-                            embudo_live = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
-                            dec_live = str(embudo_live.get("decision_final", EMBUDO_FINAL_WAIT_SOFT))
-                            risk_live = str(embudo_live.get("risk_mode", "WAIT_SOFT"))
-                            if dec_live == EMBUDO_FINAL_REAL_OK:
-                                agregar_evento(
-                                    f"🧭 EMBUDO listo: {dec_live} | risk={risk_live} | gate={embudo_live.get('gate_quality','--')} "
-                                    f"| top1={embudo_live.get('top1_bot') or '--'}"
-                                )
-                            else:
-                                candidatos = []
+                            agregar_evento(
+                                f"🧭 LOGICA_UNICA_REAL lista: bot={selected_bot_operativo or '--'} p_oper={selected_prob_operativo*100:.1f}%"
+                            )
 
                         if candidatos and not MODO_REAL_MANUAL:
                             ciclo_auto = ciclo_martingala_siguiente()
                             if reset_martingala_por_saldo(ciclo_auto, saldo_val):
                                 ciclo_auto = 1
-                            emb = EMBUDO_DECISION_STATE if isinstance(EMBUDO_DECISION_STATE, dict) else {}
-                            mejor_bot = str(emb.get("top1_bot") or "").strip()
+                            mejor_bot = str(selected_bot_operativo or "").strip()
                             mejor = next((c for c in candidatos if str(c[1]) == mejor_bot), None)
                             if mejor is not None:
                                 score_top, mejor_bot, prob, p_post, reg_score, ev_n, ev_wr, ev_lb = mejor
-                                agregar_evento(f"⚙️ IA AUTO (embudo único): {mejor_bot} p_oper={prob*100:.1f}% risk={emb.get('risk_mode','--')} gate={emb.get('gate_quality','--')}")
+                                agregar_evento(f"⚙️ IA AUTO (LOGICA_UNICA_REAL): {mejor_bot} p_oper={prob*100:.1f}%")
                                 monto = MARTI_ESCALADO[max(0, min(len(MARTI_ESCALADO)-1, ciclo_auto - 1))]
                                 val = obtener_valor_saldo()
                                 if val is None or val < monto:
