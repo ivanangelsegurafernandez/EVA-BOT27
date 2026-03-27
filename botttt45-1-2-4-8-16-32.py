@@ -1490,7 +1490,10 @@ async def consultar_saldo_real(ws):
         if _print_once("saldo-real-error-dedicada", ttl=20):
             print(Fore.RED + Style.BRIGHT + f"[ERROR] al consultar saldo REAL (dedicada): {e2}")
     if _print_once("saldo-real-no-disponible-final", ttl=20):
-        print(Fore.YELLOW + "Balance REAL no disponible. Uso último valor válido si existe.")
+        if isinstance(saldo_real_last, (int, float)):
+            print(Fore.YELLOW + "Balance REAL no disponible. Uso último valor válido cacheado.")
+        else:
+            print(Fore.YELLOW + "Balance REAL no disponible y sin histórico válido.")
     return saldo_real_last
 
 # ==================== LÓGICA DE OPERACIÓN ====================
@@ -1923,6 +1926,9 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 payout_mult_f = float(payout_ratio_total or 0.0)
             except Exception:
                 payout_mult_f = 0.0
+            payout_total_f = max(0.0, float(payout_total_f))
+            payout_mult_f = max(0.0, float(payout_mult_f))
+            result_bin_val = 1 if resultado == "GANANCIA" else 0 if resultado == "PÉRDIDA" else ""
             puntaje01 = _norm_puntaje_01(condiciones)  # helper REAL del bot
             trade_uid_final = str(trade_uid or "").strip()
             if not trade_uid_final:
@@ -1947,7 +1953,7 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 "payout_total": float(round(payout_total_f, 2)),
                 "payout_multiplier": float(round(payout_mult_f, 6)),
                 "puntaje_estrategia": float(round(float(puntaje01), 6)),
-                "result_bin": 1 if resultado == "GANANCIA" else 0 if resultado == "PÉRDIDA" else "",
+                "result_bin": result_bin_val,
                 "trade_status": "CERRADO",
                 "epoch": int(epoch_val),
                 "ts": ts_val,

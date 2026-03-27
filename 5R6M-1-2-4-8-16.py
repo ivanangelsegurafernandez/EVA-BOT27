@@ -8140,6 +8140,7 @@ def detectar_cierre_martingala(bot, min_fila=None, require_closed=True, require_
     """
     path = f"registro_enriquecido_{bot}.csv"
     diag_cache = globals().setdefault("_CLOSE_DIAG_LAST", {})
+    diag_reason = globals().setdefault("_CLOSE_DIAG_LAST_REASON", {})
     now_diag = float(time.time())
     def _diag(msg: str, key: str = ""):
         try:
@@ -8147,6 +8148,7 @@ def detectar_cierre_martingala(bot, min_fila=None, require_closed=True, require_
             prev = float(diag_cache.get(k, 0.0) or 0.0)
             if (now_diag - prev) >= 20.0:
                 diag_cache[k] = now_diag
+                diag_reason[str(bot)] = str(msg)
                 agregar_evento(f"🔎 CIERRE REAL {bot}: {msg}")
         except Exception:
             pass
@@ -8288,6 +8290,7 @@ def detectar_cierre_martingala(bot, min_fila=None, require_closed=True, require_
                     _diag(f"fila {fila_num} descartada: ciclo vacío y expected={expected_ciclo}", key="empty_expected_ciclo")
                     continue
                 if int(ciclo) != int(expected_ciclo):
+                    _diag(f"fila {fila_num} descartada: ciclo={ciclo} distinto a expected={expected_ciclo}", key="mismatch_expected_ciclo")
                     continue
             except Exception:
                 _diag(f"fila {fila_num} descartada: ciclo inválido y expected={expected_ciclo}", key="invalid_expected_ciclo")
@@ -12346,9 +12349,12 @@ def mostrar_panel(force: bool = False):
     try:
         valor = obtener_valor_saldo()
         status_now = str(SALDO_STATUS).upper()
+        tiene_cache = globals().get("SALDO_LAST_VALID_VALUE", None) is not None
         if valor is not None:
             saldo_str = f"{float(valor):.2f}"
-            if status_now == "STALE":
+            if status_now == "KNOWN":
+                saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str}"
+            elif status_now in ("STALE", "UNKNOWN") and tiene_cache:
                 age_s = max(0, int(time.time() - float(globals().get("SALDO_LAST_VALID_TS", 0.0) or 0.0)))
                 saldo_line = f"💰 SALDO EN CUENTA REAL DERIV: {saldo_str} [STALE {age_s}s]"
             else:
@@ -16096,9 +16102,11 @@ async def main():
                                     agregar_evento(f"⏱️ Seguridad: {bot} sin actividad reciente en REAL. Esperando cierre por {REAL_STUCK_FORCE_RELEASE_S}s antes de liberar.")
                                 elif (ahora - first_warn) > REAL_STUCK_FORCE_RELEASE_S:
                                     try:
+                                        last_discard = str((globals().get("_CLOSE_DIAG_LAST_REASON", {}) or {}).get(str(bot), "")).strip()
+                                        extra = f" last_discard={last_discard}" if last_discard else ""
                                         agregar_evento(
                                             f"🔎 CIERRE REAL {bot}: timeout sin cierre válido "
-                                            f"(require_closed=True, require_real_token=True, expected_ciclo={estado_bots.get(bot, {}).get('ciclo_actual', None)})"
+                                            f"(require_closed=True, require_real_token=True, expected_ciclo={estado_bots.get(bot, {}).get('ciclo_actual', None)}{extra})"
                                         )
                                     except Exception:
                                         pass
