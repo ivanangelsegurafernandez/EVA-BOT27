@@ -16493,34 +16493,56 @@ async def main():
                                 ciclo_auto = 1
                             mejor_bot = str(selected_bot_operativo or "").strip()
                             mejor = next((c for c in candidatos if str(c[1]) == mejor_bot), None)
-                            if mejor is not None:
+                            monto = MARTI_ESCALADO[max(0, min(len(MARTI_ESCALADO)-1, ciclo_auto - 1))]
+                            ciclo_tag = _marti_ciclo_tag(ciclo_auto)
+
+                            if not mejor_bot or mejor is None:
+                                agregar_evento(
+                                    f"AUTO_REAL: trigger sin bot operativo válido (selected='{mejor_bot or '--'}')"
+                                )
+                            else:
                                 score_top, mejor_bot, prob, p_post, reg_score, ev_n, ev_wr, ev_lb = mejor
                                 agregar_evento(f"⚙️ IA AUTO (LOGICA_UNICA_REAL): {mejor_bot} p_oper={prob*100:.1f}% source={real_source_operativo}")
-                                monto = MARTI_ESCALADO[max(0, min(len(MARTI_ESCALADO)-1, ciclo_auto - 1))]
-                                val = obtener_valor_saldo()
-                                if val is None or val < monto:
-                                    pass
+                                agregar_evento(
+                                    f"AUTO_REAL: trigger recibido bot={mejor_bot} ciclo={ciclo_tag} monto={float(monto):.2f}"
+                                )
+
+                                owner_prev = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+                                owner_mem = next((b for b in BOT_NAMES if estado_bots.get(b, {}).get('token') == "REAL"), None)
+                                owner_activo = owner_prev if owner_prev in BOT_NAMES else (owner_mem if owner_mem in BOT_NAMES else None)
+                                if owner_activo and owner_activo != mejor_bot:
+                                    agregar_evento(
+                                        f"AUTO_REAL: cancelado por owner REAL activo={owner_activo}"
+                                    )
                                 else:
-                                    estado_bots[mejor_bot]["ia_senal_pendiente"] = True
-                                    estado_bots[mejor_bot]["ia_prob_senal"] = prob
-
-                                    # Handoff entre ciclos REAL: si quedó lock residual de otro bot,
-                                    # liberarlo antes de emitir la nueva orden para no bloquear rotación.
-                                    owner_prev = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else None
-                                    if owner_prev and owner_prev != mejor_bot and ciclo_auto > 1:
-                                        cerrar_por_fin_de_ciclo(owner_prev, f"Handoff rotación C{ciclo_auto}→{mejor_bot}")
-
-                                    ok_real = escribir_orden_real(mejor_bot, ciclo_auto)
-                                    if ok_real:
-                                        if False:
-                                            pass
-                                        estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
-                                        estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
-                                        activo_real = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else mejor_bot
-                                        marti_activa = True
+                                    val = obtener_valor_saldo()
+                                    if val is None:
+                                        agregar_evento(
+                                            f"AUTO_REAL: cancelado por saldo no disponible bot={mejor_bot} ciclo={ciclo_tag}"
+                                        )
+                                    elif float(val) < float(monto):
+                                        agregar_evento(
+                                            f"AUTO_REAL: cancelado por saldo insuficiente bot={mejor_bot} ciclo={ciclo_tag} saldo={float(val):.2f} monto={float(monto):.2f}"
+                                        )
                                     else:
-                                        estado_bots[mejor_bot]["ia_senal_pendiente"] = False
-                                        estado_bots[mejor_bot]["ia_prob_senal"] = None
+                                        estado_bots[mejor_bot]["ia_senal_pendiente"] = True
+                                        estado_bots[mejor_bot]["ia_prob_senal"] = prob
+
+                                        ok_real = escribir_orden_real(mejor_bot, ciclo_auto)
+                                        if ok_real:
+                                            estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
+                                            estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
+                                            activo_real = mejor_bot
+                                            marti_activa = True
+                                            agregar_evento(
+                                                f"AUTO_REAL: REAL activado bot={mejor_bot} ciclo={ciclo_tag} monto={float(monto):.2f}"
+                                            )
+                                        else:
+                                            estado_bots[mejor_bot]["ia_senal_pendiente"] = False
+                                            estado_bots[mejor_bot]["ia_prob_senal"] = None
+                                            agregar_evento(
+                                                f"AUTO_REAL: escribir_orden_real devolvió False bot={mejor_bot} ciclo={ciclo_tag}"
+                                            )
                         else:
                             max_prob = max((_prob_ia_operativa_bot(bot, default=0.0) for bot in BOT_NAMES if estado_bots[bot]["ia_ready"]), default=0)
                             if max_prob < umbral_ia_real:
