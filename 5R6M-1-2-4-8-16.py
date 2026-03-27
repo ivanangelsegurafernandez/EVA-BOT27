@@ -14877,7 +14877,7 @@ def _rankear_x_localmente(red_bots: list[str], cols: list[dict]) -> list[dict]:
 
 
 def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[str], emitir_log: bool = True) -> dict:
-    """Única ruta operativa para promover a REAL: columna actual verde + 1/2 X."""
+    """LOGICA_VERDE_X_PONDERADA: promover a REAL con mínimo 4 verdes + 1/2 X."""
     out = {
         "triggered": False,
         "selected_bot": None,
@@ -14903,12 +14903,8 @@ def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[
         out["greens"] = int(greens)
         out["reds"] = int(reds)
 
-        if valids < 5:
-            out["reason"] = "estructura_insuficiente"
-            return out
-        eval_col = evaluar_patron_columna_verde(col)
-        if not bool(eval_col.get("es_col80", False)):
-            out["reason"] = "columna_no_verde"
+        if greens < 4:
+            out["reason"] = "menos_de_4_verdes"
             return out
         if reds > 2:
             out["reason"] = "mas_de_2_X"
@@ -14917,7 +14913,7 @@ def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[
             out["reason"] = "sin_rojos"
             return out
         if reds not in (1, 2):
-            out["reason"] = "sin_columna_verde_valida"
+            out["reason"] = "estructura_insuficiente"
             return out
 
         cells = dict(col.get("cells", {}) or {})
@@ -14931,7 +14927,7 @@ def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[
             out["triggered"] = True
             out["selected_bot"] = str(red_bots[0])
             out["selected_case"] = "1X"
-            out["reason"] = "columna_verde_1X"
+            out["reason"] = "4verdes_1X"
         else:
             ranking = _rankear_x_localmente(red_bots, cols)
             if not ranking:
@@ -14941,22 +14937,27 @@ def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[
             out["triggered"] = True
             out["selected_bot"] = str(ranking[0].get("bot") or "")
             out["selected_case"] = "2X"
-            out["reason"] = "columna_verde_2X_fuerza_local"
+            out["reason"] = "4verdes_2X_peso_local"
 
         if bool(emitir_log):
             if bool(out.get("triggered")):
                 if str(out.get("selected_case", "")) == "1X":
-                    agregar_evento(f"LOGICA_UNICA_REAL: caso=1X bot={out.get('selected_bot')}")
+                    agregar_evento(
+                        f"LOGICA_VERDE_X_PONDERADA: caso=1X bot={out.get('selected_bot')} "
+                        f"greens={out.get('greens')} reds={out.get('reds')}"
+                    )
                 else:
-                    motivo = str(out.get("reason", ""))
-                    agregar_evento(f"LOGICA_UNICA_REAL: caso=2X bot={out.get('selected_bot')} motivo={motivo}")
+                    agregar_evento(
+                        f"LOGICA_VERDE_X_PONDERADA: caso=2X bot={out.get('selected_bot')} "
+                        f"greens={out.get('greens')} reds={out.get('reds')} motivo=peso_local"
+                    )
             else:
-                agregar_evento(f"LOGICA_UNICA_REAL: {out.get('reason', 'estructura_insuficiente')}")
+                agregar_evento(f"LOGICA_VERDE_X_PONDERADA: {out.get('reason', 'estructura_insuficiente')}")
         return out
     except Exception:
         out["reason"] = "estructura_insuficiente"
         if bool(emitir_log):
-            agregar_evento("LOGICA_UNICA_REAL: estructura_insuficiente")
+            agregar_evento("LOGICA_VERDE_X_PONDERADA: estructura_insuficiente")
         return out
 
 
