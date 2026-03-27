@@ -17328,16 +17328,6 @@ async def main():
                                 rec_pre = candidatos_pre_embudo[0]
                                 top1_rescue = str(rec_pre[1] or "").strip()
                                 top1_prob_rescue = float(rec_pre[2] or 0.0)
-                            if (not top1_rescue):
-                                live_pre = []
-                                for _b in BOT_NAMES:
-                                    _p = _prob_ia_operativa_bot(_b, default=None)
-                                    if isinstance(_p, (int, float)):
-                                        live_pre.append((str(_b), float(_p)))
-                                live_pre.sort(key=lambda t: float(t[1]), reverse=True)
-                                if live_pre:
-                                    top1_rescue = str(live_pre[0][0] or "").strip()
-                                    top1_prob_rescue = float(live_pre[0][1] or 0.0)
                             if top1_rescue in BOT_NAMES:
                                 rec = rec_pre if rec_pre is not None else next((c for c in list(candidatos_pre_embudo or []) if str(c[1]) == top1_rescue), None)
                                 if rec is None:
