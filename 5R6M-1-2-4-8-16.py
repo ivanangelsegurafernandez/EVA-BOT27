@@ -17289,6 +17289,19 @@ async def main():
                         if decision_final == EMBUDO_FINAL_BLOCK_HARD:
                             agregar_evento(f"🛑 EMBUDO {decision_final}: {embudo.get('hard_block_reason') or embudo.get('decision_reason')}")
                             candidatos = []
+                        elif decision_final == EMBUDO_FINAL_WAIT_SOFT and candidatos_pre_embudo:
+                            candidatos = candidatos_pre_embudo[:1]
+                            top1_keep = candidatos[0]
+                            embudo = _registrar_estado_embudo({
+                                "decision_final": EMBUDO_FINAL_REAL_OK,
+                                "decision_reason": "wait_soft_bypass_pre_embudo",
+                                "soft_wait_reason": "",
+                                "risk_mode": "REAL_OK",
+                                "gate_quality": "bypass_pre_embudo",
+                                "hard_block_reason": "",
+                                "top1_bot": str(top1_keep[1]),
+                                "top1_prob": float(top1_keep[2]),
+                            })
                         elif decision_final == EMBUDO_FINAL_WAIT_SOFT:
                             rescue_applied = False
                             wait_reason_emb = str(embudo.get("soft_wait_reason") or embudo.get("decision_reason") or "")
