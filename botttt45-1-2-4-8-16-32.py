@@ -223,35 +223,76 @@ except Exception:
     pass
 
 
+def _leer_orden_real_payload(bot: str):
+    ruta = os.path.join(ORDEN_DIR, f"{bot}.json")
+    tmp = ruta + ".tmp"
+    try:
+        if not os.path.exists(ruta):
+            return None
+        with open(ruta, "r", encoding="utf-8") as f, open(tmp, "w", encoding="utf-8") as t:
+            t.write(f.read())
+        with open(tmp, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        os.remove(tmp)
+        if data.get("bot") != bot:
+            return None
+        cyc = int(data.get("ciclo", 1))
+        ts = float(data.get("ts", 0.0))
+        ttl = int(data.get("ttl", 120))
+        lim = max(30, min(ttl, 300))  # margen seguro
+        if time.time() - ts > lim:
+            return None
+        data["ciclo"] = max(1, min(cyc, MAX_CICLOS))
+        data["ts"] = float(ts)
+        return data
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return None
+
+
 def leer_orden_real(bot: str):
     """
     Devuelve (ciclo, ts, quiet, src) si existe orden fresca, o (None, None, 0, None) si no.
     """
-    ruta = os.path.join(ORDEN_DIR, f"{bot}.json")
-    tmp = ruta + ".tmp"
-    try:
-        if os.path.exists(ruta):
-            with open(ruta, "r", encoding="utf-8") as f, open(tmp, "w", encoding="utf-8") as t:
-                t.write(f.read())
-            with open(tmp, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            os.remove(tmp)
-            if data.get("bot") != bot:
-                return None, None, 0, None
-            cyc = int(data.get("ciclo", 1))
-            ts = float(data.get("ts", 0.0))
-            ttl = int(data.get("ttl", 120))
-            quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
-            src = str(data.get("src", "") or "").upper() or None
-            lim = max(30, min(ttl, 300))  # margen seguro
-            if time.time() - ts > lim:
-                return None, None, 0, None
-            return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
+    data = _leer_orden_real_payload(bot)
+    if not isinstance(data, dict):
         return None, None, 0, None
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        return None, None, 0, None
+    quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
+    src = str(data.get("src", "") or "").upper() or None
+    return int(data.get("ciclo", 1)), float(data.get("ts", 0.0)), quiet, src
+
+
+def _revalidar_snapshot_lxv_pre_buy(bot: str):
+    data = _leer_orden_real_payload(bot)
+    if not isinstance(data, dict):
+        return False, "snapshot no disponible"
+
+    src = str(data.get("src", "") or "").upper()
+    if src != "LXV":
+        return True, "orden no LXV"
+
+    target_bot = str(data.get("lxv_selected_bot") or data.get("bot") or "").strip()
+    if target_bot and target_bot != str(bot):
+        return False, "bot objetivo cambió"
+
+    snap_ts = float(data.get("lxv_snapshot_ts", data.get("ts", 0.0)) or 0.0)
+    snap_ttl = float(data.get("lxv_snapshot_ttl", 4.0) or 4.0)
+    snap_ttl = max(2.0, min(5.0, snap_ttl))
+    if snap_ts <= 0 or (time.time() - snap_ts) > snap_ttl:
+        return False, "snapshot vencido"
+
+    greens = int(data.get("lxv_greens", 0) or 0)
+    reds = int(data.get("lxv_reds", 0) or 0)
+    case = str(data.get("lxv_case", "") or "").upper()
+    if greens < 4 or reds not in (1, 2):
+        return False, "estructura incompatible"
+    if case == "1X" and reds != 1:
+        return False, "estructura incompatible"
+    if case == "2X" and reds != 2:
+        return False, "estructura incompatible"
+
+    return True, "snapshot vigente y compatible"
 
 def _es_token_real(token_val) -> bool:
     return str(token_val or "").strip() == str(TOKEN_REAL).strip()
@@ -2522,6 +2563,22 @@ async def ejecutar_panel():
                         continue
 
 # ==================== /VENTANA DE DECISIÓN IA ====================
+
+                # ========= REVALIDACIÓN SNAPSHOT LXV (justo antes del BUY) =========
+                if modo_real:
+                    ok_lxv, motivo_lxv = _revalidar_snapshot_lxv_pre_buy(NOMBRE_BOT)
+                    if not ok_lxv:
+                        print(Fore.YELLOW + Style.BRIGHT + f"LXV_REVALIDATE: bot={NOMBRE_BOT} {motivo_lxv} -> BUY cancelado")
+                        try:
+                            release_real_token_if_owned()
+                        except Exception:
+                            pass
+                        estado_bot["token_msg_mostrado"] = False
+                        reinicio_forzado.set()
+                        await asyncio.sleep(0.8)
+                        continue
+                    else:
+                        print(Fore.CYAN + Style.BRIGHT + f"LXV_REVALIDATE: bot={NOMBRE_BOT} {motivo_lxv} -> BUY permitido")
 
                 try:
                     data_buy = await api_call(ws, {
