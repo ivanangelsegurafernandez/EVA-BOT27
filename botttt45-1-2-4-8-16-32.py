@@ -2127,8 +2127,11 @@ async def ejecutar_panel():
             if reinicio_forzado.is_set():
                 estado_bot["reinicios_consecutivos"] += 1
                 if estado_bot["reinicios_consecutivos"] > 5:
-                    print(Fore.RED + "Demasiados reinicios consecutivos. Fallback a ciclo #1 + backoff 5s.")
-                    estado_bot["ciclo_forzado"] = 1
+                    cyc_live, _ts_live, _q_live, _s_live = leer_orden_real(NOMBRE_BOT)
+                    cyc_hold = estado_bot.get("ciclo_forzado")
+                    cyc_keep = cyc_live or cyc_hold or 1
+                    print(Fore.RED + f"Demasiados reinicios consecutivos. Mantengo ciclo #{int(cyc_keep)} + backoff 5s.")
+                    estado_bot["ciclo_forzado"] = int(cyc_keep)
                     estado_bot["reinicios_consecutivos"] = 0
                     await asyncio.sleep(5)
 
