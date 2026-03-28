@@ -16482,10 +16482,11 @@ async def main():
                         if candidatos:
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
                         logica_unica_real = _resolver_logica_unica_real(candidatos, estado_bots, BOT_NAMES, emitir_log=True)
+                        lxv_permite_real_nuevo = bool(logica_unica_real.get("triggered", False))
                         selected_bot_operativo = ""
                         selected_prob_operativo = 0.0
                         real_source_operativo = "LOGICA_UNICA_REAL"
-                        if bool(logica_unica_real.get("triggered", False)):
+                        if lxv_permite_real_nuevo:
                             selected_bot = str(logica_unica_real.get("selected_bot") or "").strip()
                             rec = next((c for c in list(candidatos or []) if str(c[1]) == selected_bot), None)
                             selected_prob = 0.0
@@ -16511,6 +16512,61 @@ async def main():
                                 estado_bots[selected_bot_operativo]["real_source"] = str(real_source_operativo)
                         else:
                             candidatos = []
+
+                        # LXV soberana para NUEVA entrada REAL:
+                        # - LXV decide activación estructural.
+                        # - vetos heredados del embudo se conservan como telemetría (no veto operativo aquí).
+                        try:
+                            meta_lxv = _ORACLE_CACHE.get("meta") or leer_model_meta() or {}
+                        except Exception:
+                            meta_lxv = {}
+                        try:
+                            rep_lxv = auditar_calibracion_seniales_reales(min_prob=float(IA_CALIB_THRESHOLD)) or {}
+                        except Exception:
+                            rep_lxv = {}
+                        try:
+                            hg_lxv = _estado_guardrail_ia_fuerte(force=False) or {}
+                        except Exception:
+                            hg_lxv = {}
+
+                        reliable_lxv = bool(meta_lxv.get("reliable", False))
+                        auc_lxv = float(meta_lxv.get("auc", 0.0) or 0.0)
+                        closed_lxv = int(rep_lxv.get("n_total_closed", rep_lxv.get("n", 0)) or 0)
+                        roof_lxv = float(DYN_ROOF_STATE.get("roof", DYN_ROOF_FLOOR) or DYN_ROOF_FLOOR)
+                        confirm_st_lxv = int(DYN_ROOF_STATE.get("confirm_streak", 0) or 0)
+                        confirm_need_lxv = int(DYN_ROOF_STATE.get("last_confirm_need", DYN_ROOF_CONFIRM_TICKS) or DYN_ROOF_CONFIRM_TICKS)
+                        trigger_ok_lxv = bool(DYN_ROOF_STATE.get("last_trigger_ok", False))
+                        roof_ok_lxv = bool(selected_prob_operativo >= roof_lxv) if selected_bot_operativo else False
+                        confirm_ok_lxv = bool(confirm_st_lxv >= confirm_need_lxv)
+                        hard_guard_lxv = bool(hg_lxv.get("hard_block", False))
+                        veto_flags_info = []
+                        if not reliable_lxv:
+                            veto_flags_info.append("veto_modelo=informativo(reliable=false)")
+                        if not trigger_ok_lxv:
+                            veto_flags_info.append("veto_trigger=informativo(trigger_ok=no)")
+                        if not roof_ok_lxv:
+                            veto_flags_info.append("veto_roof=informativo")
+                        if not confirm_ok_lxv:
+                            veto_flags_info.append("veto_confirm=informativo")
+                        if auc_lxv < 0.53:
+                            veto_flags_info.append("veto_auc=informativo")
+                        if closed_lxv < int(REAL_GO_CLOSED_MIN):
+                            veto_flags_info.append(f"veto_closed=informativo({closed_lxv}<{int(REAL_GO_CLOSED_MIN)})")
+                        if hard_guard_lxv:
+                            veto_flags_info.append("veto_hard_guard=informativo")
+
+                        if lxv_permite_real_nuevo and selected_bot_operativo:
+                            agregar_evento(
+                                f"LXV_REAL: SI | bot={selected_bot_operativo} | greens={int(logica_unica_real.get('greens', 0) or 0)} "
+                                f"| reds={int(logica_unica_real.get('reds', 0) or 0)} | source=LXV | "
+                                f"decision_final=REAL_OK por LXV"
+                            )
+                            if veto_flags_info:
+                                agregar_evento("LXV_INFO: " + " | ".join(veto_flags_info[:6]))
+                        elif not lxv_permite_real_nuevo:
+                            agregar_evento(
+                                f"LXV_REAL: NO | motivo={str(logica_unica_real.get('reason') or 'estructura_insuficiente')}"
+                            )
 
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
                         # Si la IA detecta señal y tú estás en manual, preselecciona el mejor bot y abre la ventana
