@@ -16561,6 +16561,7 @@ async def main():
                                 f"| reds={int(logica_unica_real.get('reds', 0) or 0)} | source=LXV | "
                                 f"decision_final=REAL_OK por LXV"
                             )
+                            agregar_evento(f"LXV_ACTIVATION: snapshot válido -> REAL habilitado para {selected_bot_operativo}")
                             if veto_flags_info:
                                 agregar_evento("LXV_INFO: " + " | ".join(veto_flags_info[:6]))
                         elif not lxv_permite_real_nuevo:
