@@ -135,8 +135,8 @@ ARCHIVO_CSV = f"registro_enriquecido_{NOMBRE_BOT}.csv"
 ARCHIVO_TOKEN = "token_actual.txt"  # Fuente única de verdad (coincide con 5R6M)
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 ACTIVOS = ["1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"]
-MARTINGALA_DEMO = [1, 2, 4, 8, 16, 32]
-MARTINGALA_REAL = [1, 2, 4, 8, 16, 32]
+MARTINGALA_DEMO = [1, 2, 4, 8]
+MARTINGALA_REAL = [1, 2, 4, 8]
 VELAS = 20
 PAUSA_POST_OPERACION_S = 8  # Pausa uniforme tras cada operación con resultado definido (BLOQUE 1)
 # ==================== VENTANA DE DECISIÓN IA ====================
@@ -2177,8 +2177,9 @@ async def ejecutar_panel():
             if reinicio_forzado.is_set():
                 estado_bot["reinicios_consecutivos"] += 1
                 if estado_bot["reinicios_consecutivos"] > 5:
-                    print(Fore.RED + "Demasiados reinicios consecutivos. Fallback a ciclo #1 + backoff 5s.")
-                    estado_bot["ciclo_forzado"] = 1
+                    ciclo_reanudado, src_reanudado = _resolver_ciclo_prioritario(fallback=1)
+                    estado_bot["ciclo_forzado"] = int(ciclo_reanudado)
+                    print(Fore.RED + f"Demasiados reinicios consecutivos: conservando continuidad martingala ({src_reanudado}) en C{int(ciclo_reanudado)}. Sin reset a C1.")
                     estado_bot["reinicios_consecutivos"] = 0
                     await asyncio.sleep(5)
 
