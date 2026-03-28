@@ -2502,16 +2502,12 @@ def _enforce_single_real_standby(owner: str | None):
     except Exception:
         pass
 
-def _escribir_orden_real_raw(bot: str, ciclo: int, extra: dict | None = None):
+def _escribir_orden_real_raw(bot: str, ciclo: int):
     """
     Escritura RAW de orden_real (sin activar_real_inmediato, sin recursión).
     """
     ciclo = max(1, min(int(ciclo), MAX_CICLOS))
     payload = {"bot": bot, "ciclo": ciclo, "ts": time.time()}
-    if isinstance(extra, dict) and extra:
-        for k, v in extra.items():
-            if isinstance(k, str) and k:
-                payload[k] = v
     try:
         _atomic_write(path_orden(bot), json.dumps(payload, ensure_ascii=False))
         agregar_evento(f"📝 Orden REAL escrita para {bot}: ciclo #{ciclo}")
@@ -2704,7 +2700,7 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
     except Exception:
         return False
 
-def escribir_orden_real(bot: str, ciclo: int, extra: dict | None = None) -> bool:
+def escribir_orden_real(bot: str, ciclo: int) -> bool:
     global REAL_OWNER_LOCK
     """
     Wrapper oficial:
@@ -2739,7 +2735,7 @@ def escribir_orden_real(bot: str, ciclo: int, extra: dict | None = None) -> bool
     except Exception:
         pass
 
-    _escribir_orden_real_raw(bot, ciclo, extra=extra)
+    _escribir_orden_real_raw(bot, ciclo)
     ok_activate = bool(activar_real_inmediato(bot, ciclo, origen="orden_real"))
 
     owner_after_mem = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else None
@@ -16633,28 +16629,6 @@ async def main():
                                 agregar_evento(
                                     f"AUTO_REAL: trigger recibido bot={mejor_bot} ciclo={ciclo_tag} monto={float(monto):.2f}"
                                 )
-                                lxv_snapshot_ttl = 4.0
-                                lxv_snapshot_ts = float(time.time())
-                                lxv_case = str(logica_unica_real.get("selected_case") or "").strip()
-                                lxv_greens = int(logica_unica_real.get("greens", 0) or 0)
-                                lxv_reds = int(logica_unica_real.get("reds", 0) or 0)
-                                lxv_snapshot_id = hashlib.sha1(
-                                    f"{mejor_bot}|{lxv_case}|{lxv_greens}|{lxv_reds}|{lxv_snapshot_ts:.3f}".encode("utf-8")
-                                ).hexdigest()[:12]
-                                lxv_extra = {
-                                    "src": "LXV",
-                                    "lxv_case": lxv_case,
-                                    "lxv_greens": int(lxv_greens),
-                                    "lxv_reds": int(lxv_reds),
-                                    "lxv_selected_bot": str(mejor_bot),
-                                    "lxv_snapshot_ts": float(lxv_snapshot_ts),
-                                    "lxv_snapshot_ttl": float(lxv_snapshot_ttl),
-                                    "lxv_snapshot_id": str(lxv_snapshot_id),
-                                }
-                                agregar_evento(
-                                    f"LXV_ORDER: bot={mejor_bot} case={lxv_case or '--'} greens={lxv_greens} reds={lxv_reds} "
-                                    f"ttl={int(lxv_snapshot_ttl)}s id={lxv_snapshot_id}"
-                                )
 
                                 owner_prev = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
                                 owner_mem = next((b for b in BOT_NAMES if estado_bots.get(b, {}).get('token') == "REAL"), None)
@@ -16677,7 +16651,7 @@ async def main():
                                         estado_bots[mejor_bot]["ia_senal_pendiente"] = True
                                         estado_bots[mejor_bot]["ia_prob_senal"] = prob
 
-                                        ok_real = escribir_orden_real(mejor_bot, ciclo_auto, extra=lxv_extra)
+                                        ok_real = escribir_orden_real(mejor_bot, ciclo_auto)
                                         if ok_real:
                                             estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                             estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
