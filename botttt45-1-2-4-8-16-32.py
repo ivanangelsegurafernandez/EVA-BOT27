@@ -180,8 +180,8 @@ REAL_COMMIT_WINDOW_S = 20
 last_real_contract_id = None
 real_buy_commit_until = 0.0
 
-# Higiene de riesgo: al saltar a REAL, arrancar en C1 (aunque el maestro sugiera C2+)
-RESET_CICLO_EN_ENTRADA_REAL = True
+# Compat: se mantiene la bandera, pero por política vigente manda siempre la orden fresca del maestro.
+RESET_CICLO_EN_ENTRADA_REAL = False
 
 def commit_guard_active() -> bool:
     return (last_real_contract_id is not None) and (time.time() < real_buy_commit_until)
@@ -1363,15 +1363,12 @@ async def check_token_and_reconnect(ws, current_token):
                     real_activado_en_bot = time.time()  # BLOQUE 5 and 2: Set activation time
                     # Lee la orden del maestro y deja seteado el ciclo para la siguiente vuelta
                     cyc, _, quiet, src = leer_orden_real(NOMBRE_BOT)  # BLOQUE 7: Relee fresh
-                    if RESET_CICLO_EN_ENTRADA_REAL:
-                        estado_bot["ciclo_forzado"] = 1
-                        if cyc and int(cyc) > 1:
-                            print(Fore.YELLOW + f"Orden maestro C{cyc} ignorada por seguridad: en entrada REAL reinicio a C1.")
-                        else:
-                            print(Fore.YELLOW + "Entrada REAL detectada: reinicio de martingala a C1 por seguridad.")
-                    elif cyc:
+                    if cyc:
                         estado_bot["ciclo_forzado"] = cyc
                         print(Fore.YELLOW + f"Orden maestro detectada: arrancaré en ciclo #{cyc}.")
+                    else:
+                        estado_bot["ciclo_forzado"] = estado_bot.get("ciclo_forzado") or 1
+                        print(Fore.YELLOW + "Entrada REAL sin orden fresca del maestro: fallback excepcional a C1.")
 
                     # Silenciar ruido guiado por maestro (BLOQUE 3)
                     if quiet or (str(src).upper() == "MANUAL"):
@@ -1384,10 +1381,12 @@ async def check_token_and_reconnect(ws, current_token):
                         if _print_once("rea-REAL", ttl=180):
                             print(Fore.YELLOW + "Reafirmación de REAL (sin reset de martingala)")
                     cyc, _, quiet, src = leer_orden_real(NOMBRE_BOT)  # BLOQUE 7: Relee fresh
-                    if RESET_CICLO_EN_ENTRADA_REAL:
-                        estado_bot["ciclo_forzado"] = 1
-                    elif cyc:
+                    if cyc:
                         estado_bot["ciclo_forzado"] = cyc
+                        if not estado_bot.get("barra_activa", False):
+                            print(Fore.YELLOW + f"Orden maestro detectada: continuaré en ciclo #{cyc}.")
+                    else:
+                        estado_bot["ciclo_forzado"] = estado_bot.get("ciclo_forzado") or 1
 
                     if quiet or (str(src).upper() == "MANUAL"):
                         asyncio.create_task(_silencio_temporal(90, fuente=src))
@@ -2168,6 +2167,15 @@ async def ejecutar_panel():
             ciclo_orden, _ts, _quiet, _src = leer_orden_real(NOMBRE_BOT)
             ciclo_forzado = estado_bot.get("ciclo_forzado")
             ciclo = ciclo_orden or ciclo_forzado or 1
+            if ciclo_orden:
+                if _print_once(f"ciclo-maestro-{ciclo_orden}", ttl=30):
+                    print(Fore.YELLOW + f"Ciclo maestro vigente: C{int(ciclo_orden)}.")
+            elif ciclo_forzado:
+                if _print_once(f"ciclo-retenido-{ciclo_forzado}", ttl=30):
+                    print(Fore.YELLOW + f"Reanudando ciclo retenido: C{int(ciclo_forzado)}.")
+            else:
+                if _print_once("ciclo-fallback-c1", ttl=30):
+                    print(Fore.YELLOW + "Sin orden fresca ni ciclo retenido: usando fallback C1.")
 
             estado_bot["ciclo_forzado"] = None
             estado_bot["reinicios_consecutivos"] = 0
