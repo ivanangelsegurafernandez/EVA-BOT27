@@ -1032,9 +1032,6 @@ marti_activa = False
 # Contador global de ciclos de martingala (HUD + orquestación automática)
 # 0 = sin pérdidas consecutivas en REAL; 1..MAX_CICLOS = racha de pérdidas vigente.
 marti_ciclos_perdidos = 0
-NEXT_REAL_CYCLE_LATCH = 1  # ciclo definitivo sellado para la próxima orden REAL
-REAL_TURN_SEQ = 0
-REAL_TURN_STATE = {bot: {"turn_id": 0, "resolved": False, "latched_sig": None} for bot in BOT_NAMES}
 
 # Anti-repetición de bot en REAL:
 # - Si el HUD está en C1, se puede repetir bot.
@@ -2531,7 +2528,6 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
     - Flujos de sync/UI/token jamás deben escribir orden_real.json.
     """
     global LIMPIEZA_PANEL_HASTA, sonido_disparado, marti_paso, REAL_OWNER_LOCK, REAL_ENTRY_BASELINE
-    global REAL_TURN_SEQ, REAL_TURN_STATE
 
     try:
         if bot not in BOT_NAMES:
@@ -2562,21 +2558,14 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
             return False
         _last_real_push_ts[bot] = now
 
-        ciclo_src = "param"
         if origen in ("orden_real", "manual", "token_sync"):
-            ciclo_latch = int(globals().get("NEXT_REAL_CYCLE_LATCH", 0) or 0)
-            if ciclo_latch >= 1:
-                ciclo_obj = max(1, min(int(MAX_CICLOS), int(ciclo_latch)))
-                ciclo_src = "latch"
-            else:
-                ciclo_obj = _marti_ciclo_operativo_actual()
-                ciclo_src = "dinamico"
+            ciclo_obj = _marti_ciclo_operativo_actual()
         else:
             ciclo_obj = max(1, min(int(ciclo), MAX_CICLOS))
         monto_obj = _marti_monto_por_ciclo(ciclo_obj)
         try:
             agregar_evento(
-                f"🧮 Martingala operativa: perdidas={int(marti_ciclos_perdidos)} -> ciclo={int(ciclo_obj)} ({ciclo_src}) -> monto={float(monto_obj):.2f}"
+                f"🧮 Martingala operativa: perdidas={int(marti_ciclos_perdidos)} -> ciclo={int(ciclo_obj)} -> monto={float(monto_obj):.2f}"
             )
         except Exception:
             pass
@@ -2661,8 +2650,6 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
         # Marcas de “entrada a real”
         first_entry = not bool(estado_bots[bot].get("modo_real_anunciado", False))
         if first_entry or (prev_holder != bot):
-            REAL_TURN_SEQ = int(REAL_TURN_SEQ) + 1
-            REAL_TURN_STATE[bot] = {"turn_id": int(REAL_TURN_SEQ), "resolved": False, "latched_sig": None}
             estado_bots[bot]["modo_real_anunciado"] = True
             estado_bots[bot]["real_activado_en"] = now
             estado_bots[bot]["ignore_cierres_hasta"] = now + 15.0
@@ -2720,13 +2707,7 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
     - Escribe orden_real.json (RAW)
     - Activa REAL inmediato en HUD + token file
     """
-    ciclo_req = max(1, min(int(ciclo), MAX_CICLOS))
-    ciclo_latch = max(1, min(int(MAX_CICLOS), int(ciclo_martingala_siguiente() or 1)))
-    ciclo = int(ciclo_latch) if ciclo_latch >= 1 else int(ciclo_req)
-    if int(ciclo) != int(ciclo_req):
-        agregar_evento(f"🧷 ORDEN REAL: ciclo desde latch C{int(ciclo)} (pedido C{int(ciclo_req)}).")
-    else:
-        agregar_evento(f"🧷 ORDEN REAL: ciclo latcheado C{int(ciclo)}.")
+    ciclo = max(1, min(int(ciclo), MAX_CICLOS))
 
     # 🔒 No crear orden si ya hay otro owner REAL activo.
     try:
@@ -2986,7 +2967,7 @@ async def escribir_token_actual(bot):
         except Exception:
             pass
 
-        ciclo_objetivo = ciclo_martingala_siguiente()
+        ciclo_objetivo = _marti_ciclo_operativo_actual()
 
         # ✅ origen "sync_ui": NO debe escribir orden_real.json
         activar_real_inmediato(bot, ciclo_objetivo, origen="token_sync")
@@ -3012,7 +2993,7 @@ def activar_remate(bot: str, reason: str):
 
 # Cerrar por WIN
 def cerrar_por_win(bot: str, reason: str):
-    global REAL_OWNER_LOCK, REAL_COOLDOWN_UNTIL_TS, marti_ciclos_perdidos, marti_paso, NEXT_REAL_CYCLE_LATCH
+    global REAL_OWNER_LOCK, REAL_COOLDOWN_UNTIL_TS, marti_ciclos_perdidos, marti_paso
 
     # Liberar token REAL en archivo primero (commit de salida)
     liberado = False
@@ -3035,7 +3016,6 @@ def cerrar_por_win(bot: str, reason: str):
     REAL_COOLDOWN_UNTIL_TS = time.time() + float(_cooldown_post_trade_s())
     marti_ciclos_perdidos = 0
     marti_paso = 0
-    NEXT_REAL_CYCLE_LATCH = 1
 
     # Limpieza total de “estado REAL” para evitar REAL fantasma
     try:
@@ -8478,7 +8458,6 @@ def reiniciar_completo(borrar_csv=False, limpiar_visual_segundos=15, modo_suave=
     marti_paso = 0
     marti_activa = False
     marti_ciclos_perdidos = 0
-    globals()["NEXT_REAL_CYCLE_LATCH"] = 1
     ultimo_bot_real = None
     bots_usados_en_esta_marti = []
     REAL_OWNER_LOCK = None
@@ -8697,7 +8676,6 @@ def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_opera
     - PÉRDIDA: incrementa ciclo hasta MAX_CICLOS (tope de blindaje).
     """
     global marti_ciclos_perdidos, marti_paso, ultimo_bot_real, bots_usados_en_esta_marti
-    global NEXT_REAL_CYCLE_LATCH
     global marti_audit_run_id, marti_audit_ultimo_ciclo_ordenado
 
     res = normalizar_resultado(resultado)
@@ -8709,7 +8687,6 @@ def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_opera
     if res == "GANANCIA":
         marti_ciclos_perdidos = 0
         marti_paso = 0
-        NEXT_REAL_CYCLE_LATCH = 1
         bots_usados_en_esta_marti = []
         if bot in BOT_NAMES:
             estado_bots[bot]["ciclo_actual"] = 1
@@ -8729,7 +8706,6 @@ def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_opera
         if int(marti_ciclos_perdidos) >= int(MAX_CICLOS):
             marti_ciclos_perdidos = 0
             marti_paso = 0
-            NEXT_REAL_CYCLE_LATCH = 1
             bots_usados_en_esta_marti = []
             if bot in BOT_NAMES:
                 estado_bots[bot]["ciclo_actual"] = 1
@@ -8742,7 +8718,6 @@ def registrar_resultado_real(resultado: str, bot: str | None = None, ciclo_opera
         else:
             marti_paso = min(MAX_CICLOS - 1, int(marti_ciclos_perdidos))
             prox_ciclo = _marti_ciclo_operativo_actual()
-            NEXT_REAL_CYCLE_LATCH = int(prox_ciclo)
             if bot in BOT_NAMES:
                 estado_bots[bot]["ciclo_actual"] = prox_ciclo
             agregar_evento(
@@ -8772,9 +8747,6 @@ def ciclo_martingala_siguiente() -> int:
     - ciclo = pérdidas_consecutivas + 1, con límites [1..MAX_CICLOS]
     """
     try:
-        c_latch = int(globals().get("NEXT_REAL_CYCLE_LATCH", 0) or 0)
-        if c_latch >= 1:
-            return max(1, min(int(MAX_CICLOS), c_latch))
         return _marti_ciclo_operativo_actual()
     except Exception:
         return 1
@@ -8809,7 +8781,6 @@ def reset_martingala_por_saldo(ciclo_objetivo: int, saldo_actual: float | None) 
 
     marti_ciclos_perdidos = 0
     marti_paso = 0
-    globals()["NEXT_REAL_CYCLE_LATCH"] = 1
     bots_usados_en_esta_marti = []
     _marti_audit_record("reset_saldo", ciclo=ciclo_objetivo, detalle="reinicio_forzado")
     falta_msg = "saldo no disponible"
@@ -16167,10 +16138,6 @@ async def main():
                             if cierre_info and isinstance(cierre_info, tuple) and len(cierre_info) >= 4:
                                 res, monto, ciclo, payout_total = cierre_info
                                 sig = (res, round(float(monto or 0.0), 2), int(ciclo or 0), round(float(payout_total or 0.0), 4))
-                                turn_state = (globals().get("REAL_TURN_STATE", {}) or {}).get(bot, {}) or {}
-                                if bool(turn_state.get("resolved", False)):
-                                    agregar_evento(f"🔎 CIERRE REAL {bot}: cierre tardío/duplicado ignorado (turno ya resuelto).")
-                                    continue
 
                                 # Evita reprocesar el mismo cierre en ticks consecutivos
                                 if sig == LAST_REAL_CLOSE_SIG.get(bot):
@@ -16179,12 +16146,6 @@ async def main():
                                 LAST_REAL_CLOSE_SIG[bot] = sig
 
                                 if res in ("GANANCIA", "PÉRDIDA"):
-                                    try:
-                                        turn_state["resolved"] = True
-                                        turn_state["latched_sig"] = sig
-                                        REAL_TURN_STATE[bot] = turn_state
-                                    except Exception:
-                                        pass
                                     registrar_resultado_real(res, bot=bot, ciclo_operado=ciclo)
                                     if res == "GANANCIA":
                                         cerrar_por_win(bot, "Ganancia en REAL (fin de turno)")
