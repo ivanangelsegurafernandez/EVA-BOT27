@@ -169,8 +169,10 @@ racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de P�
 primer_ingreso_real = False  # Sonido solo 1 vez por ventana
 
 # Variables persistentes para saldos últimos válidos
-saldo_demo_last = 0.0
-saldo_real_last = 0.0
+saldo_demo_last = None
+saldo_real_last = None
+saldo_demo_last_ts = 0.0
+saldo_real_last_ts = 0.0
 real_activado_en_bot = 0.0  # BLOQUE 5: Global for activation timestamp
 
 # BLOQUE 2: Commit guard for REAL operations
@@ -178,8 +180,8 @@ REAL_COMMIT_WINDOW_S = 20
 last_real_contract_id = None
 real_buy_commit_until = 0.0
 
-# Higiene de riesgo: al saltar a REAL, arrancar en C1 (aunque el maestro sugiera C2+)
-RESET_CICLO_EN_ENTRADA_REAL = True
+# Compat: se mantiene la bandera, pero por política vigente manda siempre la orden fresca del maestro.
+RESET_CICLO_EN_ENTRADA_REAL = False
 
 def commit_guard_active() -> bool:
     return (last_real_contract_id is not None) and (time.time() < real_buy_commit_until)
@@ -1361,15 +1363,12 @@ async def check_token_and_reconnect(ws, current_token):
                     real_activado_en_bot = time.time()  # BLOQUE 5 and 2: Set activation time
                     # Lee la orden del maestro y deja seteado el ciclo para la siguiente vuelta
                     cyc, _, quiet, src = leer_orden_real(NOMBRE_BOT)  # BLOQUE 7: Relee fresh
-                    if RESET_CICLO_EN_ENTRADA_REAL:
-                        estado_bot["ciclo_forzado"] = 1
-                        if cyc and int(cyc) > 1:
-                            print(Fore.YELLOW + f"Orden maestro C{cyc} ignorada por seguridad: en entrada REAL reinicio a C1.")
-                        else:
-                            print(Fore.YELLOW + "Entrada REAL detectada: reinicio de martingala a C1 por seguridad.")
-                    elif cyc:
+                    if cyc:
                         estado_bot["ciclo_forzado"] = cyc
                         print(Fore.YELLOW + f"Orden maestro detectada: arrancaré en ciclo #{cyc}.")
+                    else:
+                        estado_bot["ciclo_forzado"] = estado_bot.get("ciclo_forzado") or 1
+                        print(Fore.YELLOW + "Entrada REAL sin orden fresca del maestro: fallback excepcional a C1.")
 
                     # Silenciar ruido guiado por maestro (BLOQUE 3)
                     if quiet or (str(src).upper() == "MANUAL"):
@@ -1382,10 +1381,12 @@ async def check_token_and_reconnect(ws, current_token):
                         if _print_once("rea-REAL", ttl=180):
                             print(Fore.YELLOW + "Reafirmación de REAL (sin reset de martingala)")
                     cyc, _, quiet, src = leer_orden_real(NOMBRE_BOT)  # BLOQUE 7: Relee fresh
-                    if RESET_CICLO_EN_ENTRADA_REAL:
-                        estado_bot["ciclo_forzado"] = 1
-                    elif cyc:
+                    if cyc:
                         estado_bot["ciclo_forzado"] = cyc
+                        if not estado_bot.get("barra_activa", False):
+                            print(Fore.YELLOW + f"Orden maestro detectada: continuaré en ciclo #{cyc}.")
+                    else:
+                        estado_bot["ciclo_forzado"] = estado_bot.get("ciclo_forzado") or 1
 
                     if quiet or (str(src).upper() == "MANUAL"):
                         asyncio.create_task(_silencio_temporal(90, fuente=src))
@@ -1461,12 +1462,13 @@ async def vigilar_token():
                 reinicio_forzado.set()
 
 async def consultar_saldo_real(ws):
-    global saldo_real_last
+    global saldo_real_last, saldo_real_last_ts
     try:
         data = await api_call(ws, {"balance": 1}, expect_msg_type="balance", timeout=6.0)
         b = data.get("balance", {}).get("balance")
         if b is not None:
             saldo_real_last = float(b)
+            saldo_real_last_ts = float(time.time())
             return saldo_real_last
         if _print_once("saldo-real-empty-main", ttl=20):
             print(Fore.YELLOW + "Balance REAL no disponible (respuesta vacía). Intento conexión dedicada...")
@@ -1481,12 +1483,16 @@ async def consultar_saldo_real(ws):
             b2 = data2.get("balance", {}).get("balance")
             if b2 is not None:
                 saldo_real_last = float(b2)
+                saldo_real_last_ts = float(time.time())
                 return saldo_real_last
     except Exception as e2:
         if _print_once("saldo-real-error-dedicada", ttl=20):
             print(Fore.RED + Style.BRIGHT + f"[ERROR] al consultar saldo REAL (dedicada): {e2}")
     if _print_once("saldo-real-no-disponible-final", ttl=20):
-        print(Fore.YELLOW + "Balance REAL no disponible. Uso último valor válido y **no compro** si no alcanza.")
+        if isinstance(saldo_real_last, (int, float)):
+            print(Fore.YELLOW + "Balance REAL no disponible. Uso último valor válido cacheado.")
+        else:
+            print(Fore.YELLOW + "Balance REAL no disponible y sin histórico válido.")
     return saldo_real_last
 
 # ==================== LÓGICA DE OPERACIÓN ====================
@@ -1919,6 +1925,9 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 payout_mult_f = float(payout_ratio_total or 0.0)
             except Exception:
                 payout_mult_f = 0.0
+            payout_total_f = max(0.0, float(payout_total_f))
+            payout_mult_f = max(0.0, float(payout_mult_f))
+            result_bin_val = 1 if resultado == "GANANCIA" else 0 if resultado == "PÉRDIDA" else ""
             puntaje01 = _norm_puntaje_01(condiciones)  # helper REAL del bot
             trade_uid_final = str(trade_uid or "").strip()
             if not trade_uid_final:
@@ -1943,7 +1952,7 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 "payout_total": float(round(payout_total_f, 2)),
                 "payout_multiplier": float(round(payout_mult_f, 6)),
                 "puntaje_estrategia": float(round(float(puntaje01), 6)),
-                "result_bin": 1 if resultado == "GANANCIA" else 0 if resultado == "PÉRDIDA" else "",
+                "result_bin": result_bin_val,
                 "trade_status": "CERRADO",
                 "epoch": int(epoch_val),
                 "ts": ts_val,
@@ -2001,13 +2010,20 @@ async def leer_csv():
         return []
 
 async def mostrar_saldos():
-    global saldo_demo_last, saldo_real_last, _last_saldo_ts
+    global saldo_demo_last, saldo_real_last, _last_saldo_ts, saldo_demo_last_ts, saldo_real_last_ts
     print(Fore.GREEN + Style.BRIGHT + "\nConsultando Saldos")
+
+    def _fmt_saldo(label: str, val, ts: float):
+        if isinstance(val, (int, float)):
+            age = max(0, int(time.time() - float(ts or 0.0)))
+            stale_tag = f" [STALE {age}s]" if age > int(REFRESCO_SALDO) else ""
+            return f"{label}: {float(val):.2f} USD{stale_tag}"
+        return f"{label}: -- [SALDO NO DISPONIBLE]"
 
     # BLOQUE 8: Rate-limit with cache
     if time.time() - _last_saldo_ts < REFRESCO_SALDO:
-        print(Fore.LIGHTBLUE_EX + Style.BRIGHT + f"Saldo cuenta DEMO (cached): {saldo_demo_last:.2f} USD")
-        print(Fore.YELLOW + Style.BRIGHT + f"Saldo cuenta REAL (cached): {saldo_real_last:.2f} USD")
+        print(Fore.LIGHTBLUE_EX + Style.BRIGHT + _fmt_saldo("Saldo cuenta DEMO (cached)", saldo_demo_last, saldo_demo_last_ts))
+        print(Fore.YELLOW + Style.BRIGHT + _fmt_saldo("Saldo cuenta REAL (cached)", saldo_real_last, saldo_real_last_ts))
         print(Fore.GREEN + "─" * 80)
         return
 
@@ -2023,6 +2039,7 @@ async def mostrar_saldos():
             if b is not None:
                 saldo_demo = float(b)
                 saldo_demo_last = saldo_demo
+                saldo_demo_last_ts = float(time.time())
             else:
                 if _print_once("saldo-demo-empty", ttl=REFRESCO_SALDO):
                     print(Fore.YELLOW + "Balance DEMO no disponible, usando último valor válido.")
@@ -2040,6 +2057,7 @@ async def mostrar_saldos():
             if b is not None:
                 saldo_real = float(b)
                 saldo_real_last = saldo_real
+                saldo_real_last_ts = float(time.time())
             else:
                 if _print_once("saldo-real-empty", ttl=REFRESCO_SALDO):
                     print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
@@ -2048,8 +2066,8 @@ async def mostrar_saldos():
             print(Fore.YELLOW + Style.BRIGHT + f"[WARN] saldo REAL: {type(e).__name__}: {e!r}")
             print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
 
-    print(Fore.LIGHTBLUE_EX + Style.BRIGHT + f"Saldo cuenta DEMO: {saldo_demo:.2f} USD")
-    print(Fore.YELLOW + Style.BRIGHT + f"Saldo cuenta REAL: {saldo_real:.2f} USD")
+    print(Fore.LIGHTBLUE_EX + Style.BRIGHT + _fmt_saldo("Saldo cuenta DEMO", saldo_demo, saldo_demo_last_ts))
+    print(Fore.YELLOW + Style.BRIGHT + _fmt_saldo("Saldo cuenta REAL", saldo_real, saldo_real_last_ts))
     print(Fore.GREEN + "─" * 80)
     print(Fore.GREEN + "─" * 80)
     _last_saldo_ts = time.time()
@@ -2109,8 +2127,11 @@ async def ejecutar_panel():
             if reinicio_forzado.is_set():
                 estado_bot["reinicios_consecutivos"] += 1
                 if estado_bot["reinicios_consecutivos"] > 5:
-                    print(Fore.RED + "Demasiados reinicios consecutivos. Fallback a ciclo #1 + backoff 5s.")
-                    estado_bot["ciclo_forzado"] = 1
+                    cyc_live, _ts_live, _q_live, _s_live = leer_orden_real(NOMBRE_BOT)
+                    cyc_hold = estado_bot.get("ciclo_forzado")
+                    cyc_keep = cyc_live or cyc_hold or 1
+                    print(Fore.RED + f"Demasiados reinicios consecutivos. Mantengo ciclo #{int(cyc_keep)} + backoff 5s.")
+                    estado_bot["ciclo_forzado"] = int(cyc_keep)
                     estado_bot["reinicios_consecutivos"] = 0
                     await asyncio.sleep(5)
 
@@ -2149,6 +2170,15 @@ async def ejecutar_panel():
             ciclo_orden, _ts, _quiet, _src = leer_orden_real(NOMBRE_BOT)
             ciclo_forzado = estado_bot.get("ciclo_forzado")
             ciclo = ciclo_orden or ciclo_forzado or 1
+            if ciclo_orden:
+                if _print_once(f"ciclo-maestro-{ciclo_orden}", ttl=30):
+                    print(Fore.YELLOW + f"Ciclo maestro vigente: C{int(ciclo_orden)}.")
+            elif ciclo_forzado:
+                if _print_once(f"ciclo-retenido-{ciclo_forzado}", ttl=30):
+                    print(Fore.YELLOW + f"Reanudando ciclo retenido: C{int(ciclo_forzado)}.")
+            else:
+                if _print_once("ciclo-fallback-c1", ttl=30):
+                    print(Fore.YELLOW + "Sin orden fresca ni ciclo retenido: usando fallback C1.")
 
             estado_bot["ciclo_forzado"] = None
             estado_bot["reinicios_consecutivos"] = 0
@@ -2221,7 +2251,17 @@ async def ejecutar_panel():
                 # ========= SALDO REAL (si aplica) =========
                 if modo_real:
                     saldo = await consultar_saldo_real(ws)
-                    if saldo < monto:
+                    if not isinstance(saldo, (int, float)):
+                        estado_bot["intentos_saldo"] += 1
+                        print(Fore.RED + Style.BRIGHT + "Saldo REAL no disponible. Bloqueando compra hasta refrescar balance.")
+                        if estado_bot["intentos_saldo"] > 3:
+                            release_real_token_if_owned()
+                            estado_bot["intentos_saldo"] = 0
+                            reinicio_forzado.set()
+                        else:
+                            await asyncio.sleep(12 + random.uniform(0.0, 0.5))
+                        continue
+                    if float(saldo) < float(monto):
                         estado_bot["intentos_saldo"] += 1
                         if estado_bot["intentos_saldo"] > 3:
                             print(Fore.RED + Style.BRIGHT + "Saldo no recuperado tras 3 intentos. Paso a DEMO.")
