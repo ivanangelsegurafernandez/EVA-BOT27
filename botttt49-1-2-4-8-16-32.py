@@ -174,6 +174,7 @@ saldo_real_last = None
 saldo_demo_last_ts = 0.0
 saldo_real_last_ts = 0.0
 real_activado_en_bot = 0.0  # BLOQUE 5: Global for activation timestamp
+real_activation_confirmed = False
 
 # BLOQUE 2: Commit guard for REAL operations
 REAL_COMMIT_WINDOW_S = 20
@@ -223,6 +224,20 @@ except Exception:
     pass
 
 
+def _is_real_owner_valid_now() -> bool:
+    try:
+        with open(ARCHIVO_TOKEN, "r", encoding="utf-8") as f:
+            linea = (f.read() or "").strip()
+        return linea == f"REAL:{NOMBRE_BOT}"
+    except Exception:
+        return False
+
+def _lxv_post_real_confirmed() -> bool:
+    try:
+        return bool(real_activation_confirmed and _es_token_real(leer_token_desde_archivo()) and _is_real_owner_valid_now())
+    except Exception:
+        return False
+
 def leer_orden_real(bot: str):
     """
     Devuelve (ciclo, ts, quiet, src) si existe orden fresca, o (None, None, 0, None) si no.
@@ -245,12 +260,23 @@ def leer_orden_real(bot: str):
             src = str(data.get("src", "") or "").upper() or None
             lim = max(30, min(ttl, 300))  # margen seguro
             if time.time() - ts > lim:
+                if _lxv_post_real_confirmed():
+                    if _print_once("lxv-snapshot-exp-post-real", ttl=15):
+                        print(Fore.YELLOW + "LXV_REVALIDATE: snapshot vencido pero REAL ya confirmado -> warning informativo, BUY permitido")
+                    return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
+                if _print_once("lxv-snapshot-exp-pre-real", ttl=15):
+                    print(Fore.YELLOW + "LXV_REVALIDATE: snapshot vencido antes de activación REAL -> REAL cancelado")
                 return None, None, 0, None
             return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
         return None, None, 0, None
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
+        if _lxv_post_real_confirmed():
+            if _print_once("lxv-snapshot-incompat-post-real", ttl=15):
+                print(Fore.YELLOW + "LXV_REVALIDATE: snapshot incompatible pero REAL ya confirmado -> warning informativo, BUY permitido")
+            cyc_ret = int(estado_bot.get("ciclo_forzado") or 1)
+            return max(1, min(cyc_ret, MAX_CICLOS)), None, 0, None
         return None, None, 0, None
 
 
@@ -1359,7 +1385,7 @@ async def obtener_velas(ws, symbol, token, reintentos=4):
 
 async def check_token_and_reconnect(ws, current_token):
     global ultimo_token
-    global primer_ingreso_real, real_activado_en_bot
+    global primer_ingreso_real, real_activado_en_bot, real_activation_confirmed
     token_desde_archivo = leer_token_desde_archivo()
     if token_desde_archivo != current_token:
         # BLOQUE 2 y 9: Anti-rebote + commit guard
@@ -1400,6 +1426,9 @@ async def check_token_and_reconnect(ws, current_token):
                         pass
                     primer_ingreso_real = True
                     real_activado_en_bot = time.time()  # BLOQUE 5 and 2: Set activation time
+                    real_activation_confirmed = True
+                    if _print_once("lxv-activation-ok", ttl=10):
+                        print(Fore.YELLOW + f"LXV_ACTIVATION: snapshot válido -> REAL habilitado para {NOMBRE_BOT}")
                     # Lee la orden del maestro y deja seteado el ciclo para la siguiente vuelta
                     cyc, _, quiet, src = leer_orden_real(NOMBRE_BOT)  # BLOQUE 7: Relee fresh
                     if cyc:
@@ -1437,6 +1466,7 @@ async def check_token_and_reconnect(ws, current_token):
             else:
                 # Saliste de REAL: prepara el sonido para la próxima ventana
                 primer_ingreso_real = False
+                real_activation_confirmed = False
                 reinicio_forzado.set()
             ultimo_token = token_desde_archivo  # mantén vigilante y lazo alineados
             return ws, token_desde_archivo
@@ -1461,6 +1491,9 @@ async def check_token_and_reconnect(ws, current_token):
                     pass
 
                 primer_ingreso_real = True
+                real_activation_confirmed = True
+                if _print_once("lxv-activation-ok", ttl=10):
+                    print(Fore.YELLOW + f"LXV_ACTIVATION: snapshot válido -> REAL habilitado para {NOMBRE_BOT}")
                 try:
                     real_activado_en_bot = time.time()
                 except Exception:
