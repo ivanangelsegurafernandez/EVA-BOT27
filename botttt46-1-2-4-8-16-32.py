@@ -253,6 +253,38 @@ def leer_orden_real(bot: str):
             os.remove(tmp)
         return None, None, 0, None
 
+
+
+def _es_token_real(token_val) -> bool:
+    return str(token_val or "").strip() == str(TOKEN_REAL).strip()
+
+def _cuenta_label(token_val) -> str:
+    return "REAL" if _es_token_real(token_val) else "DEMO"
+
+def _csv_account_fields(token_val) -> dict:
+    lbl = _cuenta_label(token_val)
+    return {"token": lbl, "cuenta": lbl, "modo": lbl}
+
+def _resolver_ciclo_prioritario(fallback: int = 1):
+    ciclo_orden, _ts, _quiet, _src = leer_orden_real(NOMBRE_BOT)
+    if ciclo_orden:
+        return int(ciclo_orden), "orden"
+    ciclo_forzado = estado_bot.get("ciclo_forzado")
+    if ciclo_forzado:
+        return int(ciclo_forzado), "retenido"
+    return int(fallback), "fallback"
+
+def _retener_ciclo_para_reinicio(ciclo_actual: int):
+    ciclo_orden, _ts, _quiet, _src = leer_orden_real(NOMBRE_BOT)
+    if ciclo_orden:
+        estado_bot["ciclo_forzado"] = int(ciclo_orden)
+        return int(ciclo_orden), "orden"
+    ciclo_forzado = estado_bot.get("ciclo_forzado")
+    if ciclo_forzado:
+        return int(ciclo_forzado), "retenido"
+    estado_bot["ciclo_forzado"] = int(ciclo_actual or 1)
+    return int(estado_bot["ciclo_forzado"]), "actual"
+
 # <<< PATCH 1
 
 # >>> PATCH: WS robusto
@@ -350,6 +382,9 @@ CSV_HEADER = [
     "puntaje_estrategia",
     "result_bin",            # 1 o 0 solo en filas cerradas
     "trade_status",          # "PRE_TRADE" o "CERRADO"
+    "token",
+    "cuenta",
+    "modo",
     "epoch",
     "ts",
     "ia_prob_en_juego",
@@ -646,6 +681,7 @@ def write_pretrade_snapshot(
     closes = _extract_close_snapshot(close_snapshot, n=20)
     _warn_close_snapshot_insuficiente(closes)
 
+    cuenta_fields = _csv_account_fields(kwargs.get("token"))
     row_dict = {
         "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "activo": symbol,
@@ -668,6 +704,9 @@ def write_pretrade_snapshot(
         "puntaje_estrategia": float(round(float(puntaje01), 6)),
         "result_bin": "",
         "trade_status": "PRE_TRADE",
+        "token": cuenta_fields.get("token", ""),
+        "cuenta": cuenta_fields.get("cuenta", ""),
+        "modo": cuenta_fields.get("modo", ""),
         "epoch": int(epoch_val),
         "ts": ts_val,
         "ia_prob_en_juego": "",
@@ -1366,9 +1405,11 @@ async def check_token_and_reconnect(ws, current_token):
                     if cyc:
                         estado_bot["ciclo_forzado"] = cyc
                         print(Fore.YELLOW + f"Orden maestro detectada: arrancaré en ciclo #{cyc}.")
+                    elif estado_bot.get("ciclo_forzado"):
+                        print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
                     else:
-                        estado_bot["ciclo_forzado"] = estado_bot.get("ciclo_forzado") or 1
-                        print(Fore.YELLOW + "Entrada REAL sin orden fresca del maestro: fallback excepcional a C1.")
+                        estado_bot["ciclo_forzado"] = 1
+                        print(Fore.YELLOW + "Entrada REAL sin orden fresca ni ciclo retenido: fallback excepcional a C1.")
 
                     # Silenciar ruido guiado por maestro (BLOQUE 3)
                     if quiet or (str(src).upper() == "MANUAL"):
@@ -1385,8 +1426,8 @@ async def check_token_and_reconnect(ws, current_token):
                         estado_bot["ciclo_forzado"] = cyc
                         if not estado_bot.get("barra_activa", False):
                             print(Fore.YELLOW + f"Orden maestro detectada: continuaré en ciclo #{cyc}.")
-                    else:
-                        estado_bot["ciclo_forzado"] = estado_bot.get("ciclo_forzado") or 1
+                    elif not estado_bot.get("ciclo_forzado"):
+                        estado_bot["ciclo_forzado"] = 1
 
                     if quiet or (str(src).upper() == "MANUAL"):
                         asyncio.create_task(_silencio_temporal(90, fuente=src))
@@ -1430,6 +1471,9 @@ async def check_token_and_reconnect(ws, current_token):
                 if not (MODO_SILENCIOSO and estado_bot.get("modo_manual")) and not estado_bot.get("barra_activa", False):
                     if _print_once("rea-REAL", ttl=180):
                         print(Fore.YELLOW + "Reafirmación de REAL (sin reset de martingala)")
+            cyc, _, _quiet, _src = leer_orden_real(NOMBRE_BOT)
+            if cyc:
+                estado_bot["ciclo_forzado"] = cyc
 
         ultimo_token = token_desde_archivo  # mantén vigilante y lazo alineados
         return ws, current_token
@@ -1704,6 +1748,7 @@ async def esperar_resultado(ws, contract_id, symbol, direccion, monto, rsi9, rsi
                     trade_uid_final = str(trade_uid or "").strip()
                     if not trade_uid_final:
                         trade_uid_final = _build_trade_uid(epoch_val, symbol, direccion, ciclo, token_antes, ts_iso=ts_val)
+                    cuenta_fields = _csv_account_fields(token_antes)
                     row_dict = {
                         "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "activo": symbol,
@@ -1726,6 +1771,9 @@ async def esperar_resultado(ws, contract_id, symbol, direccion, monto, rsi9, rsi
                         "puntaje_estrategia": float(round(float(puntaje01), 6)),
                         "result_bin": 1 if resultado == "GANANCIA" else 0 if resultado == "PÉRDIDA" else "",
                         "trade_status": "CERRADO",
+                        "token": cuenta_fields.get("token", ""),
+                        "cuenta": cuenta_fields.get("cuenta", ""),
+                        "modo": cuenta_fields.get("modo", ""),
                         "epoch": int(epoch_val),
                         "ts": ts_val,
                         "ia_prob_en_juego": ia_prob_en_juego,
@@ -1932,6 +1980,7 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
             trade_uid_final = str(trade_uid or "").strip()
             if not trade_uid_final:
                 trade_uid_final = _build_trade_uid(epoch_val, symbol, direccion, ciclo, token_usado, ts_iso=ts_val)
+            cuenta_fields = _csv_account_fields(token_usado)
             row_dict = {
                 "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "activo": symbol,
@@ -1954,6 +2003,9 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 "puntaje_estrategia": float(round(float(puntaje01), 6)),
                 "result_bin": result_bin_val,
                 "trade_status": "CERRADO",
+                "token": cuenta_fields.get("token", ""),
+                "cuenta": cuenta_fields.get("cuenta", ""),
+                "modo": cuenta_fields.get("modo", ""),
                 "epoch": int(epoch_val),
                 "ts": ts_val,
                 "ia_decision_id": trade_uid_final,
@@ -2164,9 +2216,9 @@ async def ejecutar_panel():
             martingala = MARTINGALA_REAL if modo_real else MARTINGALA_DEMO
 
             sep_ciclo()
-            ciclo_orden, _ts, _quiet, _src = leer_orden_real(NOMBRE_BOT)
-            ciclo_forzado = estado_bot.get("ciclo_forzado")
-            ciclo = ciclo_orden or ciclo_forzado or 1
+            ciclo, ciclo_src = _resolver_ciclo_prioritario(fallback=1)
+            ciclo_orden = ciclo if ciclo_src == "orden" else None
+            ciclo_forzado = ciclo if ciclo_src == "retenido" else estado_bot.get("ciclo_forzado")
             if ciclo_orden:
                 if _print_once(f"ciclo-maestro-{ciclo_orden}", ttl=30):
                     print(Fore.YELLOW + f"Ciclo maestro vigente: C{int(ciclo_orden)}.")
@@ -2191,9 +2243,8 @@ async def ejecutar_panel():
                 ws, current_token = await check_token_and_reconnect(ws, current_token)
 
                 if reinicio_forzado.is_set():
-                    estado_bot["ciclo_forzado"] = ciclo
-                    proximo = estado_bot.get("ciclo_forzado") or ciclo
-                    print(Fore.YELLOW + Style.BRIGHT + f"Reinicio forzado durante ciclo. Ciclo actual #{ciclo} → siguiente #{proximo}.")
+                    proximo, origen = _retener_ciclo_para_reinicio(ciclo)
+                    print(Fore.YELLOW + Style.BRIGHT + f"Reinicio forzado durante ciclo. Ciclo actual #{ciclo} → siguiente #{proximo} ({origen}).")
                     reinicio_forzado.clear()
                     await asyncio.sleep(2)
                     indefinidos_consecutivos = 0
@@ -2231,8 +2282,8 @@ async def ejecutar_panel():
                 ws, current_token = await check_token_and_reconnect(ws, current_token)
 
                 if reinicio_forzado.is_set():
-                    estado_bot["ciclo_forzado"] = ciclo
-                    print(Fore.YELLOW + Style.BRIGHT + f"Reinicio forzado tras buscar estrategia. Mantengo ciclo #{ciclo}.")
+                    proximo, origen = _retener_ciclo_para_reinicio(ciclo)
+                    print(Fore.YELLOW + Style.BRIGHT + f"Reinicio forzado tras buscar estrategia. Mantengo ciclo #{proximo} ({origen}).")
                     reinicio_forzado.clear()
                     await asyncio.sleep(2)
                     indefinidos_consecutivos = 0
@@ -2240,8 +2291,8 @@ async def ejecutar_panel():
 
                 modo_real_now = (current_token == TOKEN_REAL)
                 if modo_real_now != modo_real:
-                    estado_bot["ciclo_forzado"] = ciclo
-                    print(Fore.YELLOW + Style.BRIGHT + "Token cambió justo antes de validar saldo/compra. Reinicio limpio para mantener sincronía con el maestro.")
+                    proximo, origen = _retener_ciclo_para_reinicio(ciclo)
+                    print(Fore.YELLOW + Style.BRIGHT + f"Token cambió justo antes de validar saldo/compra. Reinicio limpio; siguiente ciclo #{proximo} ({origen}).")
                     reinicio_forzado.set()
                     break
 
@@ -2327,8 +2378,8 @@ async def ejecutar_panel():
 
                 # Si token cambió DURANTE proposal → NO compramos, reinicio limpio
                 if reinicio_forzado.is_set():
-                    estado_bot["ciclo_forzado"] = ciclo
-                    print(Fore.YELLOW + Style.BRIGHT + f"Token cambió durante proposal. Cancelo compra y reinicio en ciclo #{ciclo}.")
+                    proximo, origen = _retener_ciclo_para_reinicio(ciclo)
+                    print(Fore.YELLOW + Style.BRIGHT + f"Token cambió durante proposal. Cancelo compra y reinicio en ciclo #{proximo} ({origen}).")
                     reinicio_forzado.clear()
                     await asyncio.sleep(1.2)
                     break
