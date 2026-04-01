@@ -1496,10 +1496,12 @@ protection_pause_reason = ""
 protection_pause_started_ts = 0.0
 protection_pause_until_ts = 0.0
 protection_pause_last_trigger_ts = 0.0
+protection_last_trigger_ts = 0.0
 protection_last_peak_equity = 0.0
 protection_last_drawdown_pct = 0.0
 protection_ema_alerta = 0.0
 protection_ema_calma = 0.0
+PROTECTION_LAST_JSON_WARN_TS = 0.0
 PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
 
 try:
@@ -15984,8 +15986,15 @@ def _fmt_protection_countdown(seconds_left: int) -> str:
 
 
 def _write_protection_health_state(now_ts: float | None = None):
+    global PROTECTION_LAST_JSON_WARN_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
     time_left_s = _equity_protection_time_left_s(now_ts) if bool(protection_pause_active) else 0
+    resume_hhmm = "--:--"
+    try:
+        if bool(protection_pause_active) and float(protection_pause_until_ts or 0.0) > 0:
+            resume_hhmm = datetime.fromtimestamp(float(protection_pause_until_ts), tz=timezone.utc).astimezone().strftime("%H:%M")
+    except Exception:
+        pass
     payload = {
         "active": bool(protection_pause_active),
         "reason": str(protection_pause_reason or ""),
@@ -15998,18 +16007,23 @@ def _write_protection_health_state(now_ts: float | None = None):
         "ema_alerta": float(protection_ema_alerta or 0.0),
         "ema_calma": float(protection_ema_calma or 0.0),
         "text_banner": "Deteccion caida-Proteccion de Saldo",
-        "resume_text": f"Retoma automaticamente sus funciones en: {_fmt_protection_countdown(time_left_s)}",
+        "resume_text": f"Retoma automaticamente sus funciones en: {resume_hhmm}",
         "updated_ts": float(now_ts),
     }
     try:
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
-    except Exception:
-        pass
+    except Exception as e:
+        if (now_ts - float(PROTECTION_LAST_JSON_WARN_TS or 0.0)) >= 30.0:
+            PROTECTION_LAST_JSON_WARN_TS = now_ts
+            try:
+                agregar_evento(f"PROTECCION_SALDO: warning write protection_health_state.json | {e}")
+            except Exception:
+                pass
 
 
 def _equity_protection_update(now_ts: float | None = None):
     global protection_pause_active, protection_pause_reason, protection_pause_started_ts
-    global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_peak_equity
+    global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_trigger_ts, protection_last_peak_equity
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
@@ -16045,6 +16059,7 @@ def _equity_protection_update(now_ts: float | None = None):
         protection_pause_started_ts = now_ts
         protection_pause_until_ts = now_ts + float(PROTECTION_PAUSE_SECONDS)
         protection_pause_last_trigger_ts = now_ts
+        protection_last_trigger_ts = now_ts
         try:
             agregar_evento(
                 f"PROTECCION_SALDO: ACTIVADA | dd={float(protection_last_drawdown_pct):.1f}% | pausa=20m"
