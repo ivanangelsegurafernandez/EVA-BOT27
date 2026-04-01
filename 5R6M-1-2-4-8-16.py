@@ -15655,6 +15655,18 @@ async def cargar_datos_bot(bot, token_actual):
             # 2) FILAS CERRADAS (GANANCIA / PÉRDIDA)
             #    - Aquí sí actualizamos historial y estadísticas reales
             # =========================
+            close_origin = str(fila_dict.get("close_origin", "") or "").strip().upper()
+            if close_origin == "BG_FINALIZE":
+                _hud_log_once(
+                    bot,
+                    "close_bg_audit_only",
+                    f"[HUD AUDIT ONLY] {bot} BG_FINALIZE ignorado para tabla viva",
+                    cooldown_s=20.0,
+                )
+                estado_bots[bot]["token"] = "REAL" if effective_owner == bot else "DEMO"
+                last_update_time[bot] = time.time()
+                continue
+
             _registrar_cierre_ctt(bot, fila_dict, resultado)
             if not str(fila_dict.get("ia_decision_id", "") or "").strip():
                 _hud_log_once(
