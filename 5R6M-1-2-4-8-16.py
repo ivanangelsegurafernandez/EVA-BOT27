@@ -1413,10 +1413,23 @@ def resolver_ruta_saldo_series() -> str:
     return os.path.abspath(os.path.join(SCRIPT_DIR, SALDO_SERIES_CSV_FILE))
 
 SALDO_SERIES_CSV_PATH = resolver_ruta_saldo_series()
+PROTECTION_HEALTH_STATE_FILE = "protection_health_state.json"
+PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
+    os.getenv(
+        "PROTECTION_HEALTH_STATE_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_HEALTH_STATE_FILE),
+    )
+)
+EMA_ALERTA_SPAN = 8
+EMA_CALMA_SPAN = 26
+DD_PROTECTION_THRESHOLD_PCT = -2.5
+PROTECTION_PAUSE_SECONDS = 20 * 60
+PROTECTION_LOG_COOLDOWN_S = 30.0
 SALDO_CSV_LOG_LAST_TS = 0.0
 print(f"[SALDO LIVE] destino: {SALDO_LIVE_SHARED_PATH}")
 print(f"[SALDO HIST] destino: {SALDO_LIVE_HISTORY_SHARED_PATH}")
 print(f"[SALDO CSV] destino: {SALDO_SERIES_CSV_PATH}")
+print(f"[PROTECTION] estado compartido: {PROTECTION_HEALTH_STATE_PATH}")
 def _safe_saldo_display_tz():
     if ZoneInfo is None:
         return timezone.utc
@@ -1478,6 +1491,16 @@ CTT_STATE = {
 REAL_OWNER_LOCK = None  # owner REAL en memoria (evita carreras de lectura de archivo)
 REAL_LOCK_MISMATCH_SINCE = 0.0
 REAL_LOCK_RECONCILE_S = 6.0
+protection_pause_active = False
+protection_pause_reason = ""
+protection_pause_started_ts = 0.0
+protection_pause_until_ts = 0.0
+protection_pause_last_trigger_ts = 0.0
+protection_last_peak_equity = 0.0
+protection_last_drawdown_pct = 0.0
+protection_ema_alerta = 0.0
+protection_ema_calma = 0.0
+PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
 
 try:
     last_sig_por_bot
@@ -2615,6 +2638,15 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
             return False
 
         now = time.time()
+        _equity_protection_update(now)
+        if origen in ("orden_real", "manual") and _equity_protection_is_active(now):
+            try:
+                agregar_evento(
+                    f"PROTECCION_SALDO: bloqueo nueva REAL {bot.upper()} | restante={_fmt_protection_countdown(_equity_protection_time_left_s(now))}"
+                )
+            except Exception:
+                pass
+            return False
 
         # 🔒 No permitir reemplazar owner REAL activo por otro bot.
         # Solo se puede activar si no hay owner o si es el mismo bot.
@@ -2796,6 +2828,16 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
     - Activa REAL inmediato en HUD + token file
     """
     ciclo = max(1, min(int(ciclo), MAX_CICLOS))
+    now = time.time()
+    _equity_protection_update(now)
+    if _equity_protection_is_active(now):
+        try:
+            agregar_evento(
+                f"PROTECCION_SALDO: orden REAL bloqueada para {bot.upper()} | restante={_fmt_protection_countdown(_equity_protection_time_left_s(now))}"
+            )
+        except Exception:
+            pass
+        return False
 
     # 🔒 No crear orden si ya hay otro owner REAL activo.
     try:
@@ -15892,6 +15934,138 @@ def _persistir_saldo_live():
             pass
 
 
+def _equity_protection_time_left_s(now_ts: float | None = None) -> int:
+    try:
+        now_ts = float(now_ts if now_ts is not None else time.time())
+        return max(0, int(round(float(protection_pause_until_ts or 0.0) - now_ts)))
+    except Exception:
+        return 0
+
+
+def _equity_protection_is_active(now_ts: float | None = None) -> bool:
+    global protection_pause_active
+    global protection_pause_reason, protection_pause_started_ts, protection_pause_until_ts
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    if not bool(protection_pause_active):
+        return False
+    if now_ts < float(protection_pause_until_ts or 0.0):
+        return True
+    protection_pause_active = False
+    protection_pause_reason = ""
+    protection_pause_started_ts = 0.0
+    protection_pause_until_ts = 0.0
+    try:
+        agregar_evento("PROTECCION_SALDO: FINALIZADA | maestro reanudado")
+    except Exception:
+        pass
+    return False
+
+
+def _equity_protection_should_pause() -> bool:
+    try:
+        return (
+            float(protection_ema_alerta) < float(protection_ema_calma)
+            and float(protection_last_drawdown_pct) <= float(DD_PROTECTION_THRESHOLD_PCT)
+        )
+    except Exception:
+        return False
+
+
+def _fmt_protection_countdown(seconds_left: int) -> str:
+    try:
+        s = max(0, int(seconds_left))
+        h, rem = divmod(s, 3600)
+        m, sec = divmod(rem, 60)
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{sec:02d}"
+        return f"{m:02d}:{sec:02d}"
+    except Exception:
+        return "00:00"
+
+
+def _write_protection_health_state(now_ts: float | None = None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    time_left_s = _equity_protection_time_left_s(now_ts) if bool(protection_pause_active) else 0
+    payload = {
+        "active": bool(protection_pause_active),
+        "reason": str(protection_pause_reason or ""),
+        "started_ts": float(protection_pause_started_ts or 0.0),
+        "until_ts": float(protection_pause_until_ts or 0.0),
+        "time_left_s": int(time_left_s),
+        "drawdown_pct": float(protection_last_drawdown_pct or 0.0),
+        "equity_now": float(SALDO_LAST_VALID_VALUE) if SALDO_LAST_VALID_VALUE is not None else None,
+        "peak_equity": float(protection_last_peak_equity or 0.0),
+        "ema_alerta": float(protection_ema_alerta or 0.0),
+        "ema_calma": float(protection_ema_calma or 0.0),
+        "text_banner": "Deteccion caida-Proteccion de Saldo",
+        "resume_text": f"Retoma automaticamente sus funciones en: {_fmt_protection_countdown(time_left_s)}",
+        "updated_ts": float(now_ts),
+    }
+    try:
+        _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
+    except Exception:
+        pass
+
+
+def _equity_protection_update(now_ts: float | None = None):
+    global protection_pause_active, protection_pause_reason, protection_pause_started_ts
+    global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_peak_equity
+    global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
+    global PROTECTION_LAST_ACTIVE_LOG_TS
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    try:
+        df = pd.read_csv(SALDO_SERIES_CSV_PATH, encoding="utf-8")
+        if df is None or df.empty or "equity" not in df.columns:
+            _equity_protection_is_active(now_ts)
+            _write_protection_health_state(now_ts)
+            return
+        eq = pd.to_numeric(df["equity"], errors="coerce").dropna()
+        if eq.empty:
+            _equity_protection_is_active(now_ts)
+            _write_protection_health_state(now_ts)
+            return
+        protection_ema_alerta = float(eq.ewm(span=int(EMA_ALERTA_SPAN), adjust=False).mean().iloc[-1])
+        protection_ema_calma = float(eq.ewm(span=int(EMA_CALMA_SPAN), adjust=False).mean().iloc[-1])
+        peak = float(eq.cummax().iloc[-1])
+        now_eq = float(eq.iloc[-1])
+        protection_last_peak_equity = peak
+        if abs(peak) > 1e-12:
+            protection_last_drawdown_pct = float(((now_eq - peak) / peak) * 100.0)
+        else:
+            protection_last_drawdown_pct = 0.0
+    except Exception:
+        _equity_protection_is_active(now_ts)
+        _write_protection_health_state(now_ts)
+        return
+
+    active_now = _equity_protection_is_active(now_ts)
+    if (not active_now) and _equity_protection_should_pause():
+        protection_pause_active = True
+        protection_pause_reason = "EMA_ALERTA<EMA_CALMA y drawdown umbral"
+        protection_pause_started_ts = now_ts
+        protection_pause_until_ts = now_ts + float(PROTECTION_PAUSE_SECONDS)
+        protection_pause_last_trigger_ts = now_ts
+        try:
+            agregar_evento(
+                f"PROTECCION_SALDO: ACTIVADA | dd={float(protection_last_drawdown_pct):.1f}% | pausa=20m"
+            )
+        except Exception:
+            pass
+        active_now = True
+
+    if active_now:
+        if (now_ts - float(PROTECTION_LAST_ACTIVE_LOG_TS or 0.0)) >= float(PROTECTION_LOG_COOLDOWN_S):
+            PROTECTION_LAST_ACTIVE_LOG_TS = now_ts
+            try:
+                agregar_evento(
+                    f"PROTECCION_SALDO: ACTIVA | restante={_fmt_protection_countdown(_equity_protection_time_left_s(now_ts))}"
+                )
+            except Exception:
+                pass
+
+    _write_protection_health_state(now_ts)
+
+
 # Obtener saldo real
 async def obtener_saldo_real():
     global saldo_real, ULTIMA_ACT_SALDO, SALDO_LAST_VALID_VALUE, SALDO_LAST_VALID_TS
@@ -16882,6 +17056,7 @@ async def main():
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
                         # Si la IA detecta señal y tú estás en manual, preselecciona el mejor bot y abre la ventana
                         # para que solo elijas el ciclo (1..MAX_CICLOS) dentro del tiempo.
+                        _equity_protection_update()
                         if MODO_REAL_MANUAL:
                             ahora = time.time()
 

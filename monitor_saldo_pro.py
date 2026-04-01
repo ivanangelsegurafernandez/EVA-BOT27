@@ -66,6 +66,7 @@ CSV_PATTERN = "registro_enriquecido_fulll*.csv"
 SALDO_LIVE_FILE = "saldo_real_live.json"
 SALDO_LIVE_HISTORY_FILE = "saldo_real_live_history.jsonl"
 SALDO_SERIES_CSV_FILE = "saldo_real_series.csv"
+PROTECTION_HEALTH_STATE_FILE = "protection_health_state.json"
 DISPLAY_TIMEZONE = "America/Lima"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SALDO_LIVE_SHARED_PATH = os.path.abspath(
@@ -85,6 +86,12 @@ def resolver_ruta_saldo_series() -> str:
 
 SALDO_SERIES_CSV_PATH = resolver_ruta_saldo_series()
 SALDO_LIVE_PATH = os.getenv("SALDO_LIVE_PATH", "").strip()
+PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
+    os.getenv(
+        "PROTECTION_HEALTH_STATE_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_HEALTH_STATE_FILE),
+    )
+)
 
 MONITOR_VERSION = "v2026.03.31-r1"
 MONITOR_BUILD_ID = "MONITOR_SALDO_PRO_REAL_SERIES_GUARD"
@@ -137,6 +144,29 @@ def _fmt_local_ts(ts_obj) -> str:
     except Exception:
         return "--"
     return "--"
+
+
+def _fmt_countdown(seconds_left: int) -> str:
+    try:
+        s = max(0, int(seconds_left))
+        h, rem = divmod(s, 3600)
+        m, sec = divmod(rem, 60)
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{sec:02d}"
+        return f"{m:02d}:{sec:02d}"
+    except Exception:
+        return "00:00"
+
+
+def _read_protection_health_state() -> Tuple[Optional[dict], Optional[str]]:
+    try:
+        if not os.path.exists(PROTECTION_HEALTH_STATE_PATH):
+            return None, None
+        with open(PROTECTION_HEALTH_STATE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None, None
+    except Exception as e:
+        return None, str(e)
 
 
 def _sanitize_series_for_plot(s: pd.DataFrame) -> pd.DataFrame:
@@ -782,6 +812,18 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.lbl_big.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         hl.addWidget(self.lbl_big)
 
+        self.lbl_protection_banner = QtWidgets.QLabel("")
+        self.lbl_protection_banner.setObjectName("ProtectionBanner")
+        self.lbl_protection_banner.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_protection_banner.setVisible(False)
+        hl.addWidget(self.lbl_protection_banner)
+
+        self.lbl_protection_detail = QtWidgets.QLabel("")
+        self.lbl_protection_detail.setObjectName("ProtectionDetail")
+        self.lbl_protection_detail.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_protection_detail.setVisible(False)
+        hl.addWidget(self.lbl_protection_detail)
+
         meta = QtWidgets.QHBoxLayout(); meta.setSpacing(10)
         self.lbl_refresh = QtWidgets.QLabel("REFRESCO: ACTIVO"); self.lbl_refresh.setObjectName("MetaBox")
         self.lbl_scale = QtWidgets.QLabel("ESCALA Y: --"); self.lbl_scale.setObjectName("MetaBox")
@@ -858,6 +900,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             #BadgeBad { font-size: 13px; color: #390000; background: #ff9c9c; border: 1px solid #ffb8b8; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #Warn { font-size: 11px; color: #ffc374; font-weight: 520; }
             #Help { font-size: 9px; color: #6b84a6; }
+            #ProtectionBanner { font-size: 30px; color: #ffe1e1; background:#5f111a; border:2px solid #ff6b7f; border-radius:12px; padding:8px 12px; font-weight:900; }
+            #ProtectionDetail { font-size: 20px; color: #ffd7d7; background:#351015; border:1px solid #a74c5a; border-radius:10px; padding:8px 12px; font-weight:780; }
             """
         )
         pg.setConfigOptions(antialias=True, background="#0b0f14", foreground="#d9e2f2")
@@ -933,12 +977,21 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _init_plot_state(self, plot: pg.PlotItem, color: str, endpoint: str, canonical_window_s: int) -> Dict[str, object]:
         glow = plot.plot([], [], pen=pg.mkPen(color + "55", width=8.0), name=None)
         line = plot.plot([], [], pen=pg.mkPen(color, width=5.2), name="Equity")
+        ema_alert = plot.plot([], [], pen=pg.mkPen("#ff2d2d", width=2.8), name="EMA alerta")
+        ema_calm = plot.plot([], [], pen=pg.mkPen("#a11a1a", width=2.1, style=QtCore.Qt.DashLine), name="EMA calma")
+        peak_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#ffb1b1aa", width=1.2, style=QtCore.Qt.DotLine))
+        peak_line.setVisible(False)
+        plot.addItem(peak_line)
+        shade = pg.LinearRegionItem(values=(0, 1), orientation=pg.LinearRegionItem.Vertical, brush=pg.mkBrush(140, 20, 30, 35), movable=False, pen=pg.mkPen(None))
+        shade.setVisible(False)
+        shade.setZValue(-20)
+        plot.addItem(shade)
         last = plot.plot([], [], pen=None, symbol="o", symbolSize=5, symbolBrush=endpoint, name=None)
         vmax = plot.plot([], [], pen=None, symbol="o", symbolSize=4, symbolBrush="#ffd36b99", name=None)
         vmin = plot.plot([], [], pen=None, symbol="o", symbolSize=4, symbolBrush="#ff8f8f99", name=None)
         txt = pg.TextItem(text="", color="#9ec2ff", anchor=(0, 1))
         plot.addItem(txt)
-        return {"plot": plot, "glow": glow, "line": line, "last": last, "max": vmax, "min": vmin, "text": txt, "canonical_window_s": int(canonical_window_s)}
+        return {"plot": plot, "glow": glow, "line": line, "ema_alert": ema_alert, "ema_calm": ema_calm, "peak_line": peak_line, "pause_shade": shade, "last": last, "max": vmax, "min": vmin, "text": txt, "canonical_window_s": int(canonical_window_s)}
 
     def _set_x_range_visible(self, plot: pg.PlotItem, x: np.ndarray, canonical_window_s: int):
         if len(x) == 0:
@@ -1248,16 +1301,21 @@ class DashboardWindow(QtWidgets.QMainWindow):
             print(f"[MONITOR][WARN] {msg} (x{count})")
             self._error_throttle[key] = (now_mono, 0)
 
-    def _update_plot_state(self, state: Dict[str, object], s: pd.DataFrame) -> Tuple[str, float, float]:
+    def _update_plot_state(self, state: Dict[str, object], s: pd.DataFrame, protection_state: Optional[dict] = None) -> Tuple[str, float, float]:
         plot = state["plot"]
         glow = state["glow"]; line = state["line"]; last = state["last"]; vmax = state["max"]; vmin = state["min"]; txt = state["text"]
+        ema_alert_line = state["ema_alert"]; ema_calm_line = state["ema_calm"]; peak_line = state["peak_line"]; pause_shade = state["pause_shade"]
         s = _sanitize_series_for_plot(s)
         if s.empty:
             glow.setData([], [])
             line.setData([], [])
+            ema_alert_line.setData([], [])
+            ema_calm_line.setData([], [])
             last.setData([], [])
             vmax.setData([], [])
             vmin.setData([], [])
+            peak_line.setVisible(False)
+            pause_shade.setVisible(False)
             txt.setText("Sin puntos")
             y0, y1, scale_info = self._resolve_y_range(None)
             plot.setYRange(y0, y1, padding=0.0)
@@ -1274,6 +1332,32 @@ class DashboardWindow(QtWidgets.QMainWindow):
             glow.setData([], [])
             line.setData([], [])
             txt.setText("1 punto: esperando más histórico")
+
+        if len(y) >= 8:
+            ema_alert = pd.Series(y).ewm(span=8, adjust=False).mean().to_numpy(dtype=float)
+            ema_calm = pd.Series(y).ewm(span=26, adjust=False).mean().to_numpy(dtype=float)
+            ema_alert_line.setData(x, ema_alert)
+            ema_calm_line.setData(x, ema_calm)
+        else:
+            ema_alert_line.setData([], [])
+            ema_calm_line.setData([], [])
+
+        try:
+            peak_val = float(np.nanmax(y))
+            peak_line.setPos(peak_val)
+            peak_line.setVisible(True)
+        except Exception:
+            peak_line.setVisible(False)
+
+        pstate = protection_state if isinstance(protection_state, dict) else {}
+        p_active = bool(pstate.get("active", False))
+        if p_active and len(x) > 0:
+            ts_start = float(pstate.get("started_ts") or x[0])
+            ts_end = float(pstate.get("until_ts") or x[-1])
+            pause_shade.setRegion((ts_start, ts_end))
+            pause_shade.setVisible(True)
+        else:
+            pause_shade.setVisible(False)
 
         marker_size = 8 if len(x) == 1 else 4
         if self.markers_enabled and SHOW_LAST_MARKER:
@@ -1357,6 +1441,33 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 self.lbl_source.setObjectName("BadgeNeutral"); self.lbl_big.setStyleSheet("color:#d8e7ff;")
             self.lbl_source.style().unpolish(self.lbl_source); self.lbl_source.style().polish(self.lbl_source)
 
+            protection_state, protection_err = _read_protection_health_state()
+            if protection_err:
+                snap.warnings.insert(0, f"protection_health_state.json inválido: {protection_err[:80]}")
+            p_active = bool((protection_state or {}).get("active", False))
+            if p_active:
+                p = protection_state or {}
+                started_dt = datetime.fromtimestamp(float(p.get("started_ts") or 0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(p.get("started_ts") or 0) > 0 else None
+                until_dt = datetime.fromtimestamp(float(p.get("until_ts") or 0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(p.get("until_ts") or 0) > 0 else None
+                dd_txt = f"{float(p.get('drawdown_pct') or 0.0):.2f}%"
+                left_txt = _fmt_countdown(int(p.get("time_left_s") or 0))
+                banner_text = str(p.get("text_banner") or "Deteccion caida-Proteccion de Saldo")
+                resume_text = str(p.get("resume_text") or f"Retoma automaticamente sus funciones en: {left_txt}")
+                self.lbl_protection_banner.setText(banner_text)
+                self.lbl_protection_detail.setText(
+                    "MAESTRO EN PAUSA · "
+                    f"motivo={str(p.get('reason') or '--')} · dd={dd_txt} · "
+                    f"inicio={started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'} · "
+                    f"reanuda={until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'} · "
+                    f"cronometro={left_txt}\n{resume_text}"
+                )
+                self.lbl_protection_banner.setVisible(True)
+                self.lbl_protection_detail.setVisible(True)
+                snap.warnings.insert(0, f"Evento pausa saldo: inicio={started_dt.strftime('%H:%M:%S') if started_dt else '--'} reanuda={until_dt.strftime('%H:%M:%S') if until_dt else '--'}")
+            else:
+                self.lbl_protection_banner.setVisible(False)
+                self.lbl_protection_detail.setVisible(False)
+
             main_scale = "--"
             main_y0, main_y1 = 0.0, 0.0
             series_map = {
@@ -1379,7 +1490,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
                             snap.warnings.append(f"Mostrando última serie válida en panel {key}")
                     elif not use_series.empty:
                         self._last_plot_series[key] = use_series
-                    scale_info, py0, py1 = self._update_plot_state(self.plot_states[key], use_series)
+                    scale_info, py0, py1 = self._update_plot_state(self.plot_states[key], use_series, protection_state=protection_state)
                     if key == "main":
                         main_scale = scale_info
                         main_y0, main_y1 = py0, py1
