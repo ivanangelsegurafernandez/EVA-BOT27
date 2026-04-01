@@ -133,6 +133,7 @@ _sfx_load_all()
 NOMBRE_BOT = "fulll45"
 ARCHIVO_CSV = f"registro_enriquecido_{NOMBRE_BOT}.csv"
 ARCHIVO_TOKEN = "token_actual.txt"  # Fuente única de verdad (coincide con 5R6M)
+BG_CLOSE_GUARD_DIR = "bg_close_guard"
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 ACTIVOS = ["1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"]
 MARTINGALA_DEMO = [1, 2, 4, 8]
@@ -196,6 +197,66 @@ def commit_guard_clear():
     global last_real_contract_id, real_buy_commit_until
     last_real_contract_id = None
     real_buy_commit_until = 0.0
+
+def _bg_close_guard_path() -> str:
+    return os.path.join(BG_CLOSE_GUARD_DIR, f"{NOMBRE_BOT}.json")
+
+def _set_bg_close_pending(contract_id, reason: str):
+    now_ts = time.time()
+    guard = {
+        "bot": NOMBRE_BOT,
+        "bg_close_pending": True,
+        "contract_id": str(contract_id or ""),
+        "reason": str(reason or ""),
+        "ts_open": now_ts,
+        "ts_last_update": now_ts,
+    }
+    try:
+        os.makedirs(BG_CLOSE_GUARD_DIR, exist_ok=True)
+        path = _bg_close_guard_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(guard, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception as e:
+        if _print_once("bg-close-guard-set", ttl=20):
+            print(Fore.YELLOW + f"[WARN] bg_close_guard set: {type(e).__name__}: {e}")
+
+def _clear_bg_close_pending(contract_id=None):
+    now_ts = time.time()
+    guard = {
+        "bot": NOMBRE_BOT,
+        "bg_close_pending": False,
+        "contract_id": str(contract_id or ""),
+        "reason": "",
+        "ts_open": 0,
+        "ts_last_update": now_ts,
+    }
+    try:
+        os.makedirs(BG_CLOSE_GUARD_DIR, exist_ok=True)
+        path = _bg_close_guard_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(guard, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception as e:
+        if _print_once("bg-close-guard-clear", ttl=20):
+            print(Fore.YELLOW + f"[WARN] bg_close_guard clear: {type(e).__name__}: {e}")
+
+def _has_bg_close_pending() -> bool:
+    path = _bg_close_guard_path()
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f) or {}
+        return bool(data.get("bg_close_pending", False))
+    except Exception:
+        return False
 
 # >>> PATCH 1 — Helpers de orden de ciclo
 ORDEN_DIR = "orden_real"  # misma carpeta usada por el maestro
@@ -1650,6 +1711,7 @@ async def esperar_resultado(ws, contract_id, symbol, direccion, monto, rsi9, rsi
                 remaining = 60 - i
                 print(Fore.MAGENTA + Style.BRIGHT + "\nToken cambió: finalizo contrato en segundo plano y libero el ciclo.")
                 # No reutilizar 'ws' para evitar choques de recv: usa una conexión propia
+                _set_bg_close_pending(contract_id, reason="token_change_or_ws_cut")
                 asyncio.create_task(finalizar_contrato_bg(
                     contract_id, remaining, symbol, direccion, monto,
                     rsi9, rsi14, sma5, sma20, cruce, breakout, rsi_reversion,
@@ -2065,6 +2127,7 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
             _buffer_log(msg2)
         else:
             print(msg2)
+        _clear_bg_close_pending(contract_id=contract_id)
 
     except Exception as e:
         msg = Fore.YELLOW + f"finalizar_contrato_bg: {type(e).__name__}: {e!r}"

@@ -1328,6 +1328,48 @@ def write_token_atomic(path, content):
             pass
         return False
 
+BG_CLOSE_GUARD_DIR = "bg_close_guard"
+_bg_close_block_log_ts = {}
+
+def _read_bg_close_pending(bot: str):
+    path = os.path.join(BG_CLOSE_GUARD_DIR, f"{bot}.json")
+    try:
+        if not os.path.exists(path):
+            return False, {}
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+        data = json.loads(raw) if raw.strip() else {}
+        pending = bool(data.get("bg_close_pending", False))
+        return pending, data
+    except Exception as e:
+        low = ""
+        try:
+            low = (raw or "").lower()
+        except Exception:
+            low = ""
+        pending_hint = '"bg_close_pending"' in low and "true" in low
+        if _print_once(f"bg-guard-read-{bot}", ttl=20):
+            try:
+                agregar_evento(f"⚠️ BG guard inválido {bot}: {type(e).__name__}")
+            except Exception:
+                pass
+        return bool(pending_hint), {}
+
+def _bot_blocked_by_bg_close(bot: str) -> bool:
+    pending, data = _read_bg_close_pending(bot)
+    if not pending:
+        return False
+    now = time.time()
+    last = float(_bg_close_block_log_ts.get(bot, 0.0) or 0.0)
+    if now - last >= 8.0:
+        _bg_close_block_log_ts[bot] = now
+        contract_id = str((data or {}).get("contract_id", "") or "")
+        try:
+            agregar_evento(f"LXV_BG_BLOCK: {bot} waiting_bg_close contract_id={contract_id}")
+        except Exception:
+            pass
+    return True
+
 
 # Orden operativo recomendado (calidad real primero):
 # 1) fulll47: mejor hit-rate y menor inflación del set comparado.
@@ -2643,6 +2685,13 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
             with file_lock_required("real.lock", timeout=6.0, stale_after=30.0) as got:
                 if not got:
                     agregar_evento("⚠️ Token REAL no escrito: lock real.lock ocupado. Se evita activar sin exclusión.")
+                    try:
+                        if origen == "orden_real":
+                            limpiar_orden_real(bot)
+                    except Exception:
+                        pass
+                    return False
+                if _bot_blocked_by_bg_close(bot):
                     try:
                         if origen == "orden_real":
                             limpiar_orden_real(bot)
