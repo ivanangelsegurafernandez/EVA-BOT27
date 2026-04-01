@@ -36,7 +36,11 @@ import os, csv, time, random, asyncio, json, re
 from collections import deque
 from unicodedata import normalize
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 from contextlib import contextmanager
 import sys
 import shutil
@@ -1347,6 +1351,39 @@ SALDO_LAST_VALID_VALUE = None
 SALDO_LAST_VALID_TS = 0.0
 SALDO_LAST_EVENT_KEY = ""
 SALDO_LAST_EVENT_TS = 0.0
+SALDO_LIVE_FILE = "saldo_real_live.json"
+SALDO_LIVE_HISTORY_FILE = "saldo_real_live_history.jsonl"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SALDO_LIVE_SHARED_PATH = os.path.abspath(
+    os.getenv("SALDO_LIVE_SHARED_PATH", os.path.join(os.path.expanduser("~"), SALDO_LIVE_FILE))
+)
+SALDO_LIVE_HISTORY_SHARED_PATH = os.path.abspath(
+    os.getenv(
+        "SALDO_LIVE_HISTORY_SHARED_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), SALDO_LIVE_HISTORY_FILE),
+    )
+)
+SALDO_SERIES_CSV_FILE = "saldo_real_series.csv"
+def resolver_ruta_saldo_series() -> str:
+    custom = os.getenv("SALDO_SERIES_CSV_PATH", "").strip()
+    if custom:
+        return os.path.abspath(os.path.expanduser(custom))
+    return os.path.abspath(os.path.join(SCRIPT_DIR, SALDO_SERIES_CSV_FILE))
+
+SALDO_SERIES_CSV_PATH = resolver_ruta_saldo_series()
+SALDO_CSV_LOG_LAST_TS = 0.0
+print(f"[SALDO LIVE] destino: {SALDO_LIVE_SHARED_PATH}")
+print(f"[SALDO HIST] destino: {SALDO_LIVE_HISTORY_SHARED_PATH}")
+print(f"[SALDO CSV] destino: {SALDO_SERIES_CSV_PATH}")
+def _safe_saldo_display_tz():
+    if ZoneInfo is None:
+        return timezone.utc
+    try:
+        return ZoneInfo("America/Lima")
+    except Exception:
+        return timezone.utc
+
+SALDO_DISPLAY_TZ = _safe_saldo_display_tz()
 meta_mostrada = False
 eventos_recentes = deque(maxlen=8)
 reinicio_forzado = asyncio.Event()
@@ -1358,6 +1395,7 @@ reinicio_manual = False
 LIMPIEZA_PANEL_HASTA = 0
 ULTIMA_ACT_SALDO = 0
 REFRESCO_SALDO = 12
+SALDO_HISTORY_HEARTBEAT_S = 15
 HUD_RENDER_MIN_INTERVAL_S = 1.20
 HUD_LAST_RENDER_TS = 0.0
 HUD_LAST_RENDER_SIG = ""
@@ -1371,6 +1409,7 @@ last_update_time = {bot: time.time() for bot in BOT_NAMES}
 LAST_REAL_CLOSE_SIG = {bot: None for bot in BOT_NAMES}  # evita procesar el mismo cierre REAL varias veces
 CTT_CLOSE_EVENTS = deque(maxlen=6000)
 CTT_CLOSE_SEEN = set()
+HUD_CLOSE_LOG_TS = {}
 CTT_STATE = {
     "status": "NEUTRAL",
     "regime": "NEUTRAL",
@@ -3139,6 +3178,53 @@ def normalizar_trade_status(ts):
         return s
     except Exception:
         return ""
+
+
+def _resultado_cierre_desde_fila(fila_dict: dict) -> str:
+    """Obtiene resultado canónico de una fila cerrada sin depender de una sola columna."""
+    try:
+        res = normalizar_resultado((fila_dict or {}).get("resultado", ""))
+        if res in ("GANANCIA", "PÉRDIDA"):
+            return res
+
+        for k in ("result_bin", "resultado_bin", "y", "label", "result"):
+            v = (fila_dict or {}).get(k, None)
+            if v in (None, "", "nan", "NaN"):
+                continue
+            try:
+                iv = int(float(v))
+                if iv == 1:
+                    return "GANANCIA"
+                if iv == 0:
+                    return "PÉRDIDA"
+            except Exception:
+                continue
+
+        gp = (fila_dict or {}).get("ganancia_perdida", None)
+        if gp not in (None, "", "nan", "NaN"):
+            try:
+                fv = float(gp)
+                if fv > 0:
+                    return "GANANCIA"
+                if fv < 0:
+                    return "PÉRDIDA"
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return "INDEFINIDO"
+
+
+def _hud_log_once(bot: str, key: str, msg: str, cooldown_s: float = 20.0):
+    try:
+        now = float(time.time())
+        map_key = f"{bot}|{key}"
+        last = float(HUD_CLOSE_LOG_TS.get(map_key, 0.0) or 0.0)
+        if (now - last) >= float(max(1.0, cooldown_s)):
+            HUD_CLOSE_LOG_TS[map_key] = now
+            agregar_evento(msg)
+    except Exception:
+        pass
 
 def canonicalizar_campos_bot_maestro(row_dict: dict | None):
     """
@@ -15370,8 +15456,11 @@ async def cargar_datos_bot(bot, token_actual):
             except Exception:
                 pass
 
-            trade_status = str(fila_dict.get("trade_status", "")).strip().upper()
-            resultado = normalizar_resultado(fila_dict.get("resultado", ""))
+            trade_status = normalizar_trade_status(
+                fila_dict.get("trade_status_norm", None) or fila_dict.get("trade_status", None)
+            )
+            resultado = _resultado_cierre_desde_fila(fila_dict)
+            cierre_valido_hud = (trade_status == "CERRADO" and resultado in ("GANANCIA", "PÉRDIDA"))
 
             try:
                 ep_dec = int(float(fila_dict.get("epoch", 0) or 0))
@@ -15388,7 +15477,21 @@ async def cargar_datos_bot(bot, token_actual):
             #    - Calculamos Prob IA para el HUD
             #    - NO tocamos historial, n, ni %éxito (evita los “·” intercalados)
             # =========================
-            if resultado not in ("GANANCIA", "PÉRDIDA"):
+            if not cierre_valido_hud:
+                if trade_status == "CERRADO":
+                    if estado_bots[bot].get("ia_senal_pendiente"):
+                        estado_bots[bot]["ia_senal_pendiente"] = False
+                        estado_bots[bot]["ia_prob_senal"] = None
+                    _hud_log_once(
+                        bot,
+                        "close_reject",
+                        f"[HUD REJECT] {bot} cierre descartado: resultado inválido ({fila_dict.get('resultado', '')})",
+                        cooldown_s=25.0,
+                    )
+                    estado_bots[bot]["token"] = "REAL" if effective_owner == bot else "DEMO"
+                    last_update_time[bot] = time.time()
+                    continue
+
                 # Guarda epoch PRE más reciente para heartbeat ACK (sin depender de filas nuevas constantes)
                 try:
                     ep_pre = fila_dict.get("epoch", 0)
@@ -15400,15 +15503,6 @@ async def cargar_datos_bot(bot, token_actual):
 
                 # Si el bot marcó CERRADO pero no trajo resultado válido,
                 # cerramos señal pendiente (si existía) sin contaminar historial.
-                if trade_status == "CERRADO":
-                    if estado_bots[bot].get("ia_senal_pendiente"):
-                        estado_bots[bot]["ia_senal_pendiente"] = False
-                        estado_bots[bot]["ia_prob_senal"] = None
-
-                    estado_bots[bot]["token"] = "REAL" if effective_owner == bot else "DEMO"
-                    last_update_time[bot] = time.time()
-                    continue
-
                 missing = [col for col in required_cols if pd.isna(fila_dict.get(col))]
                 if missing:
                     agregar_evento(f"⚠️ {bot}: PRE_TRADE incompleto, faltan {len(missing)} cols: {missing[:5]}")
@@ -15469,9 +15563,22 @@ async def cargar_datos_bot(bot, token_actual):
             #    - Aquí sí actualizamos historial y estadísticas reales
             # =========================
             _registrar_cierre_ctt(bot, fila_dict, resultado)
+            if not str(fila_dict.get("ia_decision_id", "") or "").strip():
+                _hud_log_once(
+                    bot,
+                    "close_orphan_fallback",
+                    f"[HUD FALLBACK] {bot} cierre huérfano aceptado para tabla",
+                    cooldown_s=20.0,
+                )
             estado_bots[bot]["ultimo_resultado"] = resultado
             estado_bots[bot]["resultados"].append(resultado)
             estado_bots[bot]["tamano_muestra"] += 1
+            _hud_log_once(
+                bot,
+                "close_ok",
+                f"[HUD CLOSE] {bot} -> {resultado} | n={int(estado_bots[bot]['tamano_muestra'])}",
+                cooldown_s=8.0,
+            )
 
             if resultado == "GANANCIA":
                 estado_bots[bot]["ganancias"] += 1
@@ -15583,6 +15690,159 @@ def _set_saldo_status(status: str, reason: str, detail: str = "", announce: bool
             agregar_evento(msg)
 
 
+def _persistir_saldo_series_csv(payload: dict, now_utc: datetime, event_type: str):
+    global SALDO_CSV_LOG_LAST_TS
+    csv_path = SALDO_SERIES_CSV_PATH
+    os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+    cols = ["ts_utc", "ts_lima", "epoch", "saldo_real", "status", "source", "event_type"]
+    saldo_val = payload.get("saldo_real", None)
+    if saldo_val is None:
+        return
+    try:
+        saldo_val = float(saldo_val)
+    except Exception:
+        return
+
+    ts_utc = str(payload.get("timestamp", "")).strip() or now_utc.isoformat()
+    try:
+        dt_utc = datetime.fromisoformat(ts_utc.replace("Z", "+00:00"))
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        dt_utc = dt_utc.astimezone(timezone.utc)
+    except Exception:
+        dt_utc = now_utc
+    dt_lima = dt_utc.astimezone(SALDO_DISPLAY_TZ)
+
+    row = {
+        "ts_utc": dt_utc.isoformat(),
+        "ts_lima": dt_lima.isoformat(),
+        "epoch": f"{float(dt_utc.timestamp()):.6f}",
+        "saldo_real": f"{saldo_val:.10f}",
+        "status": str(payload.get("status", "")),
+        "source": str(payload.get("source", "")),
+        "event_type": str(event_type),
+    }
+
+    last_ts = ""
+    last_saldo = None
+    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+        try:
+            with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    if not r:
+                        continue
+                    last_ts = str(r.get("ts_utc", "")).strip() or last_ts
+                    try:
+                        last_saldo = float(r.get("saldo_real"))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    if last_ts == row["ts_utc"] and last_saldo is not None and abs(last_saldo - saldo_val) <= 1e-12:
+        return
+
+    write_header = (not os.path.exists(csv_path)) or os.path.getsize(csv_path) <= 0
+    try:
+        with open(csv_path, "a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=cols)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        now_log = float(time.time())
+        if (now_log - float(SALDO_CSV_LOG_LAST_TS or 0.0)) >= 12.0:
+            SALDO_CSV_LOG_LAST_TS = now_log
+            try:
+                print(
+                    f"[SALDO CSV] append ok -> {os.path.basename(csv_path)} | "
+                    f"saldo={saldo_val:.2f} | event={event_type}"
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[SALDO CSV][ERROR] append failed en {csv_path}: {e}")
+        try:
+            traceback.print_exc(limit=1)
+        except Exception:
+            pass
+
+
+def _persistir_saldo_live():
+    try:
+        now_utc = datetime.now(timezone.utc)
+        payload = {
+            "saldo_real": float(SALDO_LAST_VALID_VALUE) if SALDO_LAST_VALID_VALUE is not None else None,
+            "timestamp": now_utc.isoformat(),
+            "status": str(SALDO_STATUS),
+            "source": "MAESTRO_DERIV",
+            "last_valid_ts": float(SALDO_LAST_VALID_TS or 0.0),
+        }
+
+        live_target = SALDO_LIVE_SHARED_PATH
+        os.makedirs(os.path.dirname(live_target) or ".", exist_ok=True)
+        tmp = f"{live_target}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, live_target)
+
+        hist_target = SALDO_LIVE_HISTORY_SHARED_PATH
+        os.makedirs(os.path.dirname(hist_target) or ".", exist_ok=True)
+        last_obj = None
+        if os.path.exists(hist_target):
+            with open(hist_target, "r", encoding="utf-8", errors="ignore") as hf:
+                for line in hf:
+                    line = line.strip()
+                    if line:
+                        try:
+                            last_obj = json.loads(line)
+                        except Exception:
+                            pass
+        should_append = True
+        append_reason = "change"
+        if isinstance(last_obj, dict):
+            try:
+                same_balance = float(last_obj.get("saldo_real")) == float(payload.get("saldo_real"))
+            except Exception:
+                same_balance = False
+            same_status = str(last_obj.get("status", "")) == str(payload.get("status", ""))
+            same_source = str(last_obj.get("source", "")) == str(payload.get("source", ""))
+            same_signature = same_balance and same_status and same_source
+            if same_signature:
+                elapsed = None
+                try:
+                    ts_raw = str(last_obj.get("timestamp", "")).strip()
+                    if ts_raw:
+                        ts_last = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                        elapsed = (now_utc - ts_last).total_seconds()
+                except Exception:
+                    elapsed = None
+                should_append = elapsed is None or elapsed >= float(SALDO_HISTORY_HEARTBEAT_S)
+                append_reason = "heartbeat"
+            else:
+                should_append = True
+                append_reason = "change"
+        if should_append:
+            payload["event_type"] = append_reason
+            with open(hist_target, "a", encoding="utf-8") as hf:
+                hf.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                hf.flush()
+                try:
+                    os.fsync(hf.fileno())
+                except Exception:
+                    pass
+            _persistir_saldo_series_csv(payload, now_utc, append_reason)
+    except Exception as e:
+        try:
+            print(f"⚠️ No se pudo persistir saldo live/hist: {e}")
+        except Exception:
+            pass
+
+
 # Obtener saldo real
 async def obtener_saldo_real():
     global saldo_real, ULTIMA_ACT_SALDO, SALDO_LAST_VALID_VALUE, SALDO_LAST_VALID_TS
@@ -15621,6 +15881,7 @@ async def obtener_saldo_real():
                 SALDO_LAST_VALID_VALUE = float(val)
                 SALDO_LAST_VALID_TS = float(ULTIMA_ACT_SALDO)
                 _set_saldo_status("KNOWN", "OK", announce=False)
+                _persistir_saldo_live()
                 if SALDO_INICIAL is None:
                     inicializar_saldo_real(val)
                 return
