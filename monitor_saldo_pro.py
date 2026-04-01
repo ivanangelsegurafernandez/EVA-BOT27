@@ -900,8 +900,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             #BadgeBad { font-size: 13px; color: #390000; background: #ff9c9c; border: 1px solid #ffb8b8; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #Warn { font-size: 11px; color: #ffc374; font-weight: 520; }
             #Help { font-size: 9px; color: #6b84a6; }
-            #ProtectionBanner { font-size: 30px; color: #ffe1e1; background:#5f111a; border:2px solid #ff6b7f; border-radius:12px; padding:8px 12px; font-weight:900; }
-            #ProtectionDetail { font-size: 20px; color: #ffd7d7; background:#351015; border:1px solid #a74c5a; border-radius:10px; padding:8px 12px; font-weight:780; }
+            #ProtectionBanner { font-size: 40px; color: #fff3f3; background:#8f1223; border:3px solid #ff4b66; border-radius:12px; padding:10px 14px; font-weight:950; }
+            #ProtectionDetail { font-size: 21px; color: #ffdede; background:#431119; border:1px solid #d85b71; border-radius:10px; padding:10px 14px; font-weight:820; }
             """
         )
         pg.setConfigOptions(antialias=True, background="#0b0f14", foreground="#d9e2f2")
@@ -1342,14 +1342,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
             ema_alert_line.setData([], [])
             ema_calm_line.setData([], [])
 
+        pstate = protection_state if isinstance(protection_state, dict) else {}
         try:
-            peak_val = float(np.nanmax(y))
+            peak_val = float((pstate.get("peak_equity") if isinstance(pstate, dict) else None) or np.nanmax(y))
             peak_line.setPos(peak_val)
             peak_line.setVisible(True)
         except Exception:
             peak_line.setVisible(False)
 
-        pstate = protection_state if isinstance(protection_state, dict) else {}
         p_active = bool(pstate.get("active", False))
         if p_active and len(x) > 0:
             ts_start = float(pstate.get("started_ts") or x[0])
@@ -1450,16 +1450,21 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 started_dt = datetime.fromtimestamp(float(p.get("started_ts") or 0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(p.get("started_ts") or 0) > 0 else None
                 until_dt = datetime.fromtimestamp(float(p.get("until_ts") or 0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(p.get("until_ts") or 0) > 0 else None
                 dd_txt = f"{float(p.get('drawdown_pct') or 0.0):.2f}%"
-                left_txt = _fmt_countdown(int(p.get("time_left_s") or 0))
-                banner_text = str(p.get("text_banner") or "Deteccion caida-Proteccion de Saldo")
-                resume_text = str(p.get("resume_text") or f"Retoma automaticamente sus funciones en: {left_txt}")
-                self.lbl_protection_banner.setText(banner_text)
+                now_ts = time.time()
+                if float(p.get("until_ts") or 0) > 0:
+                    left_txt = _fmt_countdown(max(0, int(round(float(p.get("until_ts")) - now_ts))))
+                else:
+                    left_txt = _fmt_countdown(int(p.get("time_left_s") or 0))
+                resume_text = str(p.get("resume_text") or f"Retoma automaticamente sus funciones en: {until_dt.strftime('%H:%M') if until_dt else '--:--'}")
+                self.lbl_protection_banner.setText("Deteccion caida-Proteccion de Saldo")
                 self.lbl_protection_detail.setText(
-                    "MAESTRO EN PAUSA · "
-                    f"motivo={str(p.get('reason') or '--')} · dd={dd_txt} · "
-                    f"inicio={started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'} · "
-                    f"reanuda={until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'} · "
-                    f"cronometro={left_txt}\n{resume_text}"
+                    "MAESTRO EN PAUSA\n"
+                    f"Motivo: {str(p.get('reason') or '--')}\n"
+                    f"Drawdown actual: {dd_txt}\n"
+                    f"Inicio pausa: {started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'}\n"
+                    f"Reanudacion: {until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'}\n"
+                    f"Cronometro: {left_txt}\n"
+                    f"{resume_text}"
                 )
                 self.lbl_protection_banner.setVisible(True)
                 self.lbl_protection_detail.setVisible(True)
