@@ -481,6 +481,7 @@ CSV_HEADER = [
 ]
 CLOSE_SNAPSHOT_COLS = [f"close_{i}" for i in range(20)]
 CSV_HEADER = CSV_HEADER + CLOSE_SNAPSHOT_COLS
+CSV_HEADER.append("close_origin")
 # =============================================================================
 # CSV — helpers robustos (evita columnas corridas + asegura puntaje 0..1)
 # =============================================================================
@@ -2102,6 +2103,7 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 "epoch": int(epoch_val),
                 "ts": ts_val,
                 "ia_decision_id": trade_uid_final,
+                "close_origin": "BG_FINALIZE",
             }
             closes = _extract_close_snapshot(close_snapshot, n=20)
             _warn_close_snapshot_insuficiente(closes)

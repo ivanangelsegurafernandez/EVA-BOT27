@@ -1330,6 +1330,8 @@ def write_token_atomic(path, content):
 
 BG_CLOSE_GUARD_DIR = "bg_close_guard"
 _bg_close_block_log_ts = {}
+_bg_close_release_log_ts = {}
+_bg_close_prev_pending = {}
 
 def _read_bg_close_pending(bot: str):
     path = os.path.join(BG_CLOSE_GUARD_DIR, f"{bot}.json")
@@ -1358,7 +1360,18 @@ def _read_bg_close_pending(bot: str):
 def _bot_blocked_by_bg_close(bot: str) -> bool:
     pending, data = _read_bg_close_pending(bot)
     if not pending:
+        if bool(_bg_close_prev_pending.get(bot, False)):
+            now = time.time()
+            last_rel = float(_bg_close_release_log_ts.get(bot, 0.0) or 0.0)
+            if now - last_rel >= 8.0:
+                _bg_close_release_log_ts[bot] = now
+                try:
+                    agregar_evento(f"LXV_BG_RELEASED: {bot} bg_close resuelto, vuelve a ser elegible")
+                except Exception:
+                    pass
+        _bg_close_prev_pending[bot] = False
         return False
+    _bg_close_prev_pending[bot] = True
     now = time.time()
     last = float(_bg_close_block_log_ts.get(bot, 0.0) or 0.0)
     if now - last >= 8.0:
@@ -2638,6 +2651,8 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
     try:
         if bot not in BOT_NAMES:
             return False
+        if _bot_blocked_by_bg_close(bot):
+            return False
 
         now = time.time()
         _equity_protection_update(now)
@@ -2852,6 +2867,11 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
             agregar_evento(f"🔒 Orden REAL bloqueada para {bot.upper()}: {owner_lock.upper()} está activo.")
         except Exception:
             pass
+        return False
+
+    # Veto operativo temprano: no materializar REAL ni escribir orden fantasma
+    # mientras el bot tenga cierre BG pendiente.
+    if _bot_blocked_by_bg_close(bot):
         return False
 
     # ✅ Auditoría Real vs Ficticia: abrir señal SOLO si esta orden está respaldada por IA (prob >= umbral)
@@ -15655,6 +15675,18 @@ async def cargar_datos_bot(bot, token_actual):
             # 2) FILAS CERRADAS (GANANCIA / PÉRDIDA)
             #    - Aquí sí actualizamos historial y estadísticas reales
             # =========================
+            close_origin = str(fila_dict.get("close_origin", "") or "").strip().upper()
+            if close_origin == "BG_FINALIZE":
+                _hud_log_once(
+                    bot,
+                    "close_bg_audit_only",
+                    f"[HUD AUDIT ONLY] {bot} BG_FINALIZE ignorado para tabla viva",
+                    cooldown_s=20.0,
+                )
+                estado_bots[bot]["token"] = "REAL" if effective_owner == bot else "DEMO"
+                last_update_time[bot] = time.time()
+                continue
+
             _registrar_cierre_ctt(bot, fila_dict, resultado)
             if not str(fila_dict.get("ia_decision_id", "") or "").strip():
                 _hud_log_once(
@@ -17060,7 +17092,7 @@ async def main():
                                 f"| reds={int(logica_unica_real.get('reds', 0) or 0)} | source=LXV | "
                                 f"decision_final=REAL_OK por LXV"
                             )
-                            agregar_evento(f"LXV_ACTIVATION: snapshot válido -> REAL habilitado para {selected_bot_operativo}")
+                            agregar_evento(f"LXV_CANDIDATE_READY: snapshot válido -> candidato REAL {selected_bot_operativo}")
                             if veto_flags_info:
                                 agregar_evento("LXV_INFO: " + " | ".join(veto_flags_info[:6]))
                         elif not lxv_permite_real_nuevo:

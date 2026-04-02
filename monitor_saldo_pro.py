@@ -98,7 +98,7 @@ MONITOR_BUILD_ID = "MONITOR_SALDO_PRO_REAL_SERIES_GUARD"
 MIN_POINTS_FOR_LINE = 2
 SHOW_LAST_MARKER = True
 SHOW_EXTREME_MARKERS = False
-Y_SCALE_MODE = os.getenv("Y_SCALE_MODE", "auto").strip().lower()  # capital | manual | auto
+Y_SCALE_MODE = os.getenv("Y_SCALE_MODE", "manual").strip().lower()  # capital | manual | auto
 Y_AXIS_MIN_USD = float(os.getenv("Y_AXIS_MIN_USD", "0"))
 Y_AXIS_MAX_USD = float(os.getenv("Y_AXIS_MAX_USD", "300"))
 Y_AUTO_SPAN_USD = float(os.getenv("Y_AUTO_SPAN_USD", "120"))
@@ -106,6 +106,19 @@ CAPITAL_BASE_USD = float(os.getenv("CAPITAL_BASE_USD", "0") or "0")
 MIN_X_SPAN_SECONDS = 20.0
 OBSERVED_TAIL_BYTES = int(os.getenv("OBSERVED_TAIL_BYTES", str(256 * 1024)))
 ESTIMATED_REFRESH_SECONDS = int(os.getenv("ESTIMATED_REFRESH_SECONDS", "30"))
+
+def _main_window_seconds() -> int:
+    """
+    Ventana de contexto para MAIN:
+    - independiente de DÍAS para evitar panel clon
+    - ligada a HORAS para mantener coherencia operativa visible
+    """
+    try:
+        h = int(VENTANA_HORAS)
+    except Exception:
+        h = 9
+    h_ctx = max(24, min(72, h * 3))
+    return int(h_ctx * 3600)
 def _safe_display_tz():
     if ZoneInfo is None:
         return timezone.utc
@@ -186,14 +199,24 @@ def _sample_window_series(
     target_points: int,
 ) -> pd.DataFrame:
     base = _sanitize_series_for_plot(series[series["timestamp"] >= cutoff].copy()) if not series.empty else pd.DataFrame(columns=["timestamp", "equity"])
-    if base.empty or len(base) <= max(4, target_points):
+    tgt = max(12, int(target_points or 0))
+    if base.empty or len(base) <= tgt:
         return base
     try:
-        t_sec = (base["timestamp"].astype("int64") // 1_000_000_000).to_numpy(dtype=np.int64)
-        span = int(max(1, t_sec[-1] - t_sec[0]))
-        bucket_s = max(1, span // max(1, int(target_points)))
-        bucket_id = (t_sec - t_sec[0]) // bucket_s
         df = base.reset_index(drop=True).copy()
+        t_sec = (df["timestamp"].astype("int64") // 1_000_000_000).to_numpy(dtype=np.int64)
+        n = int(len(df))
+        span = int(max(1, t_sec[-1] - t_sec[0]))
+
+        # Fallback por densidad/irregularidad: bucket por índice para evitar aliasing raro.
+        use_index_bucket = bool(span <= max(4, n // 2))
+        if use_index_bucket:
+            bucket_size = max(1, int(np.ceil(n / float(tgt))))
+            bucket_id = (np.arange(n, dtype=np.int64) // bucket_size).astype(np.int64)
+        else:
+            bucket_s = max(1, int(np.ceil(span / float(tgt))))
+            bucket_id = ((t_sec - t_sec[0]) // bucket_s).astype(np.int64)
+
         df["bucket_id"] = bucket_id
         keep_idx = set()
         for _, g in df.groupby("bucket_id", sort=True):
@@ -203,9 +226,20 @@ def _sample_window_series(
             keep_idx.add(int(g.index[-1]))  # last
             keep_idx.add(int(g["equity"].idxmin()))  # min
             keep_idx.add(int(g["equity"].idxmax()))  # max
+            keep_idx.add(int(g.index[len(g) // 2]))  # punto medio local (reduce aplanado)
+        keep_idx.add(0)               # preserva inicio global
+        keep_idx.add(len(df) - 1)     # preserva fin global
         sampled = df.loc[sorted(keep_idx), ["timestamp", "equity"]]
         sampled = sampled.drop_duplicates(subset=["timestamp", "equity"], keep="last").sort_values("timestamp")
-        return sampled.reset_index(drop=True)
+        sampled = sampled.reset_index(drop=True)
+
+        # Tope de seguridad: evita sobre-compresión irregular cuando buckets son muy densos.
+        max_keep = int(max(tgt, tgt * 1.35))
+        if len(sampled) > max_keep:
+            idx = np.linspace(0, len(sampled) - 1, num=max_keep, dtype=int)
+            sampled = sampled.iloc[np.unique(idx)].copy()
+            sampled = sampled.reset_index(drop=True)
+        return sampled
     except Exception:
         return base
 
@@ -219,13 +253,6 @@ def _safe_float(x, default=np.nan):
         return float(x)
     except Exception:
         return default
-
-
-def _is_valid_number(v) -> bool:
-    try:
-        return v is not None and np.isfinite(float(v))
-    except Exception:
-        return False
 
 
 def _is_valid_number(v) -> bool:
@@ -366,23 +393,6 @@ class DataEngine:
     def _store_cache(self, key: str, sig: Tuple, value):
         self._cache[key] = (sig, value)
         return value
-
-    @staticmethod
-    def _read_tail_lines(path: Path, max_bytes: int) -> List[str]:
-        try:
-            with path.open("rb") as fh:
-                fh.seek(0, os.SEEK_END)
-                size = fh.tell()
-                read_from = max(0, size - max(1024, int(max_bytes)))
-                fh.seek(read_from, os.SEEK_SET)
-                data = fh.read()
-            if read_from > 0:
-                nl = data.find(b"\n")
-                if nl >= 0:
-                    data = data[nl + 1 :]
-            return data.decode("utf-8", errors="ignore").splitlines()
-        except Exception:
-            return []
 
     @staticmethod
     def _read_tail_lines(path: Path, max_bytes: int) -> List[str]:
@@ -743,8 +753,9 @@ class DataEngine:
         mcut = now - timedelta(minutes=VENTANA_MINUTOS)
         hcut = now - timedelta(hours=VENTANA_HORAS)
         dcut = now - timedelta(days=VENTANA_DIAS)
+        main_cut = now - timedelta(seconds=_main_window_seconds())
 
-        smain = _sample_window_series(real_series, dcut, target_points=900)
+        smain = _sample_window_series(real_series, main_cut, target_points=900)
         smin = _sample_window_series(real_series, mcut, target_points=420)
         shrs = _sample_window_series(real_series, hcut, target_points=520)
         sday = _sample_window_series(real_series, dcut, target_points=360)
@@ -827,6 +838,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         meta = QtWidgets.QHBoxLayout(); meta.setSpacing(10)
         self.lbl_refresh = QtWidgets.QLabel("REFRESCO: ACTIVO"); self.lbl_refresh.setObjectName("MetaBox")
         self.lbl_scale = QtWidgets.QLabel("ESCALA Y: --"); self.lbl_scale.setObjectName("MetaBox")
+        self.lbl_scale_mode = QtWidgets.QLabel("ESCALA: --"); self.lbl_scale_mode.setObjectName("MetaBox")
         self.lbl_delta = QtWidgets.QLabel("Δ VIS: --"); self.lbl_delta.setObjectName("MetaBox")
         self.lbl_samples = QtWidgets.QLabel("MUESTRAS: --"); self.lbl_samples.setObjectName("MetaBox")
         self.lbl_tz = QtWidgets.QLabel(f"TZ: {DISPLAY_TIMEZONE}"); self.lbl_tz.setObjectName("MetaBox")
@@ -834,6 +846,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.lbl_last = QtWidgets.QLabel("ÚLTIMA ACT: --"); self.lbl_last.setObjectName("MetaLast")
         meta.addWidget(self.lbl_refresh)
         meta.addWidget(self.lbl_scale)
+        meta.addWidget(self.lbl_scale_mode)
         meta.addWidget(self.lbl_delta)
         meta.addWidget(self.lbl_samples)
         meta.addWidget(self.lbl_tz)
@@ -854,6 +867,16 @@ class DashboardWindow(QtWidgets.QMainWindow):
         for b in (self.btn_real, self.btn_demo, self.btn_all, self.btn_pause, self.btn_reset, self.btn_export, self.btn_rule, self.btn_markers, self.btn_freeze):
             b.setObjectName("MetaBox")
             controls.addWidget(b)
+        self.cmb_min = QtWidgets.QComboBox(); self.cmb_min.setObjectName("MetaBox")
+        self.cmb_min.addItems(["15m", "30m", "60m", "90m", "120m"])
+        self.cmb_hour = QtWidgets.QComboBox(); self.cmb_hour.setObjectName("MetaBox")
+        self.cmb_hour.addItems(["3h", "6h", "9h", "12h", "24h"])
+        self.cmb_day = QtWidgets.QComboBox(); self.cmb_day.setObjectName("MetaBox")
+        self.cmb_day.addItems(["7d", "14d", "30d"])
+        self._sync_window_combos()
+        controls.addWidget(self.cmb_min)
+        controls.addWidget(self.cmb_hour)
+        controls.addWidget(self.cmb_day)
         controls.addStretch(1)
         hl.addLayout(controls)
         root.addWidget(header)
@@ -870,7 +893,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self._style_plot(self.p_day, "DÍAS · tendencia")
 
         self.plot_states = {
-            "main": self._init_plot_state(self.p_main, "#5df2ff", "#d9fbff", VENTANA_DIAS * 86400),
+            "main": self._init_plot_state(self.p_main, "#5df2ff", "#d9fbff", _main_window_seconds()),
             "min": self._init_plot_state(self.p_min, "#3fe9ff", "#c6f7ff", VENTANA_MINUTOS * 60),
             "hour": self._init_plot_state(self.p_hour, "#7aa6ff", "#dae3ff", VENTANA_HORAS * 3600),
             "day": self._init_plot_state(self.p_day, "#7ff0b9", "#dcffe9", VENTANA_DIAS * 86400),
@@ -901,7 +924,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
             #Warn { font-size: 11px; color: #ffc374; font-weight: 520; }
             #Help { font-size: 9px; color: #6b84a6; }
             #ProtectionBanner { font-size: 40px; color: #fff3f3; background:#8f1223; border:3px solid #ff4b66; border-radius:12px; padding:10px 14px; font-weight:950; }
-            #ProtectionDetail { font-size: 21px; color: #ffdede; background:#431119; border:1px solid #d85b71; border-radius:10px; padding:10px 14px; font-weight:820; }
+            #ProtectionDetail { font-size: 23px; color: #ffdede; background:#431119; border:1px solid #d85b71; border-radius:10px; padding:10px 14px; font-weight:850; }
             """
         )
         pg.setConfigOptions(antialias=True, background="#0b0f14", foreground="#d9e2f2")
@@ -919,6 +942,9 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.btn_rule.clicked.connect(self._toggle_rule_mode)
         self.btn_markers.clicked.connect(self._toggle_markers)
         self.btn_freeze.clicked.connect(self._toggle_freeze)
+        self.cmb_min.currentTextChanged.connect(self._on_window_combo_changed)
+        self.cmb_hour.currentTextChanged.connect(self._on_window_combo_changed)
+        self.cmb_day.currentTextChanged.connect(self._on_window_combo_changed)
 
         self._init_crosshair()
 
@@ -978,11 +1004,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
         glow = plot.plot([], [], pen=pg.mkPen(color + "55", width=8.0), name=None)
         line = plot.plot([], [], pen=pg.mkPen(color, width=5.2), name="Equity")
         ema_alert = plot.plot([], [], pen=pg.mkPen("#ff2d2d", width=2.8), name="EMA alerta")
-        ema_calm = plot.plot([], [], pen=pg.mkPen("#a11a1a", width=2.1, style=QtCore.Qt.DashLine), name="EMA calma")
+        ema_calm = plot.plot([], [], pen=pg.mkPen("#4ea1ff", width=2.2, style=QtCore.Qt.DashLine), name="EMA calma")
         peak_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#ffb1b1aa", width=1.2, style=QtCore.Qt.DotLine))
         peak_line.setVisible(False)
         plot.addItem(peak_line)
-        shade = pg.LinearRegionItem(values=(0, 1), orientation=pg.LinearRegionItem.Vertical, brush=pg.mkBrush(140, 20, 30, 35), movable=False, pen=pg.mkPen(None))
+        shade = pg.LinearRegionItem(values=(0, 1), orientation=pg.LinearRegionItem.Vertical, brush=pg.mkBrush(140, 20, 30, 55), movable=False, pen=pg.mkPen(None))
         shade.setVisible(False)
         shade.setZValue(-20)
         plot.addItem(shade)
@@ -992,6 +1018,25 @@ class DashboardWindow(QtWidgets.QMainWindow):
         txt = pg.TextItem(text="", color="#9ec2ff", anchor=(0, 1))
         plot.addItem(txt)
         return {"plot": plot, "glow": glow, "line": line, "ema_alert": ema_alert, "ema_calm": ema_calm, "peak_line": peak_line, "pause_shade": shade, "last": last, "max": vmax, "min": vmin, "text": txt, "canonical_window_s": int(canonical_window_s)}
+
+    def _sync_window_combos(self):
+        self.cmb_min.setCurrentText(f"{int(VENTANA_MINUTOS)}m")
+        self.cmb_hour.setCurrentText(f"{int(VENTANA_HORAS)}h")
+        self.cmb_day.setCurrentText(f"{int(VENTANA_DIAS)}d")
+
+    def _on_window_combo_changed(self, _text: str):
+        global VENTANA_MINUTOS, VENTANA_HORAS, VENTANA_DIAS
+        try:
+            VENTANA_MINUTOS = int(str(self.cmb_min.currentText()).replace("m", "").strip())
+            VENTANA_HORAS = int(str(self.cmb_hour.currentText()).replace("h", "").strip())
+            VENTANA_DIAS = int(str(self.cmb_day.currentText()).replace("d", "").strip())
+        except Exception:
+            return
+        self.plot_states["min"]["canonical_window_s"] = int(VENTANA_MINUTOS) * 60
+        self.plot_states["hour"]["canonical_window_s"] = int(VENTANA_HORAS) * 3600
+        self.plot_states["day"]["canonical_window_s"] = int(VENTANA_DIAS) * 86400
+        self.plot_states["main"]["canonical_window_s"] = _main_window_seconds()
+        self.refresh(force=True)
 
     def _set_x_range_visible(self, plot: pg.PlotItem, x: np.ndarray, canonical_window_s: int):
         if len(x) == 0:
@@ -1008,106 +1053,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
             plot.setXRange(xmin - pad, xmax + pad, padding=0.0)
         else:
             plot.setXRange(xmax - float(canonical_window_s), xmax, padding=0.0)
-
-    def _switch_view(self, view: str):
-        self.view = view
-        self.refresh(force=True)
-
-    def _toggle_pause(self):
-        self.paused = not self.paused
-        self.btn_pause.setText(f"PAUSA: {'ON' if self.paused else 'OFF'}")
-        self.refresh(force=True)
-
-    def _reset_view(self):
-        self.p_main.enableAutoRange(); self.p_min.enableAutoRange(); self.p_hour.enableAutoRange(); self.p_day.enableAutoRange()
-        self.follow_latest = True
-        self.btn_freeze.setText("FREEZE VIEW: OFF")
-
-    def _toggle_freeze(self):
-        self.follow_latest = not self.follow_latest
-        self.btn_freeze.setText(f"FREEZE VIEW: {'OFF' if self.follow_latest else 'ON'}")
-
-    def _toggle_rule_mode(self):
-        self.rule_enabled = not self.rule_enabled
-        if not self.rule_enabled:
-            self.rule_points = []
-        self.btn_rule.setText(f"REGLA: {'ON' if self.rule_enabled else 'OFF'}")
-
-    def _toggle_markers(self):
-        self.markers_enabled = not self.markers_enabled
-        self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
-
-    def _init_crosshair(self):
-        self.cross_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#6688aa88"))
-        self.cross_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#6688aa88"))
-        self.p_main.addItem(self.cross_v, ignoreBounds=True)
-        self.p_main.addItem(self.cross_h, ignoreBounds=True)
-        self.main_curve_proxy = pg.SignalProxy(self.p_main.scene().sigMouseMoved, rateLimit=45, slot=self._on_mouse_moved)
-        self.main_click_proxy = pg.SignalProxy(self.p_main.scene().sigMouseClicked, rateLimit=20, slot=self._on_mouse_clicked)
-
-    def _on_mouse_moved(self, evt):
-        if not evt:
-            return
-        pos = evt[0]
-        if not self.p_main.sceneBoundingRect().contains(pos):
-            return
-        point = self.p_main.vb.mapSceneToView(pos)
-        x, y = float(point.x()), float(point.y())
-        self.cross_v.setPos(x); self.cross_h.setPos(y)
-        main_vis = _sanitize_series_for_plot(self._last_plot_series.get("main", pd.DataFrame(columns=["timestamp", "equity"])))
-        if main_vis.empty:
-            return
-        ts = datetime.fromtimestamp(x, tz=timezone.utc).astimezone(DISPLAY_TZ)
-        first = float(main_vis["equity"].iloc[0])
-        delta = y - first
-        pct = (delta / first * 100.0) if abs(first) > 1e-12 else 0.0
-        self.p_main.setToolTip(
-            f"{ts.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
-            f"Saldo: {y:,.2f} USD\n"
-            f"Δ vs primer visible: {delta:+,.2f} USD ({pct:+.2f}%)"
-        )
-
-    def _on_mouse_clicked(self, evt):
-        if not evt or not self.rule_enabled:
-            return
-        mouse_event = evt[0]
-        if mouse_event.button() != QtCore.Qt.LeftButton:
-            return
-        scene_pos = mouse_event.scenePos()
-        if not self.p_main.sceneBoundingRect().contains(scene_pos):
-            return
-        point = self.p_main.vb.mapSceneToView(scene_pos)
-        self.rule_points.append((float(point.x()), float(point.y())))
-        if len(self.rule_points) > 2:
-            self.rule_points = self.rule_points[-2:]
-        if len(self.rule_points) == 2:
-            self._render_rule_stats()
-
-    def _render_rule_stats(self):
-        (x1, y1), (x2, y2) = self.rule_points
-        dt_s = max(0.0, x2 - x1)
-        delta = y2 - y1
-        pct = (delta / y1 * 100.0) if abs(y1) > 1e-12 else 0.0
-        usd_min = (delta / (dt_s / 60.0)) if dt_s > 0 else 0.0
-        pct_hour = (pct / (dt_s / 3600.0)) if dt_s > 0 else 0.0
-        self.lbl_stats.setText(
-            f"REGLA A→B | ΔUSD={delta:+,.2f} | Δ%={pct:+.2f}% | Δt={dt_s/60.0:,.1f} min | Pend={usd_min:+,.2f} USD/min | {pct_hour:+.2f}%/h"
-        )
-
-    def _export_visible_csv(self):
-        vis = _sanitize_series_for_plot(self._last_plot_series.get("main", pd.DataFrame(columns=["timestamp", "equity"])))
-        if vis.empty:
-            self.lbl_warn.setText("⚠ Exportación omitida: no hay serie visible")
-            return
-        now_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = self.engine.base_dir / f"monitor_visible_export_{self.view.lower()}_{now_tag}.csv"
-        src = (self.last_good_source or "--")
-        exp = vis.copy()
-        exp["source"] = src
-        exp["view"] = self.view
-        exp["window_tag"] = "visible_main"
-        exp.to_csv(out_path, index=False, columns=["timestamp", "equity", "source", "view", "window_tag"])
-        self.lbl_warn.setText(f"⚠ Exportado visible CSV: {out_path}")
 
     def _switch_view(self, view: str):
         self.view = view
@@ -1373,6 +1318,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             vmin.setData([], [])
         y0, y1, scale_info = self._resolve_y_range(y)
         plot.setYRange(y0, y1, padding=0.0)
+        if Y_SCALE_MODE == "manual":
+            plot.setLimits(yMin=y0, yMax=y1)
         if self.follow_latest:
             self._set_x_range_visible(plot, x, int(state["canonical_window_s"]))
         return scale_info, y0, y1
@@ -1457,14 +1404,18 @@ class DashboardWindow(QtWidgets.QMainWindow):
                     left_txt = _fmt_countdown(int(p.get("time_left_s") or 0))
                 resume_text = str(p.get("resume_text") or f"Retoma automaticamente sus funciones en: {until_dt.strftime('%H:%M') if until_dt else '--:--'}")
                 self.lbl_protection_banner.setText("Deteccion caida-Proteccion de Saldo")
+                self.lbl_protection_detail.setTextFormat(QtCore.Qt.RichText)
                 self.lbl_protection_detail.setText(
-                    "MAESTRO EN PAUSA\n"
-                    f"Motivo: {str(p.get('reason') or '--')}\n"
-                    f"Drawdown actual: {dd_txt}\n"
-                    f"Inicio pausa: {started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'}\n"
-                    f"Reanudacion: {until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'}\n"
-                    f"Cronometro: {left_txt}\n"
-                    f"{resume_text}"
+                    "<div style='text-align:center'>"
+                    "<div style='font-size:30px;font-weight:980;color:#ffd6d6'>MAESTRO EN PAUSA</div>"
+                    f"<div style='font-size:21px'><b>Motivo:</b> {str(p.get('reason') or '--')}</div>"
+                    f"<div style='font-size:21px'><b>Drawdown actual:</b> {dd_txt}</div>"
+                    f"<div style='font-size:21px'><b>Inicio pausa:</b> {started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'}</div>"
+                    f"<div style='font-size:21px'><b>Reanudacion:</b> {until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'}</div>"
+                    f"<div style='font-size:40px;font-weight:980;color:#ffb6b6;margin-top:8px'>⏳ {left_txt}</div>"
+                    "<div style='font-size:20px;color:#ffdede;margin-top:6px'>Retoma automaticamente sus funciones al finalizar el cronometro.</div>"
+                    f"<div style='font-size:19px;color:#ffdede;margin-top:4px'>{resume_text}</div>"
+                    "</div>"
                 )
                 self.lbl_protection_banner.setVisible(True)
                 self.lbl_protection_detail.setVisible(True)
@@ -1503,6 +1454,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
                     snap.warnings.append(f"plot {key} con error: {plot_err}")
                     self._throttled_warn(f"plot:{key}", f"Error en gráfico {key}: {plot_err}")
             self.lbl_scale.setText(f"ESCALA Y: {main_scale}")
+            if Y_SCALE_MODE == "manual":
+                ymin = float(min(Y_AXIS_MIN_USD, Y_AXIS_MAX_USD))
+                ymax = float(max(Y_AXIS_MIN_USD, Y_AXIS_MAX_USD))
+                self.lbl_scale_mode.setText(f"ESCALA: MANUAL {ymin:,.0f}..{ymax:,.0f} USD")
+            elif Y_SCALE_MODE == "capital":
+                self.lbl_scale_mode.setText("ESCALA: CAPITAL (dinámica)")
+            else:
+                self.lbl_scale_mode.setText("ESCALA: AUTO")
             visible = _sanitize_series_for_plot(series_map["main"])
             if visible.empty and "main" in self._last_plot_series:
                 visible = self._last_plot_series["main"]
