@@ -912,9 +912,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.lbl_warn = QtWidgets.QLabel(""); self.lbl_warn.setObjectName("Warn"); root.addWidget(self.lbl_warn)
         self.lbl_stats = QtWidgets.QLabel("STATS VIS: --")
         self.lbl_stats.setObjectName("Warn")
+        self.lbl_stats.setMaximumHeight(20)
         root.addWidget(self.lbl_stats)
         self.lbl_help = QtWidgets.QLabel(f"Teclas: [1]REAL [2]DEMO [3]ALL [F]Fullscreen [P]Pausa [R]Reset [E]Export [G]Regla [C]Limpiar regla [M]Marcadores [V]Freeze [Q]Salir · {MONITOR_VERSION} · {MONITOR_BUILD_ID}")
         self.lbl_help.setObjectName("Help"); root.addWidget(self.lbl_help)
+        self.lbl_help.setMaximumHeight(18)
 
         self.setStyleSheet(
             """
@@ -1481,7 +1483,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
             if Y_SCALE_MODE == "manual":
                 ymin = float(min(Y_AXIS_MIN_USD, Y_AXIS_MAX_USD))
                 ymax = float(max(Y_AXIS_MIN_USD, Y_AXIS_MAX_USD))
-                self.lbl_scale_mode.setText(f"ESCALA: MANUAL {ymin:,.0f}..{ymax:,.0f} USD")
+                if abs(ymin - 0.0) < 1e-9 and abs(ymax - 300.0) < 1e-9:
+                    self.lbl_scale_mode.setText("ESCALA: MANUAL 0..300 USD")
+                else:
+                    self.lbl_scale_mode.setText(f"ESCALA: MANUAL {ymin:,.0f}..{ymax:,.0f} USD")
             elif Y_SCALE_MODE == "capital":
                 self.lbl_scale_mode.setText("ESCALA: CAPITAL (dinámica)")
             else:
