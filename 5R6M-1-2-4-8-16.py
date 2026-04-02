@@ -1520,6 +1520,13 @@ protection_ema_alerta = 0.0
 protection_ema_calma = 0.0
 PROTECTION_LAST_JSON_WARN_TS = 0.0
 PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
+PROTECTION_DIAG_STATUS = "ok"
+PROTECTION_DIAG_REASON = ""
+PROTECTION_SOURCE_COLUMN = ""
+PROTECTION_SERIES_LEN = 0
+PROTECTION_DIAG_LOG_LAST_TS = {}
+PROTECTION_DIAG_LOG_COOLDOWN_S = 30.0
+PROTECTION_CSV_WRITE_WARN_LAST_TS = 0.0
 
 try:
     last_sig_por_bot
@@ -15820,10 +15827,10 @@ def _set_saldo_status(status: str, reason: str, detail: str = "", announce: bool
 
 
 def _persistir_saldo_series_csv(payload: dict, now_utc: datetime, event_type: str):
-    global SALDO_CSV_LOG_LAST_TS
+    global SALDO_CSV_LOG_LAST_TS, PROTECTION_CSV_WRITE_WARN_LAST_TS
     csv_path = SALDO_SERIES_CSV_PATH
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
-    cols = ["ts_utc", "ts_lima", "epoch", "saldo_real", "status", "source", "event_type"]
+    cols = ["ts_utc", "ts_lima", "epoch", "saldo_real", "equity", "status", "source", "event_type"]
     saldo_val = payload.get("saldo_real", None)
     if saldo_val is None:
         return
@@ -15847,6 +15854,7 @@ def _persistir_saldo_series_csv(payload: dict, now_utc: datetime, event_type: st
         "ts_lima": dt_lima.isoformat(),
         "epoch": f"{float(dt_utc.timestamp()):.6f}",
         "saldo_real": f"{saldo_val:.10f}",
+        "equity": f"{saldo_val:.10f}",
         "status": str(payload.get("status", "")),
         "source": str(payload.get("source", "")),
         "event_type": str(event_type),
@@ -15872,9 +15880,44 @@ def _persistir_saldo_series_csv(payload: dict, now_utc: datetime, event_type: st
         return
 
     write_header = (not os.path.exists(csv_path)) or os.path.getsize(csv_path) <= 0
+    write_cols = list(cols)
+    if not write_header:
+        try:
+            with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+                reader = csv.reader(f)
+                header = next(reader, [])
+            header = [str(h).strip() for h in (header or []) if str(h).strip()]
+            if header:
+                has_saldo_real = "saldo_real" in header
+                has_equity = "equity" in header
+                if has_saldo_real and (not has_equity):
+                    write_cols = [c for c in cols if c != "equity"]
+                    row.pop("equity", None)
+                elif has_saldo_real and has_equity:
+                    write_cols = list(cols)
+                else:
+                    now_log = float(time.time())
+                    if (now_log - float(PROTECTION_CSV_WRITE_WARN_LAST_TS or 0.0)) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
+                        PROTECTION_CSV_WRITE_WARN_LAST_TS = now_log
+                        try:
+                            agregar_evento(
+                                f"PROTECCION_SALDO: CSV_HEADER_WARNING | schema={','.join(header) if header else 'vacio'}"
+                            )
+                        except Exception:
+                            pass
+                    return
+        except Exception as e:
+            now_log = float(time.time())
+            if (now_log - float(PROTECTION_CSV_WRITE_WARN_LAST_TS or 0.0)) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
+                PROTECTION_CSV_WRITE_WARN_LAST_TS = now_log
+                try:
+                    agregar_evento(f"PROTECCION_SALDO: CSV_HEADER_WARNING | read_error={type(e).__name__}")
+                except Exception:
+                    pass
+            return
     try:
         with open(csv_path, "a", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=cols)
+            writer = csv.DictWriter(f, fieldnames=write_cols)
             if write_header:
                 writer.writeheader()
             writer.writerow(row)
@@ -16076,6 +16119,30 @@ def _fmt_protection_countdown(seconds_left: int) -> str:
         return "00:00"
 
 
+def _protection_diag_event_once(diag_key: str, message: str, now_ts: float | None = None):
+    global PROTECTION_DIAG_LOG_LAST_TS
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    k = str(diag_key or "").strip().upper() or "GENERIC"
+    last = float(PROTECTION_DIAG_LOG_LAST_TS.get(k, 0.0))
+    if (now_ts - last) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
+        PROTECTION_DIAG_LOG_LAST_TS[k] = now_ts
+        try:
+            agregar_evento(message)
+        except Exception:
+            pass
+
+
+def _set_protection_diag(status: str = "ok", reason: str = "", source_column: str = "", series_len: int = 0):
+    global PROTECTION_DIAG_STATUS, PROTECTION_DIAG_REASON, PROTECTION_SOURCE_COLUMN, PROTECTION_SERIES_LEN
+    PROTECTION_DIAG_STATUS = str(status or "ok")
+    PROTECTION_DIAG_REASON = str(reason or "")
+    PROTECTION_SOURCE_COLUMN = str(source_column or "")
+    try:
+        PROTECTION_SERIES_LEN = max(0, int(series_len))
+    except Exception:
+        PROTECTION_SERIES_LEN = 0
+
+
 def _write_protection_health_state(now_ts: float | None = None):
     global PROTECTION_LAST_JSON_WARN_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
@@ -16100,6 +16167,10 @@ def _write_protection_health_state(now_ts: float | None = None):
         "text_banner": "Deteccion caida-Proteccion de Saldo",
         "resume_text": f"Retoma automaticamente sus funciones en: {resume_hhmm}",
         "updated_ts": float(now_ts),
+        "diag_status": str(PROTECTION_DIAG_STATUS or "ok"),
+        "diag_reason": str(PROTECTION_DIAG_REASON or ""),
+        "source_column": str(PROTECTION_SOURCE_COLUMN or ""),
+        "series_len": int(PROTECTION_SERIES_LEN or 0),
     }
     try:
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
@@ -16120,14 +16191,69 @@ def _equity_protection_update(now_ts: float | None = None):
     now_ts = float(now_ts if now_ts is not None else time.time())
     structure_trigger = False
     structure_reason = ""
+    _set_protection_diag(status="ok", reason="", source_column="", series_len=0)
     try:
         df = pd.read_csv(SALDO_SERIES_CSV_PATH, encoding="utf-8")
-        if df is None or df.empty or "equity" not in df.columns:
+        if df is None or df.empty:
+            _set_protection_diag(status="error", reason="CSV_EMPTY_OR_INVALID | dataframe vacio", source_column="", series_len=0)
+            _protection_diag_event_once(
+                "CSV_EMPTY_OR_INVALID",
+                "PROTECCION_SALDO: CSV_EMPTY_OR_INVALID | sin serie numérica válida",
+                now_ts,
+            )
             _equity_protection_is_active(now_ts)
             _write_protection_health_state(now_ts)
             return
-        eq = pd.to_numeric(df["equity"], errors="coerce").dropna()
+        equity_col = ""
+        if "equity" in df.columns:
+            equity_col = "equity"
+        elif "saldo_real" in df.columns:
+            equity_col = "saldo_real"
+        else:
+            _set_protection_diag(
+                status="error",
+                reason="CSV_SCHEMA_ERROR | faltan equity/saldo_real",
+                source_column="",
+                series_len=0,
+            )
+            _protection_diag_event_once(
+                "CSV_SCHEMA_ERROR",
+                "PROTECCION_SALDO: CSV_SCHEMA_ERROR | faltan equity/saldo_real",
+                now_ts,
+            )
+            _equity_protection_is_active(now_ts)
+            _write_protection_health_state(now_ts)
+            return
+        eq = pd.to_numeric(df[equity_col], errors="coerce").dropna()
+        eq_len = int(len(eq))
+        _set_protection_diag(status="ok", reason="", source_column=equity_col, series_len=eq_len)
         if eq.empty:
+            _set_protection_diag(
+                status="error",
+                reason="CSV_EMPTY_OR_INVALID | sin serie numérica válida",
+                source_column=equity_col,
+                series_len=0,
+            )
+            _protection_diag_event_once(
+                "CSV_EMPTY_OR_INVALID",
+                "PROTECCION_SALDO: CSV_EMPTY_OR_INVALID | sin serie numérica válida",
+                now_ts,
+            )
+            _equity_protection_is_active(now_ts)
+            _write_protection_health_state(now_ts)
+            return
+        if eq_len < 20:
+            _set_protection_diag(
+                status="warning",
+                reason=f"CSV_SHORT_SERIES | muestras={eq_len} (<20)",
+                source_column=equity_col,
+                series_len=eq_len,
+            )
+            _protection_diag_event_once(
+                "CSV_SHORT_SERIES",
+                f"PROTECCION_SALDO: CSV_SHORT_SERIES | muestras={eq_len} (<20)",
+                now_ts,
+            )
             _equity_protection_is_active(now_ts)
             _write_protection_health_state(now_ts)
             return
@@ -16144,7 +16270,13 @@ def _equity_protection_update(now_ts: float | None = None):
             protection_last_drawdown_pct = float(((now_eq - peak) / peak) * 100.0)
         else:
             protection_last_drawdown_pct = 0.0
-    except Exception:
+    except Exception as e:
+        _set_protection_diag(status="error", reason=f"READ_ERROR | {type(e).__name__}", source_column="", series_len=0)
+        _protection_diag_event_once(
+            "READ_ERROR",
+            f"PROTECCION_SALDO: READ_ERROR | {type(e).__name__}",
+            now_ts,
+        )
         _equity_protection_is_active(now_ts)
         _write_protection_health_state(now_ts)
         return
@@ -16159,7 +16291,8 @@ def _equity_protection_update(now_ts: float | None = None):
         protection_last_trigger_ts = now_ts
         try:
                 agregar_evento(
-                    f"PROTECCION_SALDO: ACTIVADA | dd={float(protection_last_drawdown_pct):.1f}% | pausa=30m"
+                    f"PROTECCION_SALDO: ACTIVADA | reason={str(structure_reason or protection_pause_reason)} | "
+                    f"dd={float(protection_last_drawdown_pct):.1f}% | pausa=30m"
                 )
         except Exception:
             pass
