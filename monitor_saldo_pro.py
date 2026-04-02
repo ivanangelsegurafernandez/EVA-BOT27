@@ -106,6 +106,19 @@ CAPITAL_BASE_USD = float(os.getenv("CAPITAL_BASE_USD", "0") or "0")
 MIN_X_SPAN_SECONDS = 20.0
 OBSERVED_TAIL_BYTES = int(os.getenv("OBSERVED_TAIL_BYTES", str(256 * 1024)))
 ESTIMATED_REFRESH_SECONDS = int(os.getenv("ESTIMATED_REFRESH_SECONDS", "30"))
+
+def _main_window_seconds() -> int:
+    """
+    Ventana de contexto para MAIN:
+    - independiente de DÍAS para evitar panel clon
+    - ligada a HORAS para mantener coherencia operativa visible
+    """
+    try:
+        h = int(VENTANA_HORAS)
+    except Exception:
+        h = 9
+    h_ctx = max(24, min(72, h * 3))
+    return int(h_ctx * 3600)
 def _safe_display_tz():
     if ZoneInfo is None:
         return timezone.utc
@@ -186,14 +199,24 @@ def _sample_window_series(
     target_points: int,
 ) -> pd.DataFrame:
     base = _sanitize_series_for_plot(series[series["timestamp"] >= cutoff].copy()) if not series.empty else pd.DataFrame(columns=["timestamp", "equity"])
-    if base.empty or len(base) <= max(4, target_points):
+    tgt = max(12, int(target_points or 0))
+    if base.empty or len(base) <= tgt:
         return base
     try:
-        t_sec = (base["timestamp"].astype("int64") // 1_000_000_000).to_numpy(dtype=np.int64)
-        span = int(max(1, t_sec[-1] - t_sec[0]))
-        bucket_s = max(1, span // max(1, int(target_points)))
-        bucket_id = (t_sec - t_sec[0]) // bucket_s
         df = base.reset_index(drop=True).copy()
+        t_sec = (df["timestamp"].astype("int64") // 1_000_000_000).to_numpy(dtype=np.int64)
+        n = int(len(df))
+        span = int(max(1, t_sec[-1] - t_sec[0]))
+
+        # Fallback por densidad/irregularidad: bucket por índice para evitar aliasing raro.
+        use_index_bucket = bool(span <= max(4, n // 2))
+        if use_index_bucket:
+            bucket_size = max(1, int(np.ceil(n / float(tgt))))
+            bucket_id = (np.arange(n, dtype=np.int64) // bucket_size).astype(np.int64)
+        else:
+            bucket_s = max(1, int(np.ceil(span / float(tgt))))
+            bucket_id = ((t_sec - t_sec[0]) // bucket_s).astype(np.int64)
+
         df["bucket_id"] = bucket_id
         keep_idx = set()
         for _, g in df.groupby("bucket_id", sort=True):
@@ -203,9 +226,20 @@ def _sample_window_series(
             keep_idx.add(int(g.index[-1]))  # last
             keep_idx.add(int(g["equity"].idxmin()))  # min
             keep_idx.add(int(g["equity"].idxmax()))  # max
+            keep_idx.add(int(g.index[len(g) // 2]))  # punto medio local (reduce aplanado)
+        keep_idx.add(0)               # preserva inicio global
+        keep_idx.add(len(df) - 1)     # preserva fin global
         sampled = df.loc[sorted(keep_idx), ["timestamp", "equity"]]
         sampled = sampled.drop_duplicates(subset=["timestamp", "equity"], keep="last").sort_values("timestamp")
-        return sampled.reset_index(drop=True)
+        sampled = sampled.reset_index(drop=True)
+
+        # Tope de seguridad: evita sobre-compresión irregular cuando buckets son muy densos.
+        max_keep = int(max(tgt, tgt * 1.35))
+        if len(sampled) > max_keep:
+            idx = np.linspace(0, len(sampled) - 1, num=max_keep, dtype=int)
+            sampled = sampled.iloc[np.unique(idx)].copy()
+            sampled = sampled.reset_index(drop=True)
+        return sampled
     except Exception:
         return base
 
@@ -219,13 +253,6 @@ def _safe_float(x, default=np.nan):
         return float(x)
     except Exception:
         return default
-
-
-def _is_valid_number(v) -> bool:
-    try:
-        return v is not None and np.isfinite(float(v))
-    except Exception:
-        return False
 
 
 def _is_valid_number(v) -> bool:
@@ -366,23 +393,6 @@ class DataEngine:
     def _store_cache(self, key: str, sig: Tuple, value):
         self._cache[key] = (sig, value)
         return value
-
-    @staticmethod
-    def _read_tail_lines(path: Path, max_bytes: int) -> List[str]:
-        try:
-            with path.open("rb") as fh:
-                fh.seek(0, os.SEEK_END)
-                size = fh.tell()
-                read_from = max(0, size - max(1024, int(max_bytes)))
-                fh.seek(read_from, os.SEEK_SET)
-                data = fh.read()
-            if read_from > 0:
-                nl = data.find(b"\n")
-                if nl >= 0:
-                    data = data[nl + 1 :]
-            return data.decode("utf-8", errors="ignore").splitlines()
-        except Exception:
-            return []
 
     @staticmethod
     def _read_tail_lines(path: Path, max_bytes: int) -> List[str]:
@@ -743,8 +753,9 @@ class DataEngine:
         mcut = now - timedelta(minutes=VENTANA_MINUTOS)
         hcut = now - timedelta(hours=VENTANA_HORAS)
         dcut = now - timedelta(days=VENTANA_DIAS)
+        main_cut = now - timedelta(seconds=_main_window_seconds())
 
-        smain = _sample_window_series(real_series, dcut, target_points=900)
+        smain = _sample_window_series(real_series, main_cut, target_points=900)
         smin = _sample_window_series(real_series, mcut, target_points=420)
         shrs = _sample_window_series(real_series, hcut, target_points=520)
         sday = _sample_window_series(real_series, dcut, target_points=360)
@@ -882,7 +893,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self._style_plot(self.p_day, "DÍAS · tendencia")
 
         self.plot_states = {
-            "main": self._init_plot_state(self.p_main, "#5df2ff", "#d9fbff", VENTANA_DIAS * 86400),
+            "main": self._init_plot_state(self.p_main, "#5df2ff", "#d9fbff", _main_window_seconds()),
             "min": self._init_plot_state(self.p_min, "#3fe9ff", "#c6f7ff", VENTANA_MINUTOS * 60),
             "hour": self._init_plot_state(self.p_hour, "#7aa6ff", "#dae3ff", VENTANA_HORAS * 3600),
             "day": self._init_plot_state(self.p_day, "#7ff0b9", "#dcffe9", VENTANA_DIAS * 86400),
@@ -1024,7 +1035,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.plot_states["min"]["canonical_window_s"] = int(VENTANA_MINUTOS) * 60
         self.plot_states["hour"]["canonical_window_s"] = int(VENTANA_HORAS) * 3600
         self.plot_states["day"]["canonical_window_s"] = int(VENTANA_DIAS) * 86400
-        self.plot_states["main"]["canonical_window_s"] = int(VENTANA_DIAS) * 86400
+        self.plot_states["main"]["canonical_window_s"] = _main_window_seconds()
         self.refresh(force=True)
 
     def _set_x_range_visible(self, plot: pg.PlotItem, x: np.ndarray, canonical_window_s: int):
@@ -1042,106 +1053,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
             plot.setXRange(xmin - pad, xmax + pad, padding=0.0)
         else:
             plot.setXRange(xmax - float(canonical_window_s), xmax, padding=0.0)
-
-    def _switch_view(self, view: str):
-        self.view = view
-        self.refresh(force=True)
-
-    def _toggle_pause(self):
-        self.paused = not self.paused
-        self.btn_pause.setText(f"PAUSA: {'ON' if self.paused else 'OFF'}")
-        self.refresh(force=True)
-
-    def _reset_view(self):
-        self.p_main.enableAutoRange(); self.p_min.enableAutoRange(); self.p_hour.enableAutoRange(); self.p_day.enableAutoRange()
-        self.follow_latest = True
-        self.btn_freeze.setText("FREEZE VIEW: OFF")
-
-    def _toggle_freeze(self):
-        self.follow_latest = not self.follow_latest
-        self.btn_freeze.setText(f"FREEZE VIEW: {'OFF' if self.follow_latest else 'ON'}")
-
-    def _toggle_rule_mode(self):
-        self.rule_enabled = not self.rule_enabled
-        if not self.rule_enabled:
-            self.rule_points = []
-        self.btn_rule.setText(f"REGLA: {'ON' if self.rule_enabled else 'OFF'}")
-
-    def _toggle_markers(self):
-        self.markers_enabled = not self.markers_enabled
-        self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
-
-    def _init_crosshair(self):
-        self.cross_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#6688aa88"))
-        self.cross_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#6688aa88"))
-        self.p_main.addItem(self.cross_v, ignoreBounds=True)
-        self.p_main.addItem(self.cross_h, ignoreBounds=True)
-        self.main_curve_proxy = pg.SignalProxy(self.p_main.scene().sigMouseMoved, rateLimit=45, slot=self._on_mouse_moved)
-        self.main_click_proxy = pg.SignalProxy(self.p_main.scene().sigMouseClicked, rateLimit=20, slot=self._on_mouse_clicked)
-
-    def _on_mouse_moved(self, evt):
-        if not evt:
-            return
-        pos = evt[0]
-        if not self.p_main.sceneBoundingRect().contains(pos):
-            return
-        point = self.p_main.vb.mapSceneToView(pos)
-        x, y = float(point.x()), float(point.y())
-        self.cross_v.setPos(x); self.cross_h.setPos(y)
-        main_vis = _sanitize_series_for_plot(self._last_plot_series.get("main", pd.DataFrame(columns=["timestamp", "equity"])))
-        if main_vis.empty:
-            return
-        ts = datetime.fromtimestamp(x, tz=timezone.utc).astimezone(DISPLAY_TZ)
-        first = float(main_vis["equity"].iloc[0])
-        delta = y - first
-        pct = (delta / first * 100.0) if abs(first) > 1e-12 else 0.0
-        self.p_main.setToolTip(
-            f"{ts.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
-            f"Saldo: {y:,.2f} USD\n"
-            f"Δ vs primer visible: {delta:+,.2f} USD ({pct:+.2f}%)"
-        )
-
-    def _on_mouse_clicked(self, evt):
-        if not evt or not self.rule_enabled:
-            return
-        mouse_event = evt[0]
-        if mouse_event.button() != QtCore.Qt.LeftButton:
-            return
-        scene_pos = mouse_event.scenePos()
-        if not self.p_main.sceneBoundingRect().contains(scene_pos):
-            return
-        point = self.p_main.vb.mapSceneToView(scene_pos)
-        self.rule_points.append((float(point.x()), float(point.y())))
-        if len(self.rule_points) > 2:
-            self.rule_points = self.rule_points[-2:]
-        if len(self.rule_points) == 2:
-            self._render_rule_stats()
-
-    def _render_rule_stats(self):
-        (x1, y1), (x2, y2) = self.rule_points
-        dt_s = max(0.0, x2 - x1)
-        delta = y2 - y1
-        pct = (delta / y1 * 100.0) if abs(y1) > 1e-12 else 0.0
-        usd_min = (delta / (dt_s / 60.0)) if dt_s > 0 else 0.0
-        pct_hour = (pct / (dt_s / 3600.0)) if dt_s > 0 else 0.0
-        self.lbl_stats.setText(
-            f"REGLA A→B | ΔUSD={delta:+,.2f} | Δ%={pct:+.2f}% | Δt={dt_s/60.0:,.1f} min | Pend={usd_min:+,.2f} USD/min | {pct_hour:+.2f}%/h"
-        )
-
-    def _export_visible_csv(self):
-        vis = _sanitize_series_for_plot(self._last_plot_series.get("main", pd.DataFrame(columns=["timestamp", "equity"])))
-        if vis.empty:
-            self.lbl_warn.setText("⚠ Exportación omitida: no hay serie visible")
-            return
-        now_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = self.engine.base_dir / f"monitor_visible_export_{self.view.lower()}_{now_tag}.csv"
-        src = (self.last_good_source or "--")
-        exp = vis.copy()
-        exp["source"] = src
-        exp["view"] = self.view
-        exp["window_tag"] = "visible_main"
-        exp.to_csv(out_path, index=False, columns=["timestamp", "equity", "source", "view", "window_tag"])
-        self.lbl_warn.setText(f"⚠ Exportado visible CSV: {out_path}")
 
     def _switch_view(self, view: str):
         self.view = view
