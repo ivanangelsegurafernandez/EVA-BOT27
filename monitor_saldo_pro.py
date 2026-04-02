@@ -98,7 +98,7 @@ MONITOR_BUILD_ID = "MONITOR_SALDO_PRO_REAL_SERIES_GUARD"
 MIN_POINTS_FOR_LINE = 2
 SHOW_LAST_MARKER = True
 SHOW_EXTREME_MARKERS = False
-Y_SCALE_MODE = os.getenv("Y_SCALE_MODE", "auto").strip().lower()  # capital | manual | auto
+Y_SCALE_MODE = os.getenv("Y_SCALE_MODE", "manual").strip().lower()  # capital | manual | auto
 Y_AXIS_MIN_USD = float(os.getenv("Y_AXIS_MIN_USD", "0"))
 Y_AXIS_MAX_USD = float(os.getenv("Y_AXIS_MAX_USD", "300"))
 Y_AUTO_SPAN_USD = float(os.getenv("Y_AUTO_SPAN_USD", "120"))
@@ -1407,6 +1407,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             vmin.setData([], [])
         y0, y1, scale_info = self._resolve_y_range(y)
         plot.setYRange(y0, y1, padding=0.0)
+        if Y_SCALE_MODE == "manual":
+            plot.setLimits(yMin=y0, yMax=y1)
         if self.follow_latest:
             self._set_x_range_visible(plot, x, int(state["canonical_window_s"]))
         return scale_info, y0, y1
