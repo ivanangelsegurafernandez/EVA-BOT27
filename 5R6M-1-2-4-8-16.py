@@ -1436,7 +1436,7 @@ PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
 EMA_ALERTA_SPAN = 8
 EMA_CALMA_SPAN = 26
 DD_PROTECTION_THRESHOLD_PCT = -2.5
-PROTECTION_PAUSE_SECONDS = 20 * 60
+PROTECTION_PAUSE_SECONDS = 30 * 60
 PROTECTION_LOG_COOLDOWN_S = 30.0
 SALDO_CSV_LOG_LAST_TS = 0.0
 print(f"[SALDO LIVE] destino: {SALDO_LIVE_SHARED_PATH}")
@@ -16093,9 +16093,9 @@ def _equity_protection_update(now_ts: float | None = None):
         protection_pause_last_trigger_ts = now_ts
         protection_last_trigger_ts = now_ts
         try:
-            agregar_evento(
-                f"PROTECCION_SALDO: ACTIVADA | dd={float(protection_last_drawdown_pct):.1f}% | pausa=20m"
-            )
+                agregar_evento(
+                    f"PROTECCION_SALDO: ACTIVADA | dd={float(protection_last_drawdown_pct):.1f}% | pausa=30m"
+                )
         except Exception:
             pass
         active_now = True

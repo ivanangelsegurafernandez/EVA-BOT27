@@ -810,11 +810,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
         cw = QtWidgets.QWidget()
         self.setCentralWidget(cw)
         root = QtWidgets.QVBoxLayout(cw)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(10)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
 
         header = QtWidgets.QFrame(); header.setObjectName("HeaderCard")
-        hl = QtWidgets.QVBoxLayout(header); hl.setContentsMargins(16, 14, 16, 14); hl.setSpacing(12)
+        hl = QtWidgets.QVBoxLayout(header); hl.setContentsMargins(12, 10, 12, 10); hl.setSpacing(8)
 
         top = QtWidgets.QHBoxLayout(); top.setSpacing(10)
         self.lbl_title = QtWidgets.QLabel(f"SALDO REAL DERIV ACTUAL · {MONITOR_VERSION}"); self.lbl_title.setObjectName("Title")
@@ -823,7 +823,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         hl.addLayout(top)
 
         self.lbl_big = QtWidgets.QLabel("--"); self.lbl_big.setObjectName("Big")
-        self.lbl_big.setAlignment(QtCore.Qt.AlignCenter); self.lbl_big.setMinimumHeight(118)
+        self.lbl_big.setAlignment(QtCore.Qt.AlignCenter); self.lbl_big.setMinimumHeight(96)
         self.lbl_big.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         hl.addWidget(self.lbl_big)
 
@@ -839,7 +839,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.lbl_protection_detail.setVisible(False)
         hl.addWidget(self.lbl_protection_detail)
 
-        meta = QtWidgets.QHBoxLayout(); meta.setSpacing(10)
+        meta = QtWidgets.QHBoxLayout(); meta.setSpacing(6)
         self.lbl_refresh = QtWidgets.QLabel("REFRESCO: ACTIVO"); self.lbl_refresh.setObjectName("MetaBox")
         self.lbl_scale = QtWidgets.QLabel("ESCALA Y: --"); self.lbl_scale.setObjectName("MetaBox")
         self.lbl_scale_mode = QtWidgets.QLabel("ESCALA: --"); self.lbl_scale_mode.setObjectName("MetaBox")
@@ -858,7 +858,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         meta.addWidget(self.lbl_last)
         hl.addLayout(meta)
 
-        controls = QtWidgets.QHBoxLayout(); controls.setSpacing(8)
+        controls = QtWidgets.QHBoxLayout(); controls.setSpacing(6)
         self.btn_real = QtWidgets.QPushButton("REAL")
         self.btn_demo = QtWidgets.QPushButton("DEMO")
         self.btn_all = QtWidgets.QPushButton("ALL")
@@ -885,11 +885,17 @@ class DashboardWindow(QtWidgets.QMainWindow):
         hl.addLayout(controls)
         root.addWidget(header)
 
-        self.graphics = pg.GraphicsLayoutWidget(); root.addWidget(self.graphics, 1)
+        self.graphics = pg.GraphicsLayoutWidget(); root.addWidget(self.graphics, 3)
         self.p_main = self.graphics.addPlot(row=0, col=0, colspan=2, axisItems={"bottom": SmartDateAxis("bottom"), "left": MoneyAxis("left")})
         self.p_min = self.graphics.addPlot(row=1, col=0, axisItems={"bottom": SmartDateAxis("bottom"), "left": MoneyAxis("left")})
         self.p_hour = self.graphics.addPlot(row=1, col=1, axisItems={"bottom": SmartDateAxis("bottom"), "left": MoneyAxis("left")})
         self.p_day = self.graphics.addPlot(row=2, col=0, colspan=2, axisItems={"bottom": SmartDateAxis("bottom"), "left": MoneyAxis("left")})
+        try:
+            self.graphics.ci.layout.setRowStretchFactor(0, 5)
+            self.graphics.ci.layout.setRowStretchFactor(1, 3)
+            self.graphics.ci.layout.setRowStretchFactor(2, 2)
+        except Exception:
+            pass
 
         self._style_plot(self.p_main, "EQUITY CURVE PRINCIPAL · dinero vs tiempo")
         self._style_plot(self.p_min, "MINUTOS · detalle")
@@ -925,8 +931,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             #BadgeNeutral { font-size: 13px; color: #d8e7ff; background: #23364f; border: 1px solid #3d5c81; border-radius: 13px; padding: 4px 11px; font-weight: 800; }
             #BadgeWarn { font-size: 13px; color: #3d2a00; background: #ffd67f; border: 1px solid #ffe09e; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #BadgeBad { font-size: 13px; color: #390000; background: #ff9c9c; border: 1px solid #ffb8b8; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
-            #Warn { font-size: 11px; color: #ffc374; font-weight: 520; }
-            #Help { font-size: 9px; color: #6b84a6; }
+            #Warn { font-size: 10px; color: #ffc374; font-weight: 520; }
+            #Help { font-size: 8px; color: #6b84a6; }
             #ProtectionBanner { font-size: 40px; color: #fff3f3; background:#8f1223; border:3px solid #ff4b66; border-radius:12px; padding:10px 14px; font-weight:950; }
             #ProtectionDetail { font-size: 23px; color: #ffdede; background:#431119; border:1px solid #d85b71; border-radius:10px; padding:10px 14px; font-weight:850; }
             """
