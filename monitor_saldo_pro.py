@@ -797,6 +797,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self._last_plot_series: Dict[str, pd.DataFrame] = {}
         self._build_ms_hist = deque(maxlen=120)
         self.follow_latest = True
+        self.manual_view_active = False
+        self._force_autorange_once = True
+        self._auto_range_guard = False
+        self._last_scale_mode = str(Y_SCALE_MODE)
         self.rule_enabled = False
         self.markers_enabled = SHOW_LAST_MARKER
         self.rule_points: List[Tuple[float, float]] = []
@@ -947,6 +951,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.cmb_day.currentTextChanged.connect(self._on_window_combo_changed)
 
         self._init_crosshair()
+        self._attach_manual_range_hooks()
 
         if FULLSCREEN_INICIAL:
             self.showMaximized()
@@ -1054,6 +1059,25 @@ class DashboardWindow(QtWidgets.QMainWindow):
         else:
             plot.setXRange(xmax - float(canonical_window_s), xmax, padding=0.0)
 
+    def _attach_manual_range_hooks(self):
+        for p in (self.p_main, self.p_min, self.p_hour, self.p_day):
+            try:
+                vb = p.getViewBox()
+                sig_manual = getattr(vb, "sigRangeChangedManually", None)
+                if sig_manual is not None:
+                    sig_manual.connect(self._on_user_range_changed)
+                else:
+                    vb.sigRangeChanged.connect(self._on_user_range_changed)
+            except Exception:
+                continue
+
+    def _on_user_range_changed(self, *_args):
+        if self._auto_range_guard:
+            return
+        self.manual_view_active = True
+        self.follow_latest = False
+        self.btn_freeze.setText("FREEZE VIEW: ON")
+
     def _switch_view(self, view: str):
         self.view = view
         self.refresh(force=True)
@@ -1064,12 +1088,22 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.refresh(force=True)
 
     def _reset_view(self):
+        self._auto_range_guard = True
         self.p_main.enableAutoRange(); self.p_min.enableAutoRange(); self.p_hour.enableAutoRange(); self.p_day.enableAutoRange()
+        self._auto_range_guard = False
+        self.manual_view_active = False
         self.follow_latest = True
+        self._force_autorange_once = True
         self.btn_freeze.setText("FREEZE VIEW: OFF")
+        self.refresh(force=True)
 
     def _toggle_freeze(self):
         self.follow_latest = not self.follow_latest
+        if self.follow_latest:
+            self.manual_view_active = False
+            self._force_autorange_once = True
+        else:
+            self.manual_view_active = True
         self.btn_freeze.setText(f"FREEZE VIEW: {'OFF' if self.follow_latest else 'ON'}")
 
     def _toggle_rule_mode(self):
@@ -1218,34 +1252,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
             print(f"[MONITOR][WARN] {msg} (x{count})")
             self._error_throttle[key] = (now_mono, 0)
 
-    def _is_snapshot_valid(self, snap: Snapshot) -> bool:
-        return (
-            _is_valid_number(snap.saldo_actual)
-            or (snap.series_real is not None and not snap.series_real.empty)
-            or (snap.series_main is not None and not snap.series_main.empty)
-        )
-
-    def _update_last_good(self, snap: Snapshot):
-        if not self._is_snapshot_valid(snap):
-            return
-        self.last_good_snapshot = snap
-        if _is_valid_number(snap.saldo_actual):
-            self.last_good_saldo = float(snap.saldo_actual)
-        if snap.source:
-            self.last_good_source = snap.source
-        if snap.last_update is not None:
-            self.last_good_last_update = snap.last_update
-
-    def _throttled_warn(self, key: str, msg: str, cooldown_s: float = 20.0):
-        now_mono = time.monotonic()
-        prev = self._error_throttle.get(key, (0.0, 0))
-        last_ts, count = prev
-        count += 1
-        self._error_throttle[key] = (now_mono, count)
-        if (now_mono - last_ts) >= cooldown_s:
-            print(f"[MONITOR][WARN] {msg} (x{count})")
-            self._error_throttle[key] = (now_mono, 0)
-
     def _update_plot_state(self, state: Dict[str, object], s: pd.DataFrame, protection_state: Optional[dict] = None) -> Tuple[str, float, float]:
         plot = state["plot"]
         glow = state["glow"]; line = state["line"]; last = state["last"]; vmax = state["max"]; vmin = state["min"]; txt = state["text"]
@@ -1263,7 +1269,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
             pause_shade.setVisible(False)
             txt.setText("Sin puntos")
             y0, y1, scale_info = self._resolve_y_range(None)
-            plot.setYRange(y0, y1, padding=0.0)
+            auto_apply = bool(self._force_autorange_once or (self.follow_latest and not self.manual_view_active))
+            if auto_apply:
+                self._auto_range_guard = True
+                plot.setYRange(y0, y1, padding=0.0)
+                self._auto_range_guard = False
             return "sin datos", y0, y1
 
         x = (s["timestamp"].astype("int64") / 1e9).to_numpy(dtype=float)
@@ -1317,11 +1327,15 @@ class DashboardWindow(QtWidgets.QMainWindow):
             vmax.setData([], [])
             vmin.setData([], [])
         y0, y1, scale_info = self._resolve_y_range(y)
-        plot.setYRange(y0, y1, padding=0.0)
-        if Y_SCALE_MODE == "manual":
-            plot.setLimits(yMin=y0, yMax=y1)
-        if self.follow_latest:
-            self._set_x_range_visible(plot, x, int(state["canonical_window_s"]))
+        auto_apply = bool(self._force_autorange_once or (self.follow_latest and not self.manual_view_active))
+        if auto_apply:
+            self._auto_range_guard = True
+            plot.setYRange(y0, y1, padding=0.0)
+            if Y_SCALE_MODE == "manual":
+                plot.setLimits(yMin=y0, yMax=y1)
+            if self.follow_latest and not self.manual_view_active:
+                self._set_x_range_visible(plot, x, int(state["canonical_window_s"]))
+            self._auto_range_guard = False
         return scale_info, y0, y1
 
     def refresh(self, force: bool = False):
@@ -1338,6 +1352,10 @@ class DashboardWindow(QtWidgets.QMainWindow):
         try:
             if not MONITOR_BUILD_ID or MIN_POINTS_FOR_LINE != 2:
                 self.lbl_warn.setText("⚠ Versión desactualizada o incompleta del monitor detectada")
+            scale_mode_now = str(Y_SCALE_MODE)
+            if scale_mode_now != str(self._last_scale_mode):
+                self._last_scale_mode = scale_mode_now
+                self._force_autorange_once = True
             build_t0 = time.perf_counter()
             snap = self.engine.build_snapshot(self.view)
             self.last_build_ms = (time.perf_counter() - build_t0) * 1000.0
@@ -1546,6 +1564,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
                     f"Escala efectiva: {main_scale}\n"
                     f"Escala main: {Y_SCALE_MODE} | y=[{main_y0:,.2f}, {main_y1:,.2f}]"
                 )
+            if self._force_autorange_once:
+                self._force_autorange_once = False
         except Exception as e:
             self._throttled_warn("refresh", f"Error monitor: {e}")
             if self.last_good_saldo is not None:
