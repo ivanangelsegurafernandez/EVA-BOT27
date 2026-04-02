@@ -827,6 +827,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         meta = QtWidgets.QHBoxLayout(); meta.setSpacing(10)
         self.lbl_refresh = QtWidgets.QLabel("REFRESCO: ACTIVO"); self.lbl_refresh.setObjectName("MetaBox")
         self.lbl_scale = QtWidgets.QLabel("ESCALA Y: --"); self.lbl_scale.setObjectName("MetaBox")
+        self.lbl_scale_mode = QtWidgets.QLabel("ESCALA: --"); self.lbl_scale_mode.setObjectName("MetaBox")
         self.lbl_delta = QtWidgets.QLabel("Δ VIS: --"); self.lbl_delta.setObjectName("MetaBox")
         self.lbl_samples = QtWidgets.QLabel("MUESTRAS: --"); self.lbl_samples.setObjectName("MetaBox")
         self.lbl_tz = QtWidgets.QLabel(f"TZ: {DISPLAY_TIMEZONE}"); self.lbl_tz.setObjectName("MetaBox")
@@ -834,6 +835,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.lbl_last = QtWidgets.QLabel("ÚLTIMA ACT: --"); self.lbl_last.setObjectName("MetaLast")
         meta.addWidget(self.lbl_refresh)
         meta.addWidget(self.lbl_scale)
+        meta.addWidget(self.lbl_scale_mode)
         meta.addWidget(self.lbl_delta)
         meta.addWidget(self.lbl_samples)
         meta.addWidget(self.lbl_tz)
@@ -854,6 +856,16 @@ class DashboardWindow(QtWidgets.QMainWindow):
         for b in (self.btn_real, self.btn_demo, self.btn_all, self.btn_pause, self.btn_reset, self.btn_export, self.btn_rule, self.btn_markers, self.btn_freeze):
             b.setObjectName("MetaBox")
             controls.addWidget(b)
+        self.cmb_min = QtWidgets.QComboBox(); self.cmb_min.setObjectName("MetaBox")
+        self.cmb_min.addItems(["15m", "30m", "60m", "90m", "120m"])
+        self.cmb_hour = QtWidgets.QComboBox(); self.cmb_hour.setObjectName("MetaBox")
+        self.cmb_hour.addItems(["3h", "6h", "9h", "12h", "24h"])
+        self.cmb_day = QtWidgets.QComboBox(); self.cmb_day.setObjectName("MetaBox")
+        self.cmb_day.addItems(["7d", "14d", "30d"])
+        self._sync_window_combos()
+        controls.addWidget(self.cmb_min)
+        controls.addWidget(self.cmb_hour)
+        controls.addWidget(self.cmb_day)
         controls.addStretch(1)
         hl.addLayout(controls)
         root.addWidget(header)
@@ -901,7 +913,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
             #Warn { font-size: 11px; color: #ffc374; font-weight: 520; }
             #Help { font-size: 9px; color: #6b84a6; }
             #ProtectionBanner { font-size: 40px; color: #fff3f3; background:#8f1223; border:3px solid #ff4b66; border-radius:12px; padding:10px 14px; font-weight:950; }
-            #ProtectionDetail { font-size: 21px; color: #ffdede; background:#431119; border:1px solid #d85b71; border-radius:10px; padding:10px 14px; font-weight:820; }
+            #ProtectionDetail { font-size: 23px; color: #ffdede; background:#431119; border:1px solid #d85b71; border-radius:10px; padding:10px 14px; font-weight:850; }
             """
         )
         pg.setConfigOptions(antialias=True, background="#0b0f14", foreground="#d9e2f2")
@@ -919,6 +931,9 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.btn_rule.clicked.connect(self._toggle_rule_mode)
         self.btn_markers.clicked.connect(self._toggle_markers)
         self.btn_freeze.clicked.connect(self._toggle_freeze)
+        self.cmb_min.currentTextChanged.connect(self._on_window_combo_changed)
+        self.cmb_hour.currentTextChanged.connect(self._on_window_combo_changed)
+        self.cmb_day.currentTextChanged.connect(self._on_window_combo_changed)
 
         self._init_crosshair()
 
@@ -978,11 +993,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
         glow = plot.plot([], [], pen=pg.mkPen(color + "55", width=8.0), name=None)
         line = plot.plot([], [], pen=pg.mkPen(color, width=5.2), name="Equity")
         ema_alert = plot.plot([], [], pen=pg.mkPen("#ff2d2d", width=2.8), name="EMA alerta")
-        ema_calm = plot.plot([], [], pen=pg.mkPen("#a11a1a", width=2.1, style=QtCore.Qt.DashLine), name="EMA calma")
+        ema_calm = plot.plot([], [], pen=pg.mkPen("#4ea1ff", width=2.2, style=QtCore.Qt.DashLine), name="EMA calma")
         peak_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#ffb1b1aa", width=1.2, style=QtCore.Qt.DotLine))
         peak_line.setVisible(False)
         plot.addItem(peak_line)
-        shade = pg.LinearRegionItem(values=(0, 1), orientation=pg.LinearRegionItem.Vertical, brush=pg.mkBrush(140, 20, 30, 35), movable=False, pen=pg.mkPen(None))
+        shade = pg.LinearRegionItem(values=(0, 1), orientation=pg.LinearRegionItem.Vertical, brush=pg.mkBrush(140, 20, 30, 55), movable=False, pen=pg.mkPen(None))
         shade.setVisible(False)
         shade.setZValue(-20)
         plot.addItem(shade)
@@ -992,6 +1007,25 @@ class DashboardWindow(QtWidgets.QMainWindow):
         txt = pg.TextItem(text="", color="#9ec2ff", anchor=(0, 1))
         plot.addItem(txt)
         return {"plot": plot, "glow": glow, "line": line, "ema_alert": ema_alert, "ema_calm": ema_calm, "peak_line": peak_line, "pause_shade": shade, "last": last, "max": vmax, "min": vmin, "text": txt, "canonical_window_s": int(canonical_window_s)}
+
+    def _sync_window_combos(self):
+        self.cmb_min.setCurrentText(f"{int(VENTANA_MINUTOS)}m")
+        self.cmb_hour.setCurrentText(f"{int(VENTANA_HORAS)}h")
+        self.cmb_day.setCurrentText(f"{int(VENTANA_DIAS)}d")
+
+    def _on_window_combo_changed(self, _text: str):
+        global VENTANA_MINUTOS, VENTANA_HORAS, VENTANA_DIAS
+        try:
+            VENTANA_MINUTOS = int(str(self.cmb_min.currentText()).replace("m", "").strip())
+            VENTANA_HORAS = int(str(self.cmb_hour.currentText()).replace("h", "").strip())
+            VENTANA_DIAS = int(str(self.cmb_day.currentText()).replace("d", "").strip())
+        except Exception:
+            return
+        self.plot_states["min"]["canonical_window_s"] = int(VENTANA_MINUTOS) * 60
+        self.plot_states["hour"]["canonical_window_s"] = int(VENTANA_HORAS) * 3600
+        self.plot_states["day"]["canonical_window_s"] = int(VENTANA_DIAS) * 86400
+        self.plot_states["main"]["canonical_window_s"] = int(VENTANA_DIAS) * 86400
+        self.refresh(force=True)
 
     def _set_x_range_visible(self, plot: pg.PlotItem, x: np.ndarray, canonical_window_s: int):
         if len(x) == 0:
@@ -1457,14 +1491,18 @@ class DashboardWindow(QtWidgets.QMainWindow):
                     left_txt = _fmt_countdown(int(p.get("time_left_s") or 0))
                 resume_text = str(p.get("resume_text") or f"Retoma automaticamente sus funciones en: {until_dt.strftime('%H:%M') if until_dt else '--:--'}")
                 self.lbl_protection_banner.setText("Deteccion caida-Proteccion de Saldo")
+                self.lbl_protection_detail.setTextFormat(QtCore.Qt.RichText)
                 self.lbl_protection_detail.setText(
-                    "MAESTRO EN PAUSA\n"
-                    f"Motivo: {str(p.get('reason') or '--')}\n"
-                    f"Drawdown actual: {dd_txt}\n"
-                    f"Inicio pausa: {started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'}\n"
-                    f"Reanudacion: {until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'}\n"
-                    f"Cronometro: {left_txt}\n"
-                    f"{resume_text}"
+                    "<div style='text-align:center'>"
+                    "<div style='font-size:30px;font-weight:980;color:#ffd6d6'>MAESTRO EN PAUSA</div>"
+                    f"<div style='font-size:21px'><b>Motivo:</b> {str(p.get('reason') or '--')}</div>"
+                    f"<div style='font-size:21px'><b>Drawdown actual:</b> {dd_txt}</div>"
+                    f"<div style='font-size:21px'><b>Inicio pausa:</b> {started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'}</div>"
+                    f"<div style='font-size:21px'><b>Reanudacion:</b> {until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'}</div>"
+                    f"<div style='font-size:40px;font-weight:980;color:#ffb6b6;margin-top:8px'>⏳ {left_txt}</div>"
+                    "<div style='font-size:20px;color:#ffdede;margin-top:6px'>Retoma automaticamente sus funciones al finalizar el cronometro.</div>"
+                    f"<div style='font-size:19px;color:#ffdede;margin-top:4px'>{resume_text}</div>"
+                    "</div>"
                 )
                 self.lbl_protection_banner.setVisible(True)
                 self.lbl_protection_detail.setVisible(True)
@@ -1503,6 +1541,14 @@ class DashboardWindow(QtWidgets.QMainWindow):
                     snap.warnings.append(f"plot {key} con error: {plot_err}")
                     self._throttled_warn(f"plot:{key}", f"Error en gráfico {key}: {plot_err}")
             self.lbl_scale.setText(f"ESCALA Y: {main_scale}")
+            if Y_SCALE_MODE == "manual":
+                ymin = float(min(Y_AXIS_MIN_USD, Y_AXIS_MAX_USD))
+                ymax = float(max(Y_AXIS_MIN_USD, Y_AXIS_MAX_USD))
+                self.lbl_scale_mode.setText(f"ESCALA: MANUAL {ymin:,.0f}..{ymax:,.0f} USD")
+            elif Y_SCALE_MODE == "capital":
+                self.lbl_scale_mode.setText("ESCALA: CAPITAL (dinámica)")
+            else:
+                self.lbl_scale_mode.setText("ESCALA: AUTO")
             visible = _sanitize_series_for_plot(series_map["main"])
             if visible.empty and "main" in self._last_plot_series:
                 visible = self._last_plot_series["main"]
