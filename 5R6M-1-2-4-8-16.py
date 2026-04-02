@@ -1436,6 +1436,10 @@ PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
 EMA_ALERTA_SPAN = 8
 EMA_CALMA_SPAN = 26
 DD_PROTECTION_THRESHOLD_PCT = -2.5
+EQUITY_BREAK_LOOKBACK = 40
+EQUITY_BREAK_STD_FACTOR = 1.2
+EQUITY_BREAK_DRAWDOWN = -0.06
+EQUITY_BREAK_FAST_DROP = -2.0
 PROTECTION_PAUSE_SECONDS = 30 * 60
 PROTECTION_LOG_COOLDOWN_S = 30.0
 SALDO_CSV_LOG_LAST_TS = 0.0
@@ -16005,6 +16009,61 @@ def _equity_protection_should_pause() -> bool:
         return False
 
 
+def _equity_structure_break_signal(equity_series: list[float]) -> tuple[bool, str]:
+    try:
+        if not equity_series or len(equity_series) < 20:
+            return False, ""
+        lookback = int(EQUITY_BREAK_LOOKBACK)
+        n = min(len(equity_series), lookback)
+        y = [float(v) for v in equity_series[-n:]]
+        if len(y) < 20:
+            return False, ""
+
+        trend = None
+        if NUMPY_OK:
+            try:
+                x_np = np.arange(len(y), dtype=float)
+                y_np = np.asarray(y, dtype=float)
+                coef = np.polyfit(x_np, y_np, 1)
+                trend = np.polyval(coef, x_np)
+                resid = float(y_np[-1] - trend[-1])
+                std = float(np.std(y_np - trend))
+                if std > 0 and resid < (-float(EQUITY_BREAK_STD_FACTOR) * std):
+                    return True, "ruptura_tendencia_equity"
+            except Exception:
+                trend = None
+
+        if trend is None:
+            m = len(y)
+            x_vals = [float(i) for i in range(m)]
+            x_mean = sum(x_vals) / float(m)
+            y_mean = sum(y) / float(m)
+            den = sum((xi - x_mean) ** 2 for xi in x_vals)
+            slope = (sum((x_vals[i] - x_mean) * (y[i] - y_mean) for i in range(m)) / den) if den > 0 else 0.0
+            intercept = y_mean - slope * x_mean
+            trend = [slope * xi + intercept for xi in x_vals]
+            resid = float(y[-1] - trend[-1])
+            diffs = [y[i] - trend[i] for i in range(m)]
+            var = (sum((d * d) for d in diffs) / float(m)) if m > 0 else 0.0
+            std = math.sqrt(max(0.0, var))
+            if std > 0 and resid < (-float(EQUITY_BREAK_STD_FACTOR) * std):
+                return True, "ruptura_tendencia_equity"
+
+        max_val = max(y)
+        if abs(max_val) > 1e-12:
+            dd = (float(y[-1]) - float(max_val)) / float(max_val)
+            if dd <= float(EQUITY_BREAK_DRAWDOWN):
+                return True, "drawdown_equity"
+
+        if len(y) >= 4:
+            delta = float(y[-1]) - float(y[-4])
+            if delta <= float(EQUITY_BREAK_FAST_DROP):
+                return True, "caida_rapida_equity"
+    except Exception:
+        return False, ""
+    return False, ""
+
+
 def _fmt_protection_countdown(seconds_left: int) -> str:
     try:
         s = max(0, int(seconds_left))
@@ -16059,6 +16118,8 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
+    structure_trigger = False
+    structure_reason = ""
     try:
         df = pd.read_csv(SALDO_SERIES_CSV_PATH, encoding="utf-8")
         if df is None or df.empty or "equity" not in df.columns:
@@ -16070,6 +16131,10 @@ def _equity_protection_update(now_ts: float | None = None):
             _equity_protection_is_active(now_ts)
             _write_protection_health_state(now_ts)
             return
+        try:
+            structure_trigger, structure_reason = _equity_structure_break_signal([float(v) for v in eq.tolist()])
+        except Exception:
+            structure_trigger, structure_reason = False, ""
         protection_ema_alerta = float(eq.ewm(span=int(EMA_ALERTA_SPAN), adjust=False).mean().iloc[-1])
         protection_ema_calma = float(eq.ewm(span=int(EMA_CALMA_SPAN), adjust=False).mean().iloc[-1])
         peak = float(eq.cummax().iloc[-1])
@@ -16085,9 +16150,9 @@ def _equity_protection_update(now_ts: float | None = None):
         return
 
     active_now = _equity_protection_is_active(now_ts)
-    if (not active_now) and _equity_protection_should_pause():
+    if (not active_now) and (structure_trigger or _equity_protection_should_pause()):
         protection_pause_active = True
-        protection_pause_reason = "EMA_ALERTA<EMA_CALMA y drawdown umbral"
+        protection_pause_reason = str(structure_reason or "EMA_ALERTA<EMA_CALMA y drawdown umbral")
         protection_pause_started_ts = now_ts
         protection_pause_until_ts = now_ts + float(PROTECTION_PAUSE_SECONDS)
         protection_pause_last_trigger_ts = now_ts

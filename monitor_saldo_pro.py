@@ -1030,7 +1030,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         vmin = plot.plot([], [], pen=None, symbol="o", symbolSize=4, symbolBrush="#ff8f8f99", name=None)
         txt = pg.TextItem(text="", color="#9ec2ff", anchor=(0, 1))
         plot.addItem(txt)
-        return {"plot": plot, "glow": glow, "line": line, "ema_alert": ema_alert, "ema_calm": ema_calm, "peak_line": peak_line, "pause_shade": shade, "last": last, "max": vmax, "min": vmin, "text": txt, "canonical_window_s": int(canonical_window_s)}
+        return {"plot": plot, "glow": glow, "line": line, "ema_alert": ema_alert, "ema_calm": ema_calm, "peak_line": peak_line, "pause_shade": shade, "last": last, "max": vmax, "min": vmin, "text": txt, "endpoint": endpoint, "canonical_window_s": int(canonical_window_s)}
 
     def _sync_window_combos(self):
         self.cmb_min.setCurrentText(f"{int(VENTANA_MINUTOS)}m")
@@ -1264,6 +1264,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         plot = state["plot"]
         glow = state["glow"]; line = state["line"]; last = state["last"]; vmax = state["max"]; vmin = state["min"]; txt = state["text"]
         ema_alert_line = state["ema_alert"]; ema_calm_line = state["ema_calm"]; peak_line = state["peak_line"]; pause_shade = state["pause_shade"]
+        endpoint = state.get("endpoint", "#9ef7d8")
         s = _sanitize_series_for_plot(s)
         if s.empty:
             glow.setData([], [])
@@ -1323,6 +1324,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
             pause_shade.setVisible(False)
 
         marker_size = 8 if len(x) == 1 else 4
+        marker_brush = "#ff2d2d" if p_active else endpoint
+        try:
+            last.setSymbolBrush(marker_brush)
+        except Exception:
+            pass
         if self.markers_enabled and SHOW_LAST_MARKER:
             last.setData([x[-1]], [y[-1]], symbolSize=marker_size)
         else:
@@ -1429,7 +1435,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 else:
                     left_txt = _fmt_countdown(int(p.get("time_left_s") or 0))
                 resume_text = str(p.get("resume_text") or f"Retoma automaticamente sus funciones en: {until_dt.strftime('%H:%M') if until_dt else '--:--'}")
-                self.lbl_protection_banner.setText("Deteccion caida-Proteccion de Saldo")
+                self.lbl_protection_banner.setText("🚨 PROTECCIÓN ACTIVADA")
                 self.lbl_protection_detail.setTextFormat(QtCore.Qt.RichText)
                 self.lbl_protection_detail.setText(
                     "<div style='text-align:center'>"
