@@ -1459,6 +1459,8 @@ PROTECTION_LOG_COOLDOWN_S = 30.0
 PROTECTION_REARM_COOLDOWN_S = 90.0
 PROTECTION_REARM_DD_RELEASE_MARGIN_PCT = 0.50
 PROTECTION_TEST_RESET_HOLD_S = 120.0
+PROTECTION_POST_RESET_MIN_SAMPLES = 20
+PROTECTION_POST_RESET_MIN_SECONDS = 120.0
 SALDO_CSV_LOG_LAST_TS = 0.0
 print(f"[SALDO LIVE] destino: {SALDO_LIVE_SHARED_PATH}")
 print(f"[SALDO HIST] destino: {SALDO_LIVE_HISTORY_SHARED_PATH}")
@@ -1540,6 +1542,11 @@ protection_last_release_ts = 0.0
 protection_test_reset_hold_until_ts = 0.0
 protection_last_reset_request_id = ""
 protection_last_reset_request_ts = 0.0
+protection_eval_from_ts = 0.0
+protection_reset_baseline_equity = 0.0
+protection_reset_baseline_peak = 0.0
+protection_post_reset_samples = 0
+protection_post_reset_span_s = 0.0
 PROTECTION_LAST_JSON_WARN_TS = 0.0
 PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
 PROTECTION_DIAG_STATUS = "ok"
@@ -16214,6 +16221,11 @@ def _write_protection_health_state(now_ts: float | None = None):
         "series_len": int(PROTECTION_SERIES_LEN or 0),
         "test_hold_active": hold_active,
         "test_hold_until_ts": float(protection_test_reset_hold_until_ts or 0.0),
+        "eval_from_ts": float(protection_eval_from_ts or 0.0),
+        "post_reset_samples": int(protection_post_reset_samples or 0),
+        "post_reset_span_s": float(protection_post_reset_span_s or 0.0),
+        "reset_baseline_equity": float(protection_reset_baseline_equity or 0.0),
+        "reset_baseline_peak": float(protection_reset_baseline_peak or 0.0),
     }
     try:
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
@@ -16257,6 +16269,8 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
     global protection_rearm_blocked, protection_last_release_ts
     global protection_test_reset_hold_until_ts, protection_last_reset_request_id, protection_last_reset_request_ts
+    global protection_eval_from_ts, protection_reset_baseline_equity, protection_reset_baseline_peak
+    global protection_post_reset_samples, protection_post_reset_span_s
     now_ts = float(now_ts if now_ts is not None else time.time())
     req_id = str(request_id or "").strip()
     try:
@@ -16275,6 +16289,14 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
         protection_test_reset_hold_until_ts = now_ts + float(PROTECTION_TEST_RESET_HOLD_S)
         protection_last_reset_request_id = req_id
         protection_last_reset_request_ts = now_ts
+        protection_eval_from_ts = now_ts
+        try:
+            protection_reset_baseline_equity = float(SALDO_LAST_VALID_VALUE) if SALDO_LAST_VALID_VALUE is not None else 0.0
+        except Exception:
+            protection_reset_baseline_equity = 0.0
+        protection_reset_baseline_peak = float(protection_reset_baseline_equity or 0.0)
+        protection_post_reset_samples = 0
+        protection_post_reset_span_s = 0.0
         _set_protection_diag(status="ok", reason="manual_test_reset", source_column="", series_len=0)
         csv_path = SALDO_SERIES_CSV_PATH
         os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
@@ -16323,6 +16345,11 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
             "series_len": int(PROTECTION_SERIES_LEN or 0),
             "reset_request_id": str(req_id),
             "reset_diag": "manual_test_reset_ok",
+            "eval_from_ts": float(protection_eval_from_ts or 0.0),
+            "post_reset_samples": int(protection_post_reset_samples or 0),
+            "post_reset_span_s": float(protection_post_reset_span_s or 0.0),
+            "reset_baseline_equity": float(protection_reset_baseline_equity or 0.0),
+            "reset_baseline_peak": float(protection_reset_baseline_peak or 0.0),
         }
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
         _write_protection_reset_ack(
@@ -16392,6 +16419,8 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
     global protection_rearm_blocked, protection_last_release_ts
     global protection_test_reset_hold_until_ts, protection_last_reset_request_id
+    global protection_eval_from_ts, protection_reset_baseline_equity, protection_reset_baseline_peak
+    global protection_post_reset_samples, protection_post_reset_span_s
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
     if _consume_protection_reset_request(now_ts):
@@ -16447,10 +16476,67 @@ def _equity_protection_update(now_ts: float | None = None):
             _equity_protection_is_active(now_ts)
             _write_protection_health_state(now_ts)
             return
-        eq = pd.to_numeric(df[equity_col], errors="coerce").dropna()
+        df_eval = df.copy()
+        post_reset_ts_series = None
+        if float(protection_eval_from_ts or 0.0) > 0.0:
+            try:
+                ts_series = pd.Series([float("nan")] * len(df_eval), index=df_eval.index, dtype="float64")
+                if "epoch" in df_eval.columns:
+                    ts_series = pd.to_numeric(df_eval["epoch"], errors="coerce")
+                if "ts_utc" in df_eval.columns:
+                    ts_utc_dt = pd.to_datetime(df_eval["ts_utc"], errors="coerce", utc=True)
+                    ts_utc_epoch = pd.to_numeric(ts_utc_dt.astype("int64"), errors="coerce") / 1e9
+                    ts_series = ts_series.where(ts_series.notna(), ts_utc_epoch)
+                post_reset_ts_series = ts_series
+            except Exception:
+                post_reset_ts_series = None
+            if post_reset_ts_series is None:
+                protection_post_reset_samples = 0
+                protection_post_reset_span_s = 0.0
+                protection_pause_active = False
+                protection_pause_reason = ""
+                protection_pause_started_ts = 0.0
+                protection_pause_until_ts = 0.0
+                protection_last_drawdown_pct = 0.0
+                protection_ema_alerta = 0.0
+                protection_ema_calma = 0.0
+                _set_protection_diag(status="ok", reason="POST_RESET_WARMUP", source_column=equity_col, series_len=0)
+                _write_protection_health_state(now_ts)
+                return
+            try:
+                mask_post = post_reset_ts_series >= float(protection_eval_from_ts or 0.0)
+                df_eval = df_eval.loc[mask_post.fillna(False)].copy()
+            except Exception:
+                df_eval = df_eval.iloc[0:0].copy()
+        eq = pd.to_numeric(df_eval[equity_col], errors="coerce").dropna()
         eq_len = int(len(eq))
+        if float(protection_eval_from_ts or 0.0) > 0.0:
+            protection_post_reset_samples = int(eq_len)
+            span_s = 0.0
+            try:
+                if post_reset_ts_series is not None and len(df_eval) > 0:
+                    ts_post = pd.to_numeric(post_reset_ts_series.loc[df_eval.index], errors="coerce").dropna()
+                    if len(ts_post) >= 2:
+                        span_s = float(max(0.0, float(ts_post.iloc[-1]) - float(ts_post.iloc[0])))
+            except Exception:
+                span_s = 0.0
+            protection_post_reset_span_s = float(span_s)
+        else:
+            protection_post_reset_samples = int(eq_len)
+            protection_post_reset_span_s = 0.0
         _set_protection_diag(status="ok", reason="", source_column=equity_col, series_len=eq_len)
         if eq.empty:
+            if float(protection_eval_from_ts or 0.0) > 0.0:
+                protection_pause_active = False
+                protection_pause_reason = ""
+                protection_pause_started_ts = 0.0
+                protection_pause_until_ts = 0.0
+                protection_last_drawdown_pct = 0.0
+                protection_ema_alerta = 0.0
+                protection_ema_calma = 0.0
+                _set_protection_diag(status="ok", reason="POST_RESET_WARMUP", source_column=equity_col, series_len=0)
+                _write_protection_health_state(now_ts)
+                return
             _set_protection_diag(
                 status="error",
                 reason="CSV_EMPTY_OR_INVALID | sin serie numérica válida",
@@ -16465,6 +16551,20 @@ def _equity_protection_update(now_ts: float | None = None):
             _equity_protection_is_active(now_ts)
             _write_protection_health_state(now_ts)
             return
+        if float(protection_eval_from_ts or 0.0) > 0.0:
+            warmup_samples_ok = int(eq_len) >= int(PROTECTION_POST_RESET_MIN_SAMPLES)
+            warmup_time_ok = float(protection_post_reset_span_s or 0.0) >= float(PROTECTION_POST_RESET_MIN_SECONDS)
+            if not (warmup_samples_ok and warmup_time_ok):
+                protection_pause_active = False
+                protection_pause_reason = ""
+                protection_pause_started_ts = 0.0
+                protection_pause_until_ts = 0.0
+                protection_last_drawdown_pct = 0.0
+                protection_ema_alerta = 0.0
+                protection_ema_calma = 0.0
+                _set_protection_diag(status="ok", reason="POST_RESET_WARMUP", source_column=equity_col, series_len=eq_len)
+                _write_protection_health_state(now_ts)
+                return
         if eq_len < 20:
             _set_protection_diag(
                 status="warning",
@@ -16487,6 +16587,8 @@ def _equity_protection_update(now_ts: float | None = None):
         protection_ema_alerta = float(eq.ewm(span=int(EMA_ALERTA_SPAN), adjust=False).mean().iloc[-1])
         protection_ema_calma = float(eq.ewm(span=int(EMA_CALMA_SPAN), adjust=False).mean().iloc[-1])
         peak = float(eq.cummax().iloc[-1])
+        if float(protection_eval_from_ts or 0.0) > 0.0:
+            peak = float(max(float(peak), float(protection_reset_baseline_peak or 0.0)))
         now_eq = float(eq.iloc[-1])
         protection_last_peak_equity = peak
         if abs(peak) > 1e-12:
