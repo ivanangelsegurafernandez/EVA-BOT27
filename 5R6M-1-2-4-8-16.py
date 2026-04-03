@@ -16244,19 +16244,20 @@ def _set_protection_diag(status: str = "ok", reason: str = "", source_column: st
 def _write_protection_health_state(now_ts: float | None = None):
     global PROTECTION_LAST_JSON_WARN_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
-    time_left_s = _equity_protection_time_left_s(now_ts) if bool(protection_pause_active) else 0
+    active_now = bool(_equity_protection_is_active(now_ts))
+    time_left_s = _equity_protection_time_left_s(now_ts) if active_now else 0
     resume_hhmm = "--:--"
     hold_active = bool(now_ts < float(protection_test_reset_hold_until_ts or 0.0))
     try:
-        if bool(protection_pause_active) and float(protection_pause_until_ts or 0.0) > 0:
+        if active_now and float(protection_pause_until_ts or 0.0) > 0:
             resume_hhmm = datetime.fromtimestamp(float(protection_pause_until_ts), tz=timezone.utc).astimezone().strftime("%H:%M")
     except Exception:
         pass
     payload = {
-        "active": bool(protection_pause_active),
-        "reason": str(protection_pause_reason or ""),
-        "started_ts": float(protection_pause_started_ts or 0.0),
-        "until_ts": float(protection_pause_until_ts or 0.0),
+        "active": active_now,
+        "reason": str(protection_pause_reason or "") if active_now else "",
+        "started_ts": float(protection_pause_started_ts or 0.0) if active_now else 0.0,
+        "until_ts": float(protection_pause_until_ts or 0.0) if active_now else 0.0,
         "time_left_s": int(time_left_s),
         "drawdown_pct": float(protection_last_drawdown_pct or 0.0),
         "equity_now": float(SALDO_LAST_VALID_VALUE) if SALDO_LAST_VALID_VALUE is not None else None,

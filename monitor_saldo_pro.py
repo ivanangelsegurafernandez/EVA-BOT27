@@ -312,6 +312,17 @@ def _read_protection_reset_ack() -> Tuple[Optional[dict], Optional[str]]:
         return None, str(e)
 
 
+def _read_protection_reset_ack() -> Tuple[Optional[dict], Optional[str]]:
+    try:
+        if not os.path.exists(PROTECTION_RESET_ACK_PATH):
+            return None, None
+        with open(PROTECTION_RESET_ACK_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None, None
+    except Exception as e:
+        return None, str(e)
+
+
 def _sanitize_series_for_plot(s: pd.DataFrame) -> pd.DataFrame:
     if s is None or s.empty:
         return pd.DataFrame(columns=["timestamp", "equity"])
@@ -1286,6 +1297,175 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _toggle_markers(self):
         self.markers_enabled = not self.markers_enabled
         self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
+
+    def _reset_prot_log_once(self, key: str, message: str, cooldown_s: float = 20.0):
+        now = float(time.time())
+        prev = float(self._reset_prot_last_log_ts.get(key, 0.0))
+        if (now - prev) >= float(cooldown_s):
+            self._reset_prot_last_log_ts[key] = now
+            try:
+                print(message)
+            except Exception:
+                pass
+
+    def _set_reset_prot_button_state(self):
+        now = float(time.time())
+        if bool(self.reset_prot_pending):
+            self.btn_reset_prot.setEnabled(False)
+            self.btn_reset_prot.setText("RESET ENVIADO...")
+            return
+        if now < float(self.reset_prot_hold_until or 0.0):
+            self.btn_reset_prot.setEnabled(False)
+            self.btn_reset_prot.setText("TEST HOLD ACTIVO")
+            return
+        self.btn_reset_prot.setEnabled(True)
+        self.btn_reset_prot.setText("RESET PROTECCIÓN")
+
+    def _clear_prot_window_latch(self):
+        self._prot_window_sig = ""
+        self._prot_window_started_ts = 0.0
+        self._prot_window_until_ts = 0.0
+        self._prot_window_last_reason = ""
+        self._prot_window_last_drawdown = 0.0
+        self._prot_window_last_active_ts = 0.0
+        self._prot_window_confirmed = False
+        self._prot_inactive_transient_count = 0
+
+    def _set_protection_status_label(self, text: str):
+        self.lbl_prot_state.setText(str(text or "PROTECCIÓN: MONITOREANDO"))
+
+    def _play_protection_transition_sound(self, state: str):
+        target = "active" if str(state or "").strip().lower() == "activated" else "idle"
+        if target == str(self._prot_last_audio_state):
+            return
+        played = False
+        if winsound is not None:
+            try:
+                if target == "active":
+                    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                else:
+                    winsound.MessageBeep(winsound.MB_OK)
+                played = True
+            except Exception:
+                played = False
+        if not played:
+            try:
+                QtWidgets.QApplication.beep()
+            except Exception:
+                pass
+        self._prot_last_audio_state = target
+        self._reset_prot_log_once(
+            f"AUDIO_{target.upper()}",
+            f"MONITOR_PROT: audio {'activated' if target == 'active' else 'cleared'}",
+            cooldown_s=1.0,
+        )
+
+    def _render_protection_window(self, now_ts: float):
+        started_dt = datetime.fromtimestamp(float(self._prot_window_started_ts or 0.0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(self._prot_window_started_ts or 0.0) > 0 else None
+        until_dt = datetime.fromtimestamp(float(self._prot_window_until_ts or 0.0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(self._prot_window_until_ts or 0.0) > 0 else None
+        left_txt = _fmt_countdown(max(0, int(round(float(self._prot_window_until_ts or 0.0) - float(now_ts)))))
+        dd_txt = f"{float(self._prot_window_last_drawdown or 0.0):.2f}%"
+        resume_text = f"Retoma automaticamente sus funciones en: {until_dt.strftime('%H:%M') if until_dt else '--:--'}"
+        self.lbl_protection_banner.setText("🚨 PROTECCIÓN ACTIVADA")
+        self.lbl_protection_detail.setTextFormat(QtCore.Qt.RichText)
+        self.lbl_protection_detail.setText(
+            "<div style='text-align:center'>"
+            "<div style='font-size:30px;font-weight:980;color:#ffd6d6'>MAESTRO EN PAUSA</div>"
+            f"<div style='font-size:21px'><b>Motivo:</b> {str(self._prot_window_last_reason or '--')}</div>"
+            f"<div style='font-size:21px'><b>Drawdown actual:</b> {dd_txt}</div>"
+            f"<div style='font-size:21px'><b>Inicio pausa:</b> {started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'}</div>"
+            f"<div style='font-size:21px'><b>Reanudacion:</b> {until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'}</div>"
+            f"<div style='font-size:40px;font-weight:980;color:#ffb6b6;margin-top:8px'>⏳ {left_txt}</div>"
+            "<div style='font-size:20px;color:#ffdede;margin-top:6px'>Retoma automaticamente sus funciones al finalizar el cronometro.</div>"
+            f"<div style='font-size:19px;color:#ffdede;margin-top:4px'>{resume_text}</div>"
+            "</div>"
+        )
+        self.lbl_protection_banner.setVisible(True)
+        self.lbl_protection_detail.setVisible(True)
+
+    def _hydrate_protection_runtime_state(self):
+        self.reset_prot_pending = False
+        self.reset_prot_request_id = ""
+        self.reset_prot_pending_until = 0.0
+        self.reset_prot_hold_until = 0.0
+        self.reset_prot_last_ack_ok = False
+        self.reset_prot_epoch_accepted = 0
+        try:
+            ack, _ = _read_protection_reset_ack()
+            ack = ack or {}
+            if bool(ack.get("accepted", False)):
+                self.reset_prot_epoch_accepted = int(ack.get("epoch_id") or 0)
+                self.reset_prot_hold_until = float(ack.get("hold_until_ts") or 0.0)
+                self.reset_prot_request_id = str(ack.get("request_id") or "")
+                self.reset_prot_last_ack_ok = True
+        except Exception:
+            pass
+        try:
+            p, _ = _read_protection_health_state()
+            p = p or {}
+            hold_active = bool(p.get("test_hold_active", False))
+            hold_until = float(p.get("test_hold_until_ts") or 0.0)
+            if hold_active and hold_until > time.time():
+                self.reset_prot_hold_until = max(float(self.reset_prot_hold_until or 0.0), hold_until)
+        except Exception:
+            pass
+
+    def _request_protection_test_reset(self):
+        if bool(self.reset_prot_pending):
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Ya hay un reset de protección pendiente.")
+            self._reset_prot_log_once(
+                "REQ_DUP",
+                f"MONITOR_RESET_PROT: request duplicado ignorado id={self.reset_prot_request_id or '--'}",
+            )
+            return
+        msg = (
+            "Esto limpiará la protección de equity para pruebas, respaldará la serie actual "
+            "y quitará la alarma. ¿Continuar?"
+        )
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            "Confirmar reset de protección",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if ans != QtWidgets.QMessageBox.Yes:
+            return
+        now_ts = float(time.time())
+        request_id = f"reset-{int(now_ts * 1000)}"
+        payload = {
+            "action": "reset_protection_test",
+            "request_id": str(request_id),
+            "ts": float(now_ts),
+            "source": "monitor_saldo_pro",
+            "rotate_series": True,
+        }
+        try:
+            os.makedirs(os.path.dirname(PROTECTION_RESET_REQUEST_PATH) or ".", exist_ok=True)
+            tmp = f"{PROTECTION_RESET_REQUEST_PATH}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, PROTECTION_RESET_REQUEST_PATH)
+            self.lbl_protection_banner.setVisible(False)
+            self.lbl_protection_detail.setVisible(False)
+            self.lbl_protection_banner.setText("")
+            self.lbl_protection_detail.setText("")
+            self.reset_prot_pending = True
+            self.reset_prot_request_id = str(request_id)
+            self.reset_prot_pending_until = float(now_ts + 180.0)
+            self.reset_prot_hold_until = 0.0
+            self.reset_prot_last_ack_ok = False
+            self._set_reset_prot_button_state()
+            self.lbl_warn.setText("Reset de protección enviado | esperando confirmación del maestro")
+            self._reset_prot_log_once("REQ_SENT", f"MONITOR_RESET_PROT: request enviado id={request_id}", cooldown_s=1.0)
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Solicitud de reset de protección enviada")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Reset protección", f"No se pudo enviar la solicitud: {e}")
 
     def _reset_prot_log_once(self, key: str, message: str, cooldown_s: float = 20.0):
         now = float(time.time())
@@ -3038,6 +3218,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 self._play_protection_transition_sound("cleared")
                 self._set_protection_status_label("PROTECCIÓN: TEST HOLD")
                 self._reset_prot_log_once("BANNER_SUPP", f"MONITOR_PROT: banner_suppressed reason={'+'.join(strong_suppress_reasons)}")
+                self._reset_prot_log_once("WIN_CLEAR_SUPP", "MONITOR_PROT: window_cleared reason=suppressed")
                 if bool(self.reset_prot_pending):
                     snap.warnings.insert(0, "Reset de protección en proceso...")
                 elif stale_epoch_state:
