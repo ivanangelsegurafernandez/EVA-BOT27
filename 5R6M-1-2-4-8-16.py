@@ -16763,6 +16763,13 @@ def _equity_protection_update(now_ts: float | None = None):
                 pass
         else:
             raw_trigger = False
+    if bool(active_now) and bool(raw_trigger):
+        _protection_diag_event_once(
+            "TRIGGER_IGNORADO_PAUSA_ACTIVA",
+            "PROTECCION_SALDO: trigger ignorado | pausa ya activa",
+            now_ts,
+        )
+        raw_trigger = False
     if (not active_now) and raw_trigger:
         protection_pause_active = True
         protection_pause_reason = str(structure_reason or "EMA_ALERTA<EMA_CALMA y drawdown umbral")
