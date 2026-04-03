@@ -862,6 +862,9 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self._prot_window_confirmed = False
         self._prot_inactive_transient_count = 0
         self._prot_last_audio_state = "idle"
+        self._prot_suppress_state = ""
+        self._prot_suppress_active = False
+        self._prot_suppress_last_log_ts = 0.0
         self.setWindowTitle(f"Monitor Saldo Real Deriv {MONITOR_VERSION}")
         self.resize(1600, 900)
 
@@ -1719,20 +1722,42 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 strong_suppress_reasons.append(diag_reason)
             suppress_protection_banner = bool(len(strong_suppress_reasons) > 0)
             if suppress_protection_banner:
+                suppress_key = "+".join(sorted(str(r) for r in strong_suppress_reasons))
+                if "hold" in strong_suppress_reasons:
+                    neutral_state = "PROTECCIÓN: TEST HOLD"
+                elif "POST_RESET_WARMUP" in strong_suppress_reasons:
+                    neutral_state = "PROTECCIÓN: WARMUP"
+                elif "stale_epoch" in strong_suppress_reasons:
+                    neutral_state = "PROTECCIÓN: ESPERANDO EPOCH NUEVO"
+                else:
+                    neutral_state = "PROTECCIÓN: TEST HOLD"
                 self.lbl_protection_banner.setVisible(False)
                 self.lbl_protection_detail.setVisible(False)
-                self.lbl_protection_banner.setText("")
-                self.lbl_protection_detail.setText("")
-                self._prot_last_signature = ""
-                self._prot_last_seen_count = 0
-                self._prot_banner_sig_confirmed = ""
-                self._prot_banner_visible_active = False
-                self._clear_prot_window_latch()
-                if str(self._prot_last_audio_state) == "active":
-                    self._play_protection_transition_sound("cleared")
-                self._set_protection_status_label("PROTECCIÓN: TEST HOLD")
-                self._reset_prot_log_once("BANNER_SUPP", f"MONITOR_PROT: banner_suppressed reason={'+'.join(strong_suppress_reasons)}")
-                self._reset_prot_log_once("WIN_CLEAR_SUPP", "MONITOR_PROT: window_cleared reason=suppressed")
+                same_suppress = bool(self._prot_suppress_active and str(self._prot_suppress_state) == suppress_key)
+                if not same_suppress:
+                    self.lbl_protection_banner.setText("")
+                    self.lbl_protection_detail.setText("")
+                    self._prot_last_signature = ""
+                    self._prot_last_seen_count = 0
+                    self._prot_banner_sig_confirmed = ""
+                    self._prot_banner_visible_active = False
+                    self._clear_prot_window_latch()
+                    if str(self._prot_last_audio_state) == "active":
+                        self._play_protection_transition_sound("cleared")
+                    self._prot_suppress_state = suppress_key
+                    self._prot_suppress_active = True
+                    self._prot_suppress_last_log_ts = float(now_ts)
+                    self._reset_prot_log_once(
+                        f"BANNER_SUPP_{suppress_key}",
+                        f"MONITOR_PROT: banner_suppressed reason={suppress_key}",
+                        cooldown_s=999999.0,
+                    )
+                    self._reset_prot_log_once(
+                        f"WIN_CLEAR_SUPP_{suppress_key}",
+                        "MONITOR_PROT: window_cleared reason=suppressed",
+                        cooldown_s=999999.0,
+                    )
+                self._set_protection_status_label(neutral_state)
                 if bool(self.reset_prot_pending):
                     snap.warnings.insert(0, "Reset de protección en proceso...")
                 elif stale_epoch_state:
@@ -1741,6 +1766,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
                     hold_dt = datetime.fromtimestamp(float(self.reset_prot_hold_until), tz=timezone.utc).astimezone(DISPLAY_TZ)
                     snap.warnings.insert(0, f"Protección suspendida temporalmente para pruebas hasta {hold_dt.strftime('%H:%M:%S')}")
             else:
+                self._prot_suppress_state = ""
+                self._prot_suppress_active = False
                 self._set_protection_status_label("PROTECCIÓN: MONITOREANDO")
                 p_active = bool(p.get("active", False))
                 started_ts = float(p.get("started_ts") or 0.0)
