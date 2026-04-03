@@ -16734,8 +16734,9 @@ def _equity_protection_update(now_ts: float | None = None):
         return
 
     active_now = _equity_protection_is_active(now_ts)
-    raw_trigger = bool(structure_trigger or _equity_protection_should_pause())
-    incident_reason = str(structure_reason or ("EMA_ALERTA" if _equity_protection_should_pause() else ""))
+    ema_trigger = bool(_equity_protection_should_pause())
+    raw_trigger = bool(ema_trigger)
+    incident_reason = str("EMA_ALERTA" if ema_trigger else "")
     candidate_incident_id = _build_equity_protection_incident_id(
         reason=incident_reason,
         anchor_peak=float(protection_last_peak_equity or 0.0),
@@ -16779,7 +16780,7 @@ def _equity_protection_update(now_ts: float | None = None):
         raw_trigger = False
     if (not active_now) and raw_trigger:
         protection_pause_active = True
-        protection_pause_reason = str(structure_reason or "EMA_ALERTA<EMA_CALMA y drawdown umbral")
+        protection_pause_reason = str("EMA_ALERTA<EMA_CALMA y drawdown umbral")
         protection_pause_started_ts = now_ts
         protection_pause_until_ts = now_ts + float(PROTECTION_PAUSE_SECONDS)
         protection_pause_last_trigger_ts = now_ts
@@ -16796,12 +16797,18 @@ def _equity_protection_update(now_ts: float | None = None):
         protection_incident_lock_active = True
         try:
                 agregar_evento(
-                    f"PROTECCION_SALDO: ACTIVADA | reason={str(structure_reason or protection_pause_reason)} | "
+                    f"PROTECCION_SALDO: ACTIVADA | reason={str(protection_pause_reason)} | "
                     f"dd={float(protection_last_drawdown_pct):.1f}% | pausa=30m"
                 )
         except Exception:
             pass
         active_now = True
+    elif (not active_now) and bool(structure_trigger):
+        _protection_diag_event_once(
+            "STRUCTURE_TRIGGER_IGNORED",
+            f"PROTECCION_SALDO: STRUCTURE_TRIGGER_IGNORED | reason={str(structure_reason or '--')}",
+            now_ts,
+        )
 
     if active_now:
         if (now_ts - float(PROTECTION_LAST_ACTIVE_LOG_TS or 0.0)) >= float(PROTECTION_LOG_COOLDOWN_S):
