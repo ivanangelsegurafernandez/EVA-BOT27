@@ -16752,6 +16752,13 @@ def _equity_protection_update(now_ts: float | None = None):
                 source_column=str(PROTECTION_SOURCE_COLUMN or ""),
                 series_len=int(PROTECTION_SERIES_LEN or 0),
             )
+    if bool(active_now) and str(PROTECTION_DIAG_REASON or "") == "INCIDENT_LOCK_ACTIVE":
+        _set_protection_diag(
+            status="ok",
+            reason="",
+            source_column=str(PROTECTION_SOURCE_COLUMN or ""),
+            series_len=int(PROTECTION_SERIES_LEN or 0),
+        )
     if bool(protection_rearm_blocked):
         recovery_ok = _equity_protection_recovery_ok(structure_trigger=structure_trigger)
         cooldown_ok = (now_ts - float(protection_last_release_ts or 0.0)) >= float(PROTECTION_REARM_COOLDOWN_S)
@@ -16801,7 +16808,7 @@ def _equity_protection_update(now_ts: float | None = None):
             PROTECTION_LAST_ACTIVE_LOG_TS = now_ts
             try:
                 agregar_evento(
-                    f"PROTECCION_SALDO: ACTIVA | restante={_fmt_protection_countdown(_equity_protection_time_left_s(now_ts))}"
+                    f"PROTECCION_SALDO: ACTIVE_WINDOW vigente | left={_fmt_protection_countdown(_equity_protection_time_left_s(now_ts))}"
                 )
             except Exception:
                 pass
