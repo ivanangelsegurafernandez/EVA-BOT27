@@ -1442,6 +1442,8 @@ EQUITY_BREAK_DRAWDOWN = -0.06
 EQUITY_BREAK_FAST_DROP = -2.0
 PROTECTION_PAUSE_SECONDS = 30 * 60
 PROTECTION_LOG_COOLDOWN_S = 30.0
+PROTECTION_REARM_COOLDOWN_S = 90.0
+PROTECTION_REARM_DD_RELEASE_MARGIN_PCT = 0.50
 SALDO_CSV_LOG_LAST_TS = 0.0
 print(f"[SALDO LIVE] destino: {SALDO_LIVE_SHARED_PATH}")
 print(f"[SALDO HIST] destino: {SALDO_LIVE_HISTORY_SHARED_PATH}")
@@ -1518,6 +1520,8 @@ protection_last_peak_equity = 0.0
 protection_last_drawdown_pct = 0.0
 protection_ema_alerta = 0.0
 protection_ema_calma = 0.0
+protection_rearm_blocked = False
+protection_last_release_ts = 0.0
 PROTECTION_LAST_JSON_WARN_TS = 0.0
 PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
 PROTECTION_DIAG_STATUS = "ok"
@@ -16026,6 +16030,7 @@ def _equity_protection_time_left_s(now_ts: float | None = None) -> int:
 def _equity_protection_is_active(now_ts: float | None = None) -> bool:
     global protection_pause_active
     global protection_pause_reason, protection_pause_started_ts, protection_pause_until_ts
+    global protection_rearm_blocked, protection_last_release_ts
     now_ts = float(now_ts if now_ts is not None else time.time())
     if not bool(protection_pause_active):
         return False
@@ -16035,8 +16040,10 @@ def _equity_protection_is_active(now_ts: float | None = None) -> bool:
     protection_pause_reason = ""
     protection_pause_started_ts = 0.0
     protection_pause_until_ts = 0.0
+    protection_rearm_blocked = True
+    protection_last_release_ts = now_ts
     try:
-        agregar_evento("PROTECCION_SALDO: FINALIZADA | maestro reanudado")
+        agregar_evento("PROTECCION_SALDO: FINALIZADA | maestro reanudado | rearme bloqueado hasta recuperación")
     except Exception:
         pass
     return False
@@ -16048,6 +16055,21 @@ def _equity_protection_should_pause() -> bool:
             float(protection_ema_alerta) < float(protection_ema_calma)
             and float(protection_last_drawdown_pct) <= float(DD_PROTECTION_THRESHOLD_PCT)
         )
+    except Exception:
+        return False
+
+
+def _equity_protection_recovery_ok(structure_trigger: bool = False) -> bool:
+    try:
+        if bool(structure_trigger):
+            return False
+        dd_now = float(protection_last_drawdown_pct)
+        dd_release = float(DD_PROTECTION_THRESHOLD_PCT) + float(PROTECTION_REARM_DD_RELEASE_MARGIN_PCT)
+        ema_alerta = float(protection_ema_alerta)
+        ema_calma = float(protection_ema_calma)
+        dd_recovered = dd_now > dd_release
+        ema_recovered = ema_alerta >= ema_calma
+        return bool(dd_recovered or ema_recovered)
     except Exception:
         return False
 
@@ -16187,6 +16209,7 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_pause_active, protection_pause_reason, protection_pause_started_ts
     global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_trigger_ts, protection_last_peak_equity
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
+    global protection_rearm_blocked, protection_last_release_ts
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
     structure_trigger = False
@@ -16282,7 +16305,19 @@ def _equity_protection_update(now_ts: float | None = None):
         return
 
     active_now = _equity_protection_is_active(now_ts)
-    if (not active_now) and (structure_trigger or _equity_protection_should_pause()):
+    raw_trigger = bool(structure_trigger or _equity_protection_should_pause())
+    if bool(protection_rearm_blocked):
+        recovery_ok = _equity_protection_recovery_ok(structure_trigger=structure_trigger)
+        cooldown_ok = (now_ts - float(protection_last_release_ts or 0.0)) >= float(PROTECTION_REARM_COOLDOWN_S)
+        if recovery_ok and cooldown_ok:
+            protection_rearm_blocked = False
+            try:
+                agregar_evento("PROTECCION_SALDO: REARME HABILITADO | recuperación confirmada")
+            except Exception:
+                pass
+        else:
+            raw_trigger = False
+    if (not active_now) and raw_trigger:
         protection_pause_active = True
         protection_pause_reason = str(structure_reason or "EMA_ALERTA<EMA_CALMA y drawdown umbral")
         protection_pause_started_ts = now_ts
