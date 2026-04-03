@@ -1276,6 +1276,76 @@ class DashboardWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Reset protección", f"No se pudo enviar la solicitud: {e}")
 
+    def _request_protection_test_reset(self):
+        msg = (
+            "Esto limpiará la protección de equity para pruebas, respaldará la serie actual "
+            "y quitará la alarma. ¿Continuar?"
+        )
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            "Confirmar reset de protección",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if ans != QtWidgets.QMessageBox.Yes:
+            return
+        payload = {
+            "action": "reset_protection_test",
+            "ts": float(time.time()),
+            "source": "monitor_saldo_pro",
+            "rotate_series": True,
+            "clear_health_state": True,
+        }
+        try:
+            os.makedirs(os.path.dirname(PROTECTION_RESET_REQUEST_PATH) or ".", exist_ok=True)
+            tmp = f"{PROTECTION_RESET_REQUEST_PATH}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, PROTECTION_RESET_REQUEST_PATH)
+            now_ts = float(time.time())
+            health_payload = {
+                "active": False,
+                "reason": "",
+                "started_ts": 0.0,
+                "until_ts": 0.0,
+                "time_left_s": 0,
+                "drawdown_pct": 0.0,
+                "equity_now": None,
+                "peak_equity": 0.0,
+                "ema_alerta": 0.0,
+                "ema_calma": 0.0,
+                "text_banner": "Deteccion caida-Proteccion de Saldo",
+                "resume_text": "",
+                "updated_ts": now_ts,
+                "diag_status": "ok",
+                "diag_reason": "monitor_reset_requested",
+                "source_column": "",
+                "series_len": 0,
+            }
+            tmp_h = f"{PROTECTION_HEALTH_STATE_PATH}.tmp"
+            with open(tmp_h, "w", encoding="utf-8") as f:
+                json.dump(health_payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp_h, PROTECTION_HEALTH_STATE_PATH)
+            self.lbl_protection_banner.setVisible(False)
+            self.lbl_protection_detail.setVisible(False)
+            self.lbl_protection_banner.setText("")
+            self.lbl_protection_detail.setText("")
+            self.lbl_warn.setText("Reset de protección enviado | esperando confirmación del maestro")
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Solicitud de reset de protección enviada")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Reset protección", f"No se pudo enviar la solicitud: {e}")
+
     def _init_crosshair(self):
         self.cross_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#6688aa88"))
         self.cross_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#6688aa88"))
