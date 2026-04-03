@@ -92,6 +92,13 @@ PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
         os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_HEALTH_STATE_FILE),
     )
 )
+PROTECTION_RESET_REQUEST_FILE = "protection_reset_request.json"
+PROTECTION_RESET_REQUEST_PATH = os.path.abspath(
+    os.getenv(
+        "PROTECTION_RESET_REQUEST_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_REQUEST_FILE),
+    )
+)
 
 MONITOR_VERSION = "v2026.03.31-r1"
 MONITOR_BUILD_ID = "MONITOR_SALDO_PRO_REAL_SERIES_GUARD"
@@ -865,10 +872,11 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.btn_pause = QtWidgets.QPushButton("PAUSA")
         self.btn_reset = QtWidgets.QPushButton("RESET VISTA")
         self.btn_export = QtWidgets.QPushButton("EXPORTAR CSV")
+        self.btn_reset_prot = QtWidgets.QPushButton("RESET PROT TEST")
         self.btn_rule = QtWidgets.QPushButton("REGLA: OFF")
         self.btn_markers = QtWidgets.QPushButton("MARCADORES: ON")
         self.btn_freeze = QtWidgets.QPushButton("FREEZE VIEW: OFF")
-        for b in (self.btn_real, self.btn_demo, self.btn_all, self.btn_pause, self.btn_reset, self.btn_export, self.btn_rule, self.btn_markers, self.btn_freeze):
+        for b in (self.btn_real, self.btn_demo, self.btn_all, self.btn_pause, self.btn_reset, self.btn_export, self.btn_reset_prot, self.btn_rule, self.btn_markers, self.btn_freeze):
             b.setObjectName("MetaBox")
             controls.addWidget(b)
         self.cmb_min = QtWidgets.QComboBox(); self.cmb_min.setObjectName("MetaBox")
@@ -951,6 +959,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.btn_pause.clicked.connect(self._toggle_pause)
         self.btn_reset.clicked.connect(self._reset_view)
         self.btn_export.clicked.connect(self._export_visible_csv)
+        self.btn_reset_prot.clicked.connect(self._request_protection_test_reset)
         self.btn_rule.clicked.connect(self._toggle_rule_mode)
         self.btn_markers.clicked.connect(self._toggle_markers)
         self.btn_freeze.clicked.connect(self._toggle_freeze)
@@ -1123,6 +1132,43 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _toggle_markers(self):
         self.markers_enabled = not self.markers_enabled
         self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
+
+    def _request_protection_test_reset(self):
+        msg = (
+            "Esto limpiará la protección de equity para pruebas, respaldará la serie actual "
+            "y quitará la alarma. ¿Continuar?"
+        )
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            "Confirmar reset de protección",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if ans != QtWidgets.QMessageBox.Yes:
+            return
+        payload = {
+            "action": "reset_protection_test",
+            "ts": float(time.time()),
+            "source": "monitor_saldo_pro",
+            "rotate_series": True,
+            "clear_health_state": True,
+        }
+        try:
+            os.makedirs(os.path.dirname(PROTECTION_RESET_REQUEST_PATH) or ".", exist_ok=True)
+            tmp = f"{PROTECTION_RESET_REQUEST_PATH}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, PROTECTION_RESET_REQUEST_PATH)
+            self.lbl_warn.setText("Solicitud de reset de protección enviada")
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Solicitud de reset de protección enviada")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Reset protección", f"No se pudo enviar la solicitud: {e}")
 
     def _init_crosshair(self):
         self.cross_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#6688aa88"))

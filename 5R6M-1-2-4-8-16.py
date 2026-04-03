@@ -1433,6 +1433,13 @@ PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
         os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_HEALTH_STATE_FILE),
     )
 )
+PROTECTION_RESET_REQUEST_FILE = "protection_reset_request.json"
+PROTECTION_RESET_REQUEST_PATH = os.path.abspath(
+    os.getenv(
+        "PROTECTION_RESET_REQUEST_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_REQUEST_FILE),
+    )
+)
 EMA_ALERTA_SPAN = 8
 EMA_CALMA_SPAN = 26
 DD_PROTECTION_THRESHOLD_PCT = -2.5
@@ -16205,6 +16212,96 @@ def _write_protection_health_state(now_ts: float | None = None):
                 pass
 
 
+def _reset_equity_protection_for_test(now_ts: float | None = None) -> bool:
+    global protection_pause_active, protection_pause_reason, protection_pause_started_ts
+    global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_trigger_ts, protection_last_peak_equity
+    global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
+    global protection_rearm_blocked, protection_last_release_ts
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    try:
+        protection_pause_active = False
+        protection_pause_reason = ""
+        protection_pause_started_ts = 0.0
+        protection_pause_until_ts = 0.0
+        protection_pause_last_trigger_ts = 0.0
+        protection_last_trigger_ts = 0.0
+        protection_last_peak_equity = 0.0
+        protection_last_drawdown_pct = 0.0
+        protection_ema_alerta = 0.0
+        protection_ema_calma = 0.0
+        protection_rearm_blocked = False
+        protection_last_release_ts = 0.0
+        _set_protection_diag(status="ok", reason="manual_test_reset", source_column="", series_len=0)
+        csv_path = SALDO_SERIES_CSV_PATH
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        if os.path.exists(csv_path):
+            ts_tag = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+            backup = os.path.join(
+                os.path.dirname(csv_path) or ".",
+                f"saldo_real_series.pre_test_reset.{ts_tag}.csv.bak",
+            )
+            shutil.copy2(csv_path, backup)
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["ts_utc", "ts_lima", "epoch", "saldo_real", "equity", "status", "source", "event_type"])
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        payload = {
+            "active": False,
+            "reason": "",
+            "started_ts": 0.0,
+            "until_ts": 0.0,
+            "time_left_s": 0,
+            "drawdown_pct": 0.0,
+            "equity_now": float(SALDO_LAST_VALID_VALUE) if SALDO_LAST_VALID_VALUE is not None else None,
+            "peak_equity": 0.0,
+            "ema_alerta": 0.0,
+            "ema_calma": 0.0,
+            "text_banner": "Deteccion caida-Proteccion de Saldo",
+            "resume_text": "",
+            "updated_ts": float(now_ts),
+            "diag_status": str(PROTECTION_DIAG_STATUS or "ok"),
+            "diag_reason": str(PROTECTION_DIAG_REASON or ""),
+            "source_column": str(PROTECTION_SOURCE_COLUMN or ""),
+            "series_len": int(PROTECTION_SERIES_LEN or 0),
+        }
+        _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
+        try:
+            agregar_evento("PROTECCION_SALDO: RESET_TEST_MANUAL | protection limpiada y serie reiniciada")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        try:
+            agregar_evento(f"PROTECCION_SALDO: RESET_TEST_MANUAL_ERROR | {type(e).__name__}")
+        except Exception:
+            pass
+        return False
+
+
+def _consume_protection_reset_request(now_ts: float | None = None) -> bool:
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    req_path = PROTECTION_RESET_REQUEST_PATH
+    if not os.path.exists(req_path):
+        return False
+    req = {}
+    try:
+        with open(req_path, "r", encoding="utf-8", errors="ignore") as f:
+            req = json.load(f) or {}
+    except Exception:
+        req = {}
+    try:
+        os.remove(req_path)
+    except Exception:
+        pass
+    if str(req.get("action", "")).strip() != "reset_protection_test":
+        return False
+    return bool(_reset_equity_protection_for_test(now_ts))
+
+
 def _equity_protection_update(now_ts: float | None = None):
     global protection_pause_active, protection_pause_reason, protection_pause_started_ts
     global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_trigger_ts, protection_last_peak_equity
@@ -16212,6 +16309,8 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_rearm_blocked, protection_last_release_ts
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
+    if _consume_protection_reset_request(now_ts):
+        return
     structure_trigger = False
     structure_reason = ""
     _set_protection_diag(status="ok", reason="", source_column="", series_len=0)
