@@ -229,6 +229,17 @@ def _read_protection_reset_ack() -> Tuple[Optional[dict], Optional[str]]:
         return None, str(e)
 
 
+def _read_protection_reset_ack() -> Tuple[Optional[dict], Optional[str]]:
+    try:
+        if not os.path.exists(PROTECTION_RESET_ACK_PATH):
+            return None, None
+        with open(PROTECTION_RESET_ACK_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None, None
+    except Exception as e:
+        return None, str(e)
+
+
 def _sanitize_series_for_plot(s: pd.DataFrame) -> pd.DataFrame:
     if s is None or s.empty:
         return pd.DataFrame(columns=["timestamp", "equity"])
@@ -1521,6 +1532,117 @@ class DashboardWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Reset protección", f"No se pudo enviar la solicitud: {e}")
 
+    def _reset_prot_log_once(self, key: str, message: str, cooldown_s: float = 20.0):
+        now = float(time.time())
+        prev = float(self._reset_prot_last_log_ts.get(key, 0.0))
+        if (now - prev) >= float(cooldown_s):
+            self._reset_prot_last_log_ts[key] = now
+            try:
+                print(message)
+            except Exception:
+                pass
+
+    def _set_reset_prot_button_state(self):
+        now = float(time.time())
+        if bool(self.reset_prot_pending):
+            self.btn_reset_prot.setEnabled(False)
+            self.btn_reset_prot.setText("RESET ENVIADO...")
+            return
+        if now < float(self.reset_prot_hold_until or 0.0):
+            self.btn_reset_prot.setEnabled(False)
+            self.btn_reset_prot.setText("TEST HOLD ACTIVO")
+            return
+        self.btn_reset_prot.setEnabled(True)
+        self.btn_reset_prot.setText("RESET PROTECCIÓN")
+
+    def _request_protection_test_reset(self):
+        if bool(self.reset_prot_pending):
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Ya hay un reset de protección pendiente.")
+            self._reset_prot_log_once(
+                "REQ_DUP",
+                f"MONITOR_RESET_PROT: request duplicado ignorado id={self.reset_prot_request_id or '--'}",
+            )
+            return
+        msg = (
+            "Esto limpiará la protección de equity para pruebas, respaldará la serie actual "
+            "y quitará la alarma. ¿Continuar?"
+        )
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            "Confirmar reset de protección",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if ans != QtWidgets.QMessageBox.Yes:
+            return
+        now_ts = float(time.time())
+        request_id = f"reset-{int(now_ts * 1000)}"
+        payload = {
+            "action": "reset_protection_test",
+            "request_id": str(request_id),
+            "ts": float(now_ts),
+            "source": "monitor_saldo_pro",
+            "rotate_series": True,
+            "clear_health_state": True,
+        }
+        try:
+            os.makedirs(os.path.dirname(PROTECTION_RESET_REQUEST_PATH) or ".", exist_ok=True)
+            tmp = f"{PROTECTION_RESET_REQUEST_PATH}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, PROTECTION_RESET_REQUEST_PATH)
+            health_payload = {
+                "active": False,
+                "reason": "",
+                "started_ts": 0.0,
+                "until_ts": 0.0,
+                "time_left_s": 0,
+                "drawdown_pct": 0.0,
+                "equity_now": None,
+                "peak_equity": 0.0,
+                "ema_alerta": 0.0,
+                "ema_calma": 0.0,
+                "text_banner": "Deteccion caida-Proteccion de Saldo",
+                "resume_text": "",
+                "updated_ts": now_ts,
+                "diag_status": "ok",
+                "diag_reason": "monitor_reset_requested",
+                "source_column": "",
+                "series_len": 0,
+                "reset_request_id": str(request_id),
+                "reset_diag": "pending_monitor_request",
+            }
+            tmp_h = f"{PROTECTION_HEALTH_STATE_PATH}.tmp"
+            with open(tmp_h, "w", encoding="utf-8") as f:
+                json.dump(health_payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp_h, PROTECTION_HEALTH_STATE_PATH)
+            self.lbl_protection_banner.setVisible(False)
+            self.lbl_protection_detail.setVisible(False)
+            self.lbl_protection_banner.setText("")
+            self.lbl_protection_detail.setText("")
+            self.reset_prot_pending = True
+            self.reset_prot_request_id = str(request_id)
+            self.reset_prot_pending_until = float(now_ts + 180.0)
+            self.reset_prot_hold_until = 0.0
+            self.reset_prot_last_ack_ok = False
+            self._set_reset_prot_button_state()
+            self.lbl_warn.setText("Reset de protección enviado | esperando confirmación del maestro")
+            self._reset_prot_log_once("REQ_SENT", f"MONITOR_RESET_PROT: request enviado id={request_id}", cooldown_s=1.0)
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Solicitud de reset de protección enviada")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Reset protección", f"No se pudo enviar la solicitud: {e}")
+
     def _request_protection_test_reset(self):
         msg = (
             "Esto limpiará la protección de equity para pruebas, respaldará la serie actual "
@@ -1981,6 +2103,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
                     self.lbl_protection_detail.setVisible(False)
                     if str(p.get("diag_reason") or "") == "POST_RESET_WARMUP":
                         snap.warnings.insert(0, "Protección en warmup post-reset")
+                    elif str(p.get("diag_reason") or "") == "INCIDENT_LOCK_ACTIVE":
+                        snap.warnings.insert(0, "Protección bloqueada por incidencia ya atendida")
 
             main_scale = "--"
             main_y0, main_y1 = 0.0, 0.0

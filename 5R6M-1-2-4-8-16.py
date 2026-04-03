@@ -1556,6 +1556,12 @@ protection_post_reset_samples = 0
 protection_post_reset_span_s = 0.0
 protection_epoch_id = 0
 protection_epoch_last_seen_ts = 0.0
+protection_incident_id = ""
+protection_incident_reason = ""
+protection_incident_anchor_peak = 0.0
+protection_incident_anchor_ts = 0.0
+protection_incident_lock_active = False
+protection_incident_last_drawdown = 0.0
 PROTECTION_LAST_JSON_WARN_TS = 0.0
 PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
 PROTECTION_DIAG_STATUS = "ok"
@@ -16108,6 +16114,42 @@ def _equity_protection_recovery_ok(structure_trigger: bool = False) -> bool:
         return False
 
 
+def _build_equity_protection_incident_id(reason: str = "", anchor_peak: float = 0.0, drawdown_pct: float = 0.0) -> str:
+    try:
+        r = str(reason or "").strip() or "unknown"
+        return f"{int(protection_epoch_id or 0)}|{r}|{float(anchor_peak or 0.0):.2f}|{float(drawdown_pct or 0.0):.1f}"
+    except Exception:
+        return ""
+
+
+def _equity_protection_incident_can_clear(structure_trigger: bool = False) -> bool:
+    try:
+        if _equity_protection_recovery_ok(structure_trigger=structure_trigger):
+            return True
+        if float(protection_last_peak_equity or 0.0) >= (float(protection_incident_anchor_peak or 0.0) + 0.25):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _equity_protection_incident_is_new(candidate_id: str, structure_trigger: bool = False, now_ts: float | None = None) -> bool:
+    try:
+        now_ts = float(now_ts if now_ts is not None else time.time())
+        if not bool(protection_incident_lock_active):
+            return True
+        if _equity_protection_incident_can_clear(structure_trigger=structure_trigger):
+            return True
+        if str(candidate_id or "").strip() and str(candidate_id) != str(protection_incident_id or ""):
+            if float(protection_last_peak_equity or 0.0) >= (float(protection_incident_anchor_peak or 0.0) + 0.25):
+                return True
+            if (now_ts - float(protection_incident_anchor_ts or 0.0)) >= 600.0 and bool(structure_trigger):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _equity_structure_break_signal(equity_series: list[float]) -> tuple[bool, str]:
     try:
         if not equity_series or len(equity_series) < 20:
@@ -16236,6 +16278,11 @@ def _write_protection_health_state(now_ts: float | None = None):
         "reset_baseline_equity": float(protection_reset_baseline_equity or 0.0),
         "reset_baseline_peak": float(protection_reset_baseline_peak or 0.0),
         "epoch_id": int(protection_epoch_id or 0),
+        "incident_lock_active": bool(protection_incident_lock_active),
+        "incident_reason": str(protection_incident_reason or ""),
+        "incident_anchor_peak": float(protection_incident_anchor_peak or 0.0),
+        "incident_anchor_ts": float(protection_incident_anchor_ts or 0.0),
+        "incident_id": str(protection_incident_id or ""),
     }
     try:
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
@@ -16306,9 +16353,14 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
     global protection_eval_from_ts, protection_reset_baseline_equity, protection_reset_baseline_peak
     global protection_post_reset_samples, protection_post_reset_span_s
     global protection_epoch_id, protection_epoch_last_seen_ts
+    global protection_incident_id, protection_incident_reason, protection_incident_anchor_peak
+    global protection_incident_anchor_ts, protection_incident_lock_active, protection_incident_last_drawdown
     now_ts = float(now_ts if now_ts is not None else time.time())
     req_id = str(request_id or "").strip()
     try:
+        prev_reason = str(protection_incident_reason or protection_pause_reason or "manual_reset")
+        prev_peak = float(protection_incident_anchor_peak or protection_last_peak_equity or 0.0)
+        prev_dd = float(protection_last_drawdown_pct or protection_incident_last_drawdown or 0.0)
         protection_pause_active = False
         protection_pause_reason = ""
         protection_pause_started_ts = 0.0
@@ -16337,6 +16389,16 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
         protection_reset_baseline_peak = float(protection_reset_baseline_equity or 0.0)
         protection_post_reset_samples = 0
         protection_post_reset_span_s = 0.0
+        protection_incident_reason = str(prev_reason or "manual_reset")
+        protection_incident_anchor_peak = float(prev_peak or 0.0)
+        protection_incident_anchor_ts = now_ts
+        protection_incident_last_drawdown = float(prev_dd or 0.0)
+        protection_incident_id = _build_equity_protection_incident_id(
+            reason=protection_incident_reason,
+            anchor_peak=protection_incident_anchor_peak,
+            drawdown_pct=protection_incident_last_drawdown,
+        )
+        protection_incident_lock_active = True
         _set_protection_diag(status="ok", reason="manual_test_reset", source_column="", series_len=0)
         csv_path = SALDO_SERIES_CSV_PATH
         os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
@@ -16463,6 +16525,8 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_eval_from_ts, protection_reset_baseline_equity, protection_reset_baseline_peak
     global protection_post_reset_samples, protection_post_reset_span_s
     global protection_epoch_id, protection_epoch_last_seen_ts
+    global protection_incident_id, protection_incident_reason, protection_incident_anchor_peak
+    global protection_incident_anchor_ts, protection_incident_lock_active, protection_incident_last_drawdown
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
     try:
@@ -16657,6 +16721,7 @@ def _equity_protection_update(now_ts: float | None = None):
             protection_last_drawdown_pct = float(((now_eq - peak) / peak) * 100.0)
         else:
             protection_last_drawdown_pct = 0.0
+        protection_incident_last_drawdown = float(protection_last_drawdown_pct or 0.0)
     except Exception as e:
         _set_protection_diag(status="error", reason=f"READ_ERROR | {type(e).__name__}", source_column="", series_len=0)
         _protection_diag_event_once(
@@ -16670,6 +16735,23 @@ def _equity_protection_update(now_ts: float | None = None):
 
     active_now = _equity_protection_is_active(now_ts)
     raw_trigger = bool(structure_trigger or _equity_protection_should_pause())
+    incident_reason = str(structure_reason or ("EMA_ALERTA" if _equity_protection_should_pause() else ""))
+    candidate_incident_id = _build_equity_protection_incident_id(
+        reason=incident_reason,
+        anchor_peak=float(protection_last_peak_equity or 0.0),
+        drawdown_pct=float(protection_last_drawdown_pct or 0.0),
+    )
+    if bool(protection_incident_lock_active):
+        if _equity_protection_incident_can_clear(structure_trigger=structure_trigger):
+            protection_incident_lock_active = False
+        elif raw_trigger and (not _equity_protection_incident_is_new(candidate_incident_id, structure_trigger=structure_trigger, now_ts=now_ts)):
+            raw_trigger = False
+            _set_protection_diag(
+                status="ok",
+                reason="INCIDENT_LOCK_ACTIVE",
+                source_column=str(PROTECTION_SOURCE_COLUMN or ""),
+                series_len=int(PROTECTION_SERIES_LEN or 0),
+            )
     if bool(protection_rearm_blocked):
         recovery_ok = _equity_protection_recovery_ok(structure_trigger=structure_trigger)
         cooldown_ok = (now_ts - float(protection_last_release_ts or 0.0)) >= float(PROTECTION_REARM_COOLDOWN_S)
@@ -16688,6 +16770,16 @@ def _equity_protection_update(now_ts: float | None = None):
         protection_pause_until_ts = now_ts + float(PROTECTION_PAUSE_SECONDS)
         protection_pause_last_trigger_ts = now_ts
         protection_last_trigger_ts = now_ts
+        protection_incident_reason = str(incident_reason or protection_pause_reason or "unknown")
+        protection_incident_anchor_peak = float(protection_last_peak_equity or 0.0)
+        protection_incident_anchor_ts = now_ts
+        protection_incident_last_drawdown = float(protection_last_drawdown_pct or 0.0)
+        protection_incident_id = _build_equity_protection_incident_id(
+            reason=protection_incident_reason,
+            anchor_peak=protection_incident_anchor_peak,
+            drawdown_pct=protection_incident_last_drawdown,
+        )
+        protection_incident_lock_active = True
         try:
                 agregar_evento(
                     f"PROTECCION_SALDO: ACTIVADA | reason={str(structure_reason or protection_pause_reason)} | "
