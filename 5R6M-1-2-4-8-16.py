@@ -1440,6 +1440,13 @@ PROTECTION_RESET_REQUEST_PATH = os.path.abspath(
         os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_REQUEST_FILE),
     )
 )
+PROTECTION_RESET_ACK_FILE = "protection_reset_ack.json"
+PROTECTION_RESET_ACK_PATH = os.path.abspath(
+    os.getenv(
+        "PROTECTION_RESET_ACK_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_ACK_FILE),
+    )
+)
 EMA_ALERTA_SPAN = 8
 EMA_CALMA_SPAN = 26
 DD_PROTECTION_THRESHOLD_PCT = -2.5
@@ -1531,6 +1538,8 @@ protection_ema_calma = 0.0
 protection_rearm_blocked = False
 protection_last_release_ts = 0.0
 protection_test_reset_hold_until_ts = 0.0
+protection_last_reset_request_id = ""
+protection_last_reset_request_ts = 0.0
 PROTECTION_LAST_JSON_WARN_TS = 0.0
 PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
 PROTECTION_DIAG_STATUS = "ok"
@@ -16179,6 +16188,7 @@ def _write_protection_health_state(now_ts: float | None = None):
     now_ts = float(now_ts if now_ts is not None else time.time())
     time_left_s = _equity_protection_time_left_s(now_ts) if bool(protection_pause_active) else 0
     resume_hhmm = "--:--"
+    hold_active = bool(now_ts < float(protection_test_reset_hold_until_ts or 0.0))
     try:
         if bool(protection_pause_active) and float(protection_pause_until_ts or 0.0) > 0:
             resume_hhmm = datetime.fromtimestamp(float(protection_pause_until_ts), tz=timezone.utc).astimezone().strftime("%H:%M")
@@ -16196,13 +16206,13 @@ def _write_protection_health_state(now_ts: float | None = None):
         "ema_alerta": float(protection_ema_alerta or 0.0),
         "ema_calma": float(protection_ema_calma or 0.0),
         "text_banner": "Deteccion caida-Proteccion de Saldo",
-        "resume_text": f"Retoma automaticamente sus funciones en: {resume_hhmm}",
+        "resume_text": "" if hold_active else f"Retoma automaticamente sus funciones en: {resume_hhmm}",
         "updated_ts": float(now_ts),
         "diag_status": str(PROTECTION_DIAG_STATUS or "ok"),
         "diag_reason": str(PROTECTION_DIAG_REASON or ""),
         "source_column": str(PROTECTION_SOURCE_COLUMN or ""),
         "series_len": int(PROTECTION_SERIES_LEN or 0),
-        "test_hold_active": bool(now_ts < float(protection_test_reset_hold_until_ts or 0.0)),
+        "test_hold_active": hold_active,
         "test_hold_until_ts": float(protection_test_reset_hold_until_ts or 0.0),
     }
     try:
@@ -16216,13 +16226,39 @@ def _write_protection_health_state(now_ts: float | None = None):
                 pass
 
 
-def _reset_equity_protection_for_test(now_ts: float | None = None) -> bool:
+def _write_protection_reset_ack(
+    request_id: str,
+    accepted: bool,
+    now_ts: float | None = None,
+    hold_until_ts: float = 0.0,
+    status: str = "ok",
+    reason: str = "",
+):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    payload = {
+        "action": "reset_protection_test_ack",
+        "request_id": str(request_id or ""),
+        "accepted": bool(accepted),
+        "ts": float(now_ts),
+        "hold_until_ts": float(hold_until_ts or 0.0),
+        "status": str(status or ("ok" if accepted else "error")),
+    }
+    if str(reason or "").strip():
+        payload["reason"] = str(reason)
+    try:
+        _json_dump_atomic(payload, PROTECTION_RESET_ACK_PATH)
+    except Exception:
+        pass
+
+
+def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: str = "") -> bool:
     global protection_pause_active, protection_pause_reason, protection_pause_started_ts
     global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_trigger_ts, protection_last_peak_equity
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
     global protection_rearm_blocked, protection_last_release_ts
-    global protection_test_reset_hold_until_ts
+    global protection_test_reset_hold_until_ts, protection_last_reset_request_id, protection_last_reset_request_ts
     now_ts = float(now_ts if now_ts is not None else time.time())
+    req_id = str(request_id or "").strip()
     try:
         protection_pause_active = False
         protection_pause_reason = ""
@@ -16237,6 +16273,8 @@ def _reset_equity_protection_for_test(now_ts: float | None = None) -> bool:
         protection_rearm_blocked = False
         protection_last_release_ts = 0.0
         protection_test_reset_hold_until_ts = now_ts + float(PROTECTION_TEST_RESET_HOLD_S)
+        protection_last_reset_request_id = req_id
+        protection_last_reset_request_ts = now_ts
         _set_protection_diag(status="ok", reason="manual_test_reset", source_column="", series_len=0)
         csv_path = SALDO_SERIES_CSV_PATH
         os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
@@ -16246,8 +16284,17 @@ def _reset_equity_protection_for_test(now_ts: float | None = None) -> bool:
                 os.path.dirname(csv_path) or ".",
                 f"saldo_real_series.pre_test_reset.{ts_tag}.csv.bak",
             )
-            shutil.copy2(csv_path, backup)
-        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            try:
+                shutil.copy2(csv_path, backup)
+            except Exception:
+                _write_protection_reset_ack(req_id, False, now_ts=now_ts, status="error", reason="backup_failed")
+                try:
+                    agregar_evento(f"PROTECCION_SALDO: RESET_TEST_MANUAL_ERROR | id={req_id or '--'} | backup_failed")
+                except Exception:
+                    pass
+                return False
+        tmp_csv = f"{csv_path}.tmp"
+        with open(tmp_csv, "w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(["ts_utc", "ts_lima", "epoch", "saldo_real", "equity", "status", "source", "event_type"])
             f.flush()
@@ -16255,6 +16302,7 @@ def _reset_equity_protection_for_test(now_ts: float | None = None) -> bool:
                 os.fsync(f.fileno())
             except Exception:
                 pass
+        os.replace(tmp_csv, csv_path)
         payload = {
             "active": False,
             "reason": "",
@@ -16273,22 +16321,33 @@ def _reset_equity_protection_for_test(now_ts: float | None = None) -> bool:
             "diag_reason": str(PROTECTION_DIAG_REASON or ""),
             "source_column": str(PROTECTION_SOURCE_COLUMN or ""),
             "series_len": int(PROTECTION_SERIES_LEN or 0),
+            "reset_request_id": str(req_id),
+            "reset_diag": "manual_test_reset_ok",
         }
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
+        _write_protection_reset_ack(
+            req_id,
+            True,
+            now_ts=now_ts,
+            hold_until_ts=float(protection_test_reset_hold_until_ts or 0.0),
+            status="ok",
+        )
         try:
-            agregar_evento("PROTECCION_SALDO: RESET_TEST_MANUAL | protection limpiada y serie reiniciada")
+            agregar_evento(f"PROTECCION_SALDO: RESET_TEST_MANUAL | id={req_id or '--'} | backup_ok | serie reiniciada")
         except Exception:
             pass
         return True
     except Exception as e:
+        _write_protection_reset_ack(req_id, False, now_ts=now_ts, status="error", reason=type(e).__name__)
         try:
-            agregar_evento(f"PROTECCION_SALDO: RESET_TEST_MANUAL_ERROR | {type(e).__name__}")
+            agregar_evento(f"PROTECCION_SALDO: RESET_TEST_MANUAL_ERROR | id={req_id or '--'} | {type(e).__name__}")
         except Exception:
             pass
         return False
 
 
 def _consume_protection_reset_request(now_ts: float | None = None) -> bool:
+    global protection_last_reset_request_id, protection_last_reset_request_ts
     now_ts = float(now_ts if now_ts is not None else time.time())
     req_path = PROTECTION_RESET_REQUEST_PATH
     if not os.path.exists(req_path):
@@ -16305,7 +16364,26 @@ def _consume_protection_reset_request(now_ts: float | None = None) -> bool:
         pass
     if str(req.get("action", "")).strip() != "reset_protection_test":
         return False
-    return bool(_reset_equity_protection_for_test(now_ts))
+    req_id = str(req.get("request_id", "")).strip()
+    if req_id and req_id == str(protection_last_reset_request_id or "").strip():
+        _write_protection_reset_ack(
+            req_id,
+            True,
+            now_ts=now_ts,
+            hold_until_ts=float(protection_test_reset_hold_until_ts or 0.0),
+            status="ok",
+        )
+        _protection_diag_event_once(
+            "RESET_TEST_DUPLICATE_IGNORED",
+            f"PROTECCION_SALDO: RESET_TEST_DUPLICATE_IGNORED | id={req_id}",
+            now_ts,
+        )
+        return True
+    ok = bool(_reset_equity_protection_for_test(now_ts, request_id=req_id))
+    if ok and req_id:
+        protection_last_reset_request_id = req_id
+        protection_last_reset_request_ts = now_ts
+    return ok
 
 
 def _equity_protection_update(now_ts: float | None = None):
@@ -16313,7 +16391,7 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_trigger_ts, protection_last_peak_equity
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
     global protection_rearm_blocked, protection_last_release_ts
-    global protection_test_reset_hold_until_ts
+    global protection_test_reset_hold_until_ts, protection_last_reset_request_id
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
     if _consume_protection_reset_request(now_ts):
@@ -16329,7 +16407,7 @@ def _equity_protection_update(now_ts: float | None = None):
         _set_protection_diag(status="ok", reason="manual_test_hold", source_column="", series_len=0)
         _protection_diag_event_once(
             "TEST_HOLD",
-            "PROTECCION_SALDO: TEST_HOLD activo | protección suspendida temporalmente para pruebas",
+            f"PROTECCION_SALDO: TEST_HOLD activo | id={str(protection_last_reset_request_id or '--')} | hold_until={float(protection_test_reset_hold_until_ts or 0.0):.3f}",
             now_ts,
         )
         _write_protection_health_state(now_ts)
