@@ -240,6 +240,17 @@ def _read_protection_reset_ack() -> Tuple[Optional[dict], Optional[str]]:
         return None, str(e)
 
 
+def _read_protection_reset_ack() -> Tuple[Optional[dict], Optional[str]]:
+    try:
+        if not os.path.exists(PROTECTION_RESET_ACK_PATH):
+            return None, None
+        with open(PROTECTION_RESET_ACK_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None, None
+    except Exception as e:
+        return None, str(e)
+
+
 def _sanitize_series_for_plot(s: pd.DataFrame) -> pd.DataFrame:
     if s is None or s.empty:
         return pd.DataFrame(columns=["timestamp", "equity"])
@@ -869,6 +880,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.reset_prot_last_ack_ok = False
         self.reset_prot_epoch_accepted = 0
         self._reset_prot_last_log_ts: Dict[str, float] = {}
+        self._prot_last_signature = ""
+        self._prot_last_seen_count = 0
         self.setWindowTitle(f"Monitor Saldo Real Deriv {MONITOR_VERSION}")
         self.resize(1600, 900)
 
@@ -1034,6 +1047,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
         self._init_crosshair()
         self._attach_manual_range_hooks()
+        self._hydrate_protection_runtime_state()
         self._set_reset_prot_button_state()
 
         if FULLSCREEN_INICIAL:
@@ -1198,6 +1212,144 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _toggle_markers(self):
         self.markers_enabled = not self.markers_enabled
         self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
+
+    def _reset_prot_log_once(self, key: str, message: str, cooldown_s: float = 20.0):
+        now = float(time.time())
+        prev = float(self._reset_prot_last_log_ts.get(key, 0.0))
+        if (now - prev) >= float(cooldown_s):
+            self._reset_prot_last_log_ts[key] = now
+            try:
+                print(message)
+            except Exception:
+                pass
+
+    def _set_reset_prot_button_state(self):
+        now = float(time.time())
+        if bool(self.reset_prot_pending):
+            self.btn_reset_prot.setEnabled(False)
+            self.btn_reset_prot.setText("RESET ENVIADO...")
+            return
+        if now < float(self.reset_prot_hold_until or 0.0):
+            self.btn_reset_prot.setEnabled(False)
+            self.btn_reset_prot.setText("TEST HOLD ACTIVO")
+            return
+        self.btn_reset_prot.setEnabled(True)
+        self.btn_reset_prot.setText("RESET PROTECCIÓN")
+
+    def _hydrate_protection_runtime_state(self):
+        self.reset_prot_pending = False
+        self.reset_prot_request_id = ""
+        self.reset_prot_pending_until = 0.0
+        self.reset_prot_hold_until = 0.0
+        self.reset_prot_last_ack_ok = False
+        self.reset_prot_epoch_accepted = 0
+        try:
+            ack, _ = _read_protection_reset_ack()
+            ack = ack or {}
+            if bool(ack.get("accepted", False)):
+                self.reset_prot_epoch_accepted = int(ack.get("epoch_id") or 0)
+                self.reset_prot_hold_until = float(ack.get("hold_until_ts") or 0.0)
+                self.reset_prot_request_id = str(ack.get("request_id") or "")
+                self.reset_prot_last_ack_ok = True
+        except Exception:
+            pass
+        try:
+            p, _ = _read_protection_health_state()
+            p = p or {}
+            hold_active = bool(p.get("test_hold_active", False))
+            hold_until = float(p.get("test_hold_until_ts") or 0.0)
+            if hold_active and hold_until > time.time():
+                self.reset_prot_hold_until = max(float(self.reset_prot_hold_until or 0.0), hold_until)
+        except Exception:
+            pass
+
+    def _request_protection_test_reset(self):
+        if bool(self.reset_prot_pending):
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Ya hay un reset de protección pendiente.")
+            self._reset_prot_log_once(
+                "REQ_DUP",
+                f"MONITOR_RESET_PROT: request duplicado ignorado id={self.reset_prot_request_id or '--'}",
+            )
+            return
+        msg = (
+            "Esto limpiará la protección de equity para pruebas, respaldará la serie actual "
+            "y quitará la alarma. ¿Continuar?"
+        )
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            "Confirmar reset de protección",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if ans != QtWidgets.QMessageBox.Yes:
+            return
+        now_ts = float(time.time())
+        request_id = f"reset-{int(now_ts * 1000)}"
+        payload = {
+            "action": "reset_protection_test",
+            "request_id": str(request_id),
+            "ts": float(now_ts),
+            "source": "monitor_saldo_pro",
+            "rotate_series": True,
+            "clear_health_state": True,
+        }
+        try:
+            os.makedirs(os.path.dirname(PROTECTION_RESET_REQUEST_PATH) or ".", exist_ok=True)
+            tmp = f"{PROTECTION_RESET_REQUEST_PATH}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, PROTECTION_RESET_REQUEST_PATH)
+            health_payload = {
+                "active": False,
+                "reason": "",
+                "started_ts": 0.0,
+                "until_ts": 0.0,
+                "time_left_s": 0,
+                "drawdown_pct": 0.0,
+                "equity_now": None,
+                "peak_equity": 0.0,
+                "ema_alerta": 0.0,
+                "ema_calma": 0.0,
+                "text_banner": "Deteccion caida-Proteccion de Saldo",
+                "resume_text": "",
+                "updated_ts": now_ts,
+                "diag_status": "ok",
+                "diag_reason": "monitor_reset_requested",
+                "source_column": "",
+                "series_len": 0,
+                "reset_request_id": str(request_id),
+                "reset_diag": "pending_monitor_request",
+            }
+            tmp_h = f"{PROTECTION_HEALTH_STATE_PATH}.tmp"
+            with open(tmp_h, "w", encoding="utf-8") as f:
+                json.dump(health_payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp_h, PROTECTION_HEALTH_STATE_PATH)
+            self.lbl_protection_banner.setVisible(False)
+            self.lbl_protection_detail.setVisible(False)
+            self.lbl_protection_banner.setText("")
+            self.lbl_protection_detail.setText("")
+            self.reset_prot_pending = True
+            self.reset_prot_request_id = str(request_id)
+            self.reset_prot_pending_until = float(now_ts + 180.0)
+            self.reset_prot_hold_until = 0.0
+            self.reset_prot_last_ack_ok = False
+            self._set_reset_prot_button_state()
+            self.lbl_warn.setText("Reset de protección enviado | esperando confirmación del maestro")
+            self._reset_prot_log_once("REQ_SENT", f"MONITOR_RESET_PROT: request enviado id={request_id}", cooldown_s=1.0)
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Solicitud de reset de protección enviada")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Reset protección", f"No se pudo enviar la solicitud: {e}")
 
     def _reset_prot_log_once(self, key: str, message: str, cooldown_s: float = 20.0):
         now = float(time.time())
@@ -2056,13 +2208,25 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
             p_epoch = int(p.get("epoch_id") or 0)
             stale_epoch_state = bool(self.reset_prot_epoch_accepted > 0 and p_epoch < int(self.reset_prot_epoch_accepted))
-            suppress_protection_banner = bool(self.reset_prot_pending) or (now_ts < float(self.reset_prot_hold_until or 0.0))
-            suppress_protection_banner = bool(suppress_protection_banner or stale_epoch_state)
+            diag_reason = str(p.get("diag_reason") or "")
+            suppress_reasons = []
+            if bool(self.reset_prot_pending):
+                suppress_reasons.append("pending")
+            if now_ts < float(self.reset_prot_hold_until or 0.0):
+                suppress_reasons.append("hold")
+            if stale_epoch_state:
+                suppress_reasons.append("stale_epoch")
+            if diag_reason in ("POST_RESET_WARMUP", "INCIDENT_LOCK_ACTIVE", "monitor_reset_requested"):
+                suppress_reasons.append(diag_reason)
+            suppress_protection_banner = bool(len(suppress_reasons) > 0)
             if suppress_protection_banner:
                 self.lbl_protection_banner.setVisible(False)
                 self.lbl_protection_detail.setVisible(False)
                 self.lbl_protection_banner.setText("")
                 self.lbl_protection_detail.setText("")
+                self._prot_last_signature = ""
+                self._prot_last_seen_count = 0
+                self._reset_prot_log_once("BANNER_SUPP", f"MONITOR_PROT: banner_suppressed reason={'+'.join(suppress_reasons)}")
                 if bool(self.reset_prot_pending):
                     snap.warnings.insert(0, "Reset de protección en proceso...")
                 elif stale_epoch_state:
@@ -2073,6 +2237,13 @@ class DashboardWindow(QtWidgets.QMainWindow):
             else:
                 p_active = bool(p.get("active", False))
                 if p_active:
+                    p_sig = f"{int(p.get('epoch_id') or 0)}|{str(p.get('reason') or '')}|{float(p.get('started_ts') or 0.0):.3f}|{float(p.get('until_ts') or 0.0):.3f}|{str(p.get('incident_id') or '')}"
+                    if p_sig == str(self._prot_last_signature):
+                        self._prot_last_seen_count = int(self._prot_last_seen_count) + 1
+                    else:
+                        self._prot_last_signature = str(p_sig)
+                        self._prot_last_seen_count = 1
+                    self._reset_prot_log_once("ACTIVE_SEEN", f"MONITOR_PROT: active_seen sig={p_sig} count={self._prot_last_seen_count}")
                     started_dt = datetime.fromtimestamp(float(p.get("started_ts") or 0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(p.get("started_ts") or 0) > 0 else None
                     until_dt = datetime.fromtimestamp(float(p.get("until_ts") or 0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(p.get("until_ts") or 0) > 0 else None
                     dd_txt = f"{float(p.get('drawdown_pct') or 0.0):.2f}%"
@@ -2095,10 +2266,17 @@ class DashboardWindow(QtWidgets.QMainWindow):
                         f"<div style='font-size:19px;color:#ffdede;margin-top:4px'>{resume_text}</div>"
                         "</div>"
                     )
-                    self.lbl_protection_banner.setVisible(True)
-                    self.lbl_protection_detail.setVisible(True)
-                    snap.warnings.insert(0, f"Evento pausa saldo: inicio={started_dt.strftime('%H:%M:%S') if started_dt else '--'} reanuda={until_dt.strftime('%H:%M:%S') if until_dt else '--'}")
+                    if int(self._prot_last_seen_count) >= 2:
+                        self.lbl_protection_banner.setVisible(True)
+                        self.lbl_protection_detail.setVisible(True)
+                        self._reset_prot_log_once("BANNER_CONF", f"MONITOR_PROT: banner_confirmed sig={p_sig} count={self._prot_last_seen_count}")
+                        snap.warnings.insert(0, f"Evento pausa saldo: inicio={started_dt.strftime('%H:%M:%S') if started_dt else '--'} reanuda={until_dt.strftime('%H:%M:%S') if until_dt else '--'}")
+                    else:
+                        self.lbl_protection_banner.setVisible(False)
+                        self.lbl_protection_detail.setVisible(False)
                 else:
+                    self._prot_last_signature = ""
+                    self._prot_last_seen_count = 0
                     self.lbl_protection_banner.setVisible(False)
                     self.lbl_protection_detail.setVisible(False)
                     if str(p.get("diag_reason") or "") == "POST_RESET_WARMUP":
