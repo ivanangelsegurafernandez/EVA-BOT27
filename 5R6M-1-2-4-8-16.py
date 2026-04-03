@@ -1451,6 +1451,7 @@ PROTECTION_PAUSE_SECONDS = 30 * 60
 PROTECTION_LOG_COOLDOWN_S = 30.0
 PROTECTION_REARM_COOLDOWN_S = 90.0
 PROTECTION_REARM_DD_RELEASE_MARGIN_PCT = 0.50
+PROTECTION_TEST_RESET_HOLD_S = 120.0
 SALDO_CSV_LOG_LAST_TS = 0.0
 print(f"[SALDO LIVE] destino: {SALDO_LIVE_SHARED_PATH}")
 print(f"[SALDO HIST] destino: {SALDO_LIVE_HISTORY_SHARED_PATH}")
@@ -1529,6 +1530,7 @@ protection_ema_alerta = 0.0
 protection_ema_calma = 0.0
 protection_rearm_blocked = False
 protection_last_release_ts = 0.0
+protection_test_reset_hold_until_ts = 0.0
 PROTECTION_LAST_JSON_WARN_TS = 0.0
 PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
 PROTECTION_DIAG_STATUS = "ok"
@@ -16200,6 +16202,8 @@ def _write_protection_health_state(now_ts: float | None = None):
         "diag_reason": str(PROTECTION_DIAG_REASON or ""),
         "source_column": str(PROTECTION_SOURCE_COLUMN or ""),
         "series_len": int(PROTECTION_SERIES_LEN or 0),
+        "test_hold_active": bool(now_ts < float(protection_test_reset_hold_until_ts or 0.0)),
+        "test_hold_until_ts": float(protection_test_reset_hold_until_ts or 0.0),
     }
     try:
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
@@ -16217,6 +16221,7 @@ def _reset_equity_protection_for_test(now_ts: float | None = None) -> bool:
     global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_trigger_ts, protection_last_peak_equity
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
     global protection_rearm_blocked, protection_last_release_ts
+    global protection_test_reset_hold_until_ts
     now_ts = float(now_ts if now_ts is not None else time.time())
     try:
         protection_pause_active = False
@@ -16231,6 +16236,7 @@ def _reset_equity_protection_for_test(now_ts: float | None = None) -> bool:
         protection_ema_calma = 0.0
         protection_rearm_blocked = False
         protection_last_release_ts = 0.0
+        protection_test_reset_hold_until_ts = now_ts + float(PROTECTION_TEST_RESET_HOLD_S)
         _set_protection_diag(status="ok", reason="manual_test_reset", source_column="", series_len=0)
         csv_path = SALDO_SERIES_CSV_PATH
         os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
@@ -16307,9 +16313,26 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_pause_until_ts, protection_pause_last_trigger_ts, protection_last_trigger_ts, protection_last_peak_equity
     global protection_last_drawdown_pct, protection_ema_alerta, protection_ema_calma
     global protection_rearm_blocked, protection_last_release_ts
+    global protection_test_reset_hold_until_ts
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
     if _consume_protection_reset_request(now_ts):
+        return
+    if now_ts < float(protection_test_reset_hold_until_ts or 0.0):
+        protection_pause_active = False
+        protection_pause_reason = ""
+        protection_pause_started_ts = 0.0
+        protection_pause_until_ts = 0.0
+        protection_last_drawdown_pct = 0.0
+        protection_ema_alerta = 0.0
+        protection_ema_calma = 0.0
+        _set_protection_diag(status="ok", reason="manual_test_hold", source_column="", series_len=0)
+        _protection_diag_event_once(
+            "TEST_HOLD",
+            "PROTECCION_SALDO: TEST_HOLD activo | protección suspendida temporalmente para pruebas",
+            now_ts,
+        )
+        _write_protection_health_state(now_ts)
         return
     structure_trigger = False
     structure_reason = ""
