@@ -52,6 +52,10 @@ try:
 except Exception as e:
     print(f"[MONITOR][ERROR] Dependencia faltante o inválida: PySide6 ({e})")
     raise
+try:
+    import winsound
+except Exception:
+    winsound = None
 
 # ------------------------ Config ------------------------
 CUENTA_OBJETIVO = "REAL"  # REAL | DEMO | ALL
@@ -92,6 +96,20 @@ PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
         os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_HEALTH_STATE_FILE),
     )
 )
+PROTECTION_RESET_REQUEST_FILE = "protection_reset_request.json"
+PROTECTION_RESET_REQUEST_PATH = os.path.abspath(
+    os.getenv(
+        "PROTECTION_RESET_REQUEST_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_REQUEST_FILE),
+    )
+)
+PROTECTION_RESET_ACK_FILE = "protection_reset_ack.json"
+PROTECTION_RESET_ACK_PATH = os.path.abspath(
+    os.getenv(
+        "PROTECTION_RESET_ACK_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_ACK_FILE),
+    )
+)
 
 MONITOR_VERSION = "v2026.03.31-r1"
 MONITOR_BUILD_ID = "MONITOR_SALDO_PRO_REAL_SERIES_GUARD"
@@ -106,6 +124,8 @@ CAPITAL_BASE_USD = float(os.getenv("CAPITAL_BASE_USD", "0") or "0")
 MIN_X_SPAN_SECONDS = 20.0
 OBSERVED_TAIL_BYTES = int(os.getenv("OBSERVED_TAIL_BYTES", str(256 * 1024)))
 ESTIMATED_REFRESH_SECONDS = int(os.getenv("ESTIMATED_REFRESH_SECONDS", "30"))
+PROT_HIDE_CONFIRM_REFRESHES = 3
+PROT_ACTIVE_GRACE_S = 20.0
 
 def _main_window_seconds() -> int:
     """
@@ -176,6 +196,17 @@ def _read_protection_health_state() -> Tuple[Optional[dict], Optional[str]]:
         if not os.path.exists(PROTECTION_HEALTH_STATE_PATH):
             return None, None
         with open(PROTECTION_HEALTH_STATE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _read_protection_reset_ack() -> Tuple[Optional[dict], Optional[str]]:
+    try:
+        if not os.path.exists(PROTECTION_RESET_ACK_PATH):
+            return None, None
+        with open(PROTECTION_RESET_ACK_PATH, "r", encoding="utf-8", errors="ignore") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else None, None
     except Exception as e:
@@ -804,6 +835,26 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.rule_enabled = False
         self.markers_enabled = SHOW_LAST_MARKER
         self.rule_points: List[Tuple[float, float]] = []
+        self.reset_prot_pending = False
+        self.reset_prot_request_id = ""
+        self.reset_prot_pending_until = 0.0
+        self.reset_prot_hold_until = 0.0
+        self.reset_prot_last_ack_ok = False
+        self.reset_prot_epoch_accepted = 0
+        self._reset_prot_last_log_ts: Dict[str, float] = {}
+        self._prot_last_signature = ""
+        self._prot_last_seen_count = 0
+        self._prot_banner_sig_confirmed = ""
+        self._prot_banner_visible_active = False
+        self._prot_window_sig = ""
+        self._prot_window_started_ts = 0.0
+        self._prot_window_until_ts = 0.0
+        self._prot_window_last_reason = ""
+        self._prot_window_last_drawdown = 0.0
+        self._prot_window_last_active_ts = 0.0
+        self._prot_window_confirmed = False
+        self._prot_inactive_transient_count = 0
+        self._prot_last_audio_state = "idle"
         self.setWindowTitle(f"Monitor Saldo Real Deriv {MONITOR_VERSION}")
         self.resize(1600, 900)
 
@@ -819,7 +870,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
         top = QtWidgets.QHBoxLayout(); top.setSpacing(10)
         self.lbl_title = QtWidgets.QLabel(f"SALDO REAL DERIV ACTUAL · {MONITOR_VERSION}"); self.lbl_title.setObjectName("Title")
         self.lbl_source = QtWidgets.QLabel("FUENTE: --"); self.lbl_source.setObjectName("BadgeWarn")
-        top.addWidget(self.lbl_title, 1); top.addWidget(self.lbl_source, 0)
+        self.lbl_prot_state = QtWidgets.QLabel("PROTECCIÓN: MONITOREANDO"); self.lbl_prot_state.setObjectName("ProtState")
+        top.addWidget(self.lbl_title, 1); top.addWidget(self.lbl_source, 0); top.addWidget(self.lbl_prot_state, 0)
         hl.addLayout(top)
 
         self.lbl_big = QtWidgets.QLabel("--"); self.lbl_big.setObjectName("Big")
@@ -865,12 +917,16 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.btn_pause = QtWidgets.QPushButton("PAUSA")
         self.btn_reset = QtWidgets.QPushButton("RESET VISTA")
         self.btn_export = QtWidgets.QPushButton("EXPORTAR CSV")
+        self.btn_reset_prot = QtWidgets.QPushButton("RESET PROTECCIÓN")
         self.btn_rule = QtWidgets.QPushButton("REGLA: OFF")
         self.btn_markers = QtWidgets.QPushButton("MARCADORES: ON")
         self.btn_freeze = QtWidgets.QPushButton("FREEZE VIEW: OFF")
         for b in (self.btn_real, self.btn_demo, self.btn_all, self.btn_pause, self.btn_reset, self.btn_export, self.btn_rule, self.btn_markers, self.btn_freeze):
             b.setObjectName("MetaBox")
             controls.addWidget(b)
+        self.btn_reset_prot.setObjectName("ResetProtButton")
+        self.btn_reset_prot.setMinimumWidth(220)
+        controls.addWidget(self.btn_reset_prot)
         self.cmb_min = QtWidgets.QComboBox(); self.cmb_min.setObjectName("MetaBox")
         self.cmb_min.addItems(["15m", "30m", "60m", "90m", "120m"])
         self.cmb_hour = QtWidgets.QComboBox(); self.cmb_hour.setObjectName("MetaBox")
@@ -933,10 +989,15 @@ class DashboardWindow(QtWidgets.QMainWindow):
             #BadgeNeutral { font-size: 13px; color: #d8e7ff; background: #23364f; border: 1px solid #3d5c81; border-radius: 13px; padding: 4px 11px; font-weight: 800; }
             #BadgeWarn { font-size: 13px; color: #3d2a00; background: #ffd67f; border: 1px solid #ffe09e; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #BadgeBad { font-size: 13px; color: #390000; background: #ff9c9c; border: 1px solid #ffb8b8; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
+            #ProtState { font-size: 13px; color: #e7f3ff; background: #17314d; border: 1px solid #2c4f74; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #Warn { font-size: 10px; color: #ffc374; font-weight: 520; }
             #Help { font-size: 8px; color: #6b84a6; }
             #ProtectionBanner { font-size: 40px; color: #fff3f3; background:#8f1223; border:3px solid #ff4b66; border-radius:12px; padding:10px 14px; font-weight:950; }
-            #ProtectionDetail { font-size: 23px; color: #ffdede; background:#431119; border:1px solid #d85b71; border-radius:10px; padding:10px 14px; font-weight:850; }
+            #ProtectionDetail { font-size: 23px; color: #ffeaea; background:#4f131d; border:1px solid #f06f86; border-radius:10px; padding:10px 14px; font-weight:850; }
+            #ResetProtButton { font-size: 14px; font-weight: 900; color: #ffffff; background: #7f1d1d; border: 2px solid #ff8b8b; border-radius: 10px; padding: 8px 14px; }
+            #ResetProtButton:hover { background: #a12626; border: 2px solid #ffb3b3; }
+            #ResetProtButton:pressed { background: #5e1313; border: 2px solid #ff8080; }
+            #ResetProtButton:disabled { color: #f1dede; background: #5a5a5a; border: 2px solid #888888; }
             """
         )
         pg.setConfigOptions(antialias=True, background="#0b0f14", foreground="#d9e2f2")
@@ -951,6 +1012,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.btn_pause.clicked.connect(self._toggle_pause)
         self.btn_reset.clicked.connect(self._reset_view)
         self.btn_export.clicked.connect(self._export_visible_csv)
+        self.btn_reset_prot.clicked.connect(self._request_protection_test_reset)
         self.btn_rule.clicked.connect(self._toggle_rule_mode)
         self.btn_markers.clicked.connect(self._toggle_markers)
         self.btn_freeze.clicked.connect(self._toggle_freeze)
@@ -960,6 +1022,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
         self._init_crosshair()
         self._attach_manual_range_hooks()
+        self._hydrate_protection_runtime_state()
+        self._set_reset_prot_button_state()
 
         if FULLSCREEN_INICIAL:
             self.showMaximized()
@@ -1123,6 +1187,175 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _toggle_markers(self):
         self.markers_enabled = not self.markers_enabled
         self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
+
+    def _reset_prot_log_once(self, key: str, message: str, cooldown_s: float = 20.0):
+        now = float(time.time())
+        prev = float(self._reset_prot_last_log_ts.get(key, 0.0))
+        if (now - prev) >= float(cooldown_s):
+            self._reset_prot_last_log_ts[key] = now
+            try:
+                print(message)
+            except Exception:
+                pass
+
+    def _set_reset_prot_button_state(self):
+        now = float(time.time())
+        if bool(self.reset_prot_pending):
+            self.btn_reset_prot.setEnabled(False)
+            self.btn_reset_prot.setText("RESET ENVIADO...")
+            return
+        if now < float(self.reset_prot_hold_until or 0.0):
+            self.btn_reset_prot.setEnabled(False)
+            self.btn_reset_prot.setText("TEST HOLD ACTIVO")
+            return
+        self.btn_reset_prot.setEnabled(True)
+        self.btn_reset_prot.setText("RESET PROTECCIÓN")
+
+    def _clear_prot_window_latch(self):
+        self._prot_window_sig = ""
+        self._prot_window_started_ts = 0.0
+        self._prot_window_until_ts = 0.0
+        self._prot_window_last_reason = ""
+        self._prot_window_last_drawdown = 0.0
+        self._prot_window_last_active_ts = 0.0
+        self._prot_window_confirmed = False
+        self._prot_inactive_transient_count = 0
+
+    def _set_protection_status_label(self, text: str):
+        self.lbl_prot_state.setText(str(text or "PROTECCIÓN: MONITOREANDO"))
+
+    def _play_protection_transition_sound(self, state: str):
+        target = "active" if str(state or "").strip().lower() == "activated" else "idle"
+        if target == str(self._prot_last_audio_state):
+            return
+        played = False
+        if winsound is not None:
+            try:
+                if target == "active":
+                    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                else:
+                    winsound.MessageBeep(winsound.MB_OK)
+                played = True
+            except Exception:
+                played = False
+        if not played:
+            try:
+                QtWidgets.QApplication.beep()
+            except Exception:
+                pass
+        self._prot_last_audio_state = target
+        self._reset_prot_log_once(
+            f"AUDIO_{target.upper()}",
+            f"MONITOR_PROT: audio {'activated' if target == 'active' else 'cleared'}",
+            cooldown_s=1.0,
+        )
+
+    def _render_protection_window(self, now_ts: float):
+        started_dt = datetime.fromtimestamp(float(self._prot_window_started_ts or 0.0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(self._prot_window_started_ts or 0.0) > 0 else None
+        until_dt = datetime.fromtimestamp(float(self._prot_window_until_ts or 0.0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(self._prot_window_until_ts or 0.0) > 0 else None
+        left_txt = _fmt_countdown(max(0, int(round(float(self._prot_window_until_ts or 0.0) - float(now_ts)))))
+        dd_txt = f"{float(self._prot_window_last_drawdown or 0.0):.2f}%"
+        resume_text = f"Retoma automaticamente sus funciones en: {until_dt.strftime('%H:%M') if until_dt else '--:--'}"
+        self.lbl_protection_banner.setText("🚨 PROTECCIÓN ACTIVADA")
+        self.lbl_protection_detail.setTextFormat(QtCore.Qt.RichText)
+        self.lbl_protection_detail.setText(
+            "<div style='text-align:center'>"
+            "<div style='font-size:30px;font-weight:980;color:#ffd6d6'>MAESTRO EN PAUSA</div>"
+            f"<div style='font-size:21px'><b>Motivo:</b> {str(self._prot_window_last_reason or '--')}</div>"
+            f"<div style='font-size:21px'><b>Drawdown actual:</b> {dd_txt}</div>"
+            f"<div style='font-size:21px'><b>Inicio pausa:</b> {started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'}</div>"
+            f"<div style='font-size:21px'><b>Reanudacion:</b> {until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'}</div>"
+            f"<div style='font-size:40px;font-weight:980;color:#ffb6b6;margin-top:8px'>⏳ {left_txt}</div>"
+            "<div style='font-size:20px;color:#ffdede;margin-top:6px'>Retoma automaticamente sus funciones al finalizar el cronometro.</div>"
+            f"<div style='font-size:19px;color:#ffdede;margin-top:4px'>{resume_text}</div>"
+            "</div>"
+        )
+        self.lbl_protection_banner.setVisible(True)
+        self.lbl_protection_detail.setVisible(True)
+
+    def _hydrate_protection_runtime_state(self):
+        self.reset_prot_pending = False
+        self.reset_prot_request_id = ""
+        self.reset_prot_pending_until = 0.0
+        self.reset_prot_hold_until = 0.0
+        self.reset_prot_last_ack_ok = False
+        self.reset_prot_epoch_accepted = 0
+        try:
+            ack, _ = _read_protection_reset_ack()
+            ack = ack or {}
+            if bool(ack.get("accepted", False)):
+                self.reset_prot_epoch_accepted = int(ack.get("epoch_id") or 0)
+                self.reset_prot_hold_until = float(ack.get("hold_until_ts") or 0.0)
+                self.reset_prot_request_id = str(ack.get("request_id") or "")
+                self.reset_prot_last_ack_ok = True
+        except Exception:
+            pass
+        try:
+            p, _ = _read_protection_health_state()
+            p = p or {}
+            hold_active = bool(p.get("test_hold_active", False))
+            hold_until = float(p.get("test_hold_until_ts") or 0.0)
+            if hold_active and hold_until > time.time():
+                self.reset_prot_hold_until = max(float(self.reset_prot_hold_until or 0.0), hold_until)
+        except Exception:
+            pass
+
+    def _request_protection_test_reset(self):
+        if bool(self.reset_prot_pending):
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Ya hay un reset de protección pendiente.")
+            self._reset_prot_log_once(
+                "REQ_DUP",
+                f"MONITOR_RESET_PROT: request duplicado ignorado id={self.reset_prot_request_id or '--'}",
+            )
+            return
+        msg = (
+            "Esto limpiará la protección de equity para pruebas, respaldará la serie actual "
+            "y quitará la alarma. ¿Continuar?"
+        )
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            "Confirmar reset de protección",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if ans != QtWidgets.QMessageBox.Yes:
+            return
+        now_ts = float(time.time())
+        request_id = f"reset-{int(now_ts * 1000)}"
+        payload = {
+            "action": "reset_protection_test",
+            "request_id": str(request_id),
+            "ts": float(now_ts),
+            "source": "monitor_saldo_pro",
+            "rotate_series": True,
+        }
+        try:
+            os.makedirs(os.path.dirname(PROTECTION_RESET_REQUEST_PATH) or ".", exist_ok=True)
+            tmp = f"{PROTECTION_RESET_REQUEST_PATH}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, PROTECTION_RESET_REQUEST_PATH)
+            self.lbl_protection_banner.setVisible(False)
+            self.lbl_protection_detail.setVisible(False)
+            self.lbl_protection_banner.setText("")
+            self.lbl_protection_detail.setText("")
+            self.reset_prot_pending = True
+            self.reset_prot_request_id = str(request_id)
+            self.reset_prot_pending_until = float(now_ts + 180.0)
+            self.reset_prot_hold_until = 0.0
+            self.reset_prot_last_ack_ok = False
+            self._set_reset_prot_button_state()
+            self.lbl_warn.setText("Reset de protección enviado | esperando confirmación del maestro")
+            self._reset_prot_log_once("REQ_SENT", f"MONITOR_RESET_PROT: request enviado id={request_id}", cooldown_s=1.0)
+            QtWidgets.QMessageBox.information(self, "Reset protección", "Solicitud de reset de protección enviada")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Reset protección", f"No se pudo enviar la solicitud: {e}")
 
     def _init_crosshair(self):
         self.cross_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#6688aa88"))
@@ -1423,38 +1656,177 @@ class DashboardWindow(QtWidgets.QMainWindow):
             protection_state, protection_err = _read_protection_health_state()
             if protection_err:
                 snap.warnings.insert(0, f"protection_health_state.json inválido: {protection_err[:80]}")
-            p_active = bool((protection_state or {}).get("active", False))
-            if p_active:
-                p = protection_state or {}
-                started_dt = datetime.fromtimestamp(float(p.get("started_ts") or 0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(p.get("started_ts") or 0) > 0 else None
-                until_dt = datetime.fromtimestamp(float(p.get("until_ts") or 0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(p.get("until_ts") or 0) > 0 else None
-                dd_txt = f"{float(p.get('drawdown_pct') or 0.0):.2f}%"
-                now_ts = time.time()
-                if float(p.get("until_ts") or 0) > 0:
-                    left_txt = _fmt_countdown(max(0, int(round(float(p.get("until_ts")) - now_ts))))
-                else:
-                    left_txt = _fmt_countdown(int(p.get("time_left_s") or 0))
-                resume_text = str(p.get("resume_text") or f"Retoma automaticamente sus funciones en: {until_dt.strftime('%H:%M') if until_dt else '--:--'}")
-                self.lbl_protection_banner.setText("🚨 PROTECCIÓN ACTIVADA")
-                self.lbl_protection_detail.setTextFormat(QtCore.Qt.RichText)
-                self.lbl_protection_detail.setText(
-                    "<div style='text-align:center'>"
-                    "<div style='font-size:30px;font-weight:980;color:#ffd6d6'>MAESTRO EN PAUSA</div>"
-                    f"<div style='font-size:21px'><b>Motivo:</b> {str(p.get('reason') or '--')}</div>"
-                    f"<div style='font-size:21px'><b>Drawdown actual:</b> {dd_txt}</div>"
-                    f"<div style='font-size:21px'><b>Inicio pausa:</b> {started_dt.strftime('%H:%M:%S %Z') if started_dt else '--'}</div>"
-                    f"<div style='font-size:21px'><b>Reanudacion:</b> {until_dt.strftime('%H:%M:%S %Z') if until_dt else '--'}</div>"
-                    f"<div style='font-size:40px;font-weight:980;color:#ffb6b6;margin-top:8px'>⏳ {left_txt}</div>"
-                    "<div style='font-size:20px;color:#ffdede;margin-top:6px'>Retoma automaticamente sus funciones al finalizar el cronometro.</div>"
-                    f"<div style='font-size:19px;color:#ffdede;margin-top:4px'>{resume_text}</div>"
-                    "</div>"
+            p = protection_state or {}
+            now_ts = float(time.time())
+            hold_from_state = float(p.get("test_hold_until_ts") or 0.0)
+            if bool(p.get("test_hold_active", False)) and hold_from_state > now_ts:
+                self.reset_prot_hold_until = max(float(self.reset_prot_hold_until or 0.0), hold_from_state)
+            ack_obj, ack_err = _read_protection_reset_ack()
+            if ack_err:
+                snap.warnings.insert(0, f"protection_reset_ack.json inválido: {ack_err[:80]}")
+            if bool(self.reset_prot_pending) and now_ts > float(self.reset_prot_pending_until or 0.0):
+                self.reset_prot_pending = False
+                self.reset_prot_last_ack_ok = False
+                self.reset_prot_hold_until = 0.0
+                self.lbl_warn.setText("Reset sin confirmación del maestro")
+                self._reset_prot_log_once(
+                    "ACK_TIMEOUT",
+                    f"MONITOR_RESET_PROT: timeout esperando ACK id={self.reset_prot_request_id or '--'}",
                 )
-                self.lbl_protection_banner.setVisible(True)
-                self.lbl_protection_detail.setVisible(True)
-                snap.warnings.insert(0, f"Evento pausa saldo: inicio={started_dt.strftime('%H:%M:%S') if started_dt else '--'} reanuda={until_dt.strftime('%H:%M:%S') if until_dt else '--'}")
-            else:
+            if bool(self.reset_prot_pending):
+                ack = ack_obj or {}
+                ack_id = str(ack.get("request_id", "")).strip()
+                ack_action = str(ack.get("action", "")).strip()
+                if ack_action == "reset_protection_test_ack" and ack_id and ack_id == str(self.reset_prot_request_id or ""):
+                    if bool(ack.get("accepted", False)):
+                        self.reset_prot_pending = False
+                        self.reset_prot_last_ack_ok = True
+                        self.reset_prot_hold_until = float(ack.get("hold_until_ts") or 0.0)
+                        self.reset_prot_epoch_accepted = int(ack.get("epoch_id") or 0)
+                        self.lbl_warn.setText("Reset confirmado por maestro | TEST HOLD activo")
+                        self._reset_prot_log_once("ACK_OK", f"MONITOR_RESET_PROT: ACK ok id={ack_id}", cooldown_s=1.0)
+                    else:
+                        self.reset_prot_pending = False
+                        self.reset_prot_last_ack_ok = False
+                        self.reset_prot_hold_until = 0.0
+                        reason = str(ack.get("reason") or "error")
+                        self.lbl_warn.setText(f"Reset protección rechazado por maestro: {reason}")
+                        self._reset_prot_log_once(
+                            "ACK_ERR",
+                            f"MONITOR_RESET_PROT: ACK error id={ack_id} | reason={reason}",
+                            cooldown_s=1.0,
+                        )
+            self._set_reset_prot_button_state()
+
+            p_epoch = int(p.get("epoch_id") or 0)
+            stale_epoch_state = bool(self.reset_prot_epoch_accepted > 0 and p_epoch < int(self.reset_prot_epoch_accepted))
+            diag_reason = str(p.get("diag_reason") or "")
+            strong_suppress_reasons = []
+            soft_suppress_reasons = []
+            if bool(self.reset_prot_pending):
+                strong_suppress_reasons.append("pending")
+            if now_ts < float(self.reset_prot_hold_until or 0.0):
+                strong_suppress_reasons.append("hold")
+            if stale_epoch_state:
+                strong_suppress_reasons.append("stale_epoch")
+            if diag_reason in ("POST_RESET_WARMUP", "monitor_reset_requested"):
+                strong_suppress_reasons.append(diag_reason)
+            if diag_reason == "INCIDENT_LOCK_ACTIVE":
+                soft_suppress_reasons.append(diag_reason)
+            suppress_protection_banner = bool(len(strong_suppress_reasons) > 0)
+            if suppress_protection_banner:
                 self.lbl_protection_banner.setVisible(False)
                 self.lbl_protection_detail.setVisible(False)
+                self.lbl_protection_banner.setText("")
+                self.lbl_protection_detail.setText("")
+                self._prot_last_signature = ""
+                self._prot_last_seen_count = 0
+                self._prot_banner_sig_confirmed = ""
+                self._prot_banner_visible_active = False
+                self._clear_prot_window_latch()
+                self._play_protection_transition_sound("cleared")
+                self._set_protection_status_label("PROTECCIÓN: TEST HOLD")
+                self._reset_prot_log_once("BANNER_SUPP", f"MONITOR_PROT: banner_suppressed reason={'+'.join(strong_suppress_reasons)}")
+                self._reset_prot_log_once("WIN_CLEAR_SUPP", "MONITOR_PROT: window_cleared reason=suppressed")
+                if bool(self.reset_prot_pending):
+                    snap.warnings.insert(0, "Reset de protección en proceso...")
+                elif stale_epoch_state:
+                    snap.warnings.insert(0, "Estado de protección obsoleto ignorado")
+                else:
+                    hold_dt = datetime.fromtimestamp(float(self.reset_prot_hold_until), tz=timezone.utc).astimezone(DISPLAY_TZ)
+                    snap.warnings.insert(0, f"Protección suspendida temporalmente para pruebas hasta {hold_dt.strftime('%H:%M:%S')}")
+            else:
+                self._set_protection_status_label("PROTECCIÓN: MONITOREANDO")
+                p_active = bool(p.get("active", False))
+                if p_active:
+                    p_sig = f"{int(p.get('epoch_id') or 0)}|{str(p.get('reason') or '')}|{float(p.get('started_ts') or 0.0):.3f}|{float(p.get('until_ts') or 0.0):.3f}|{str(p.get('incident_id') or '')}"
+                    if p_sig == str(self._prot_last_signature):
+                        self._prot_last_seen_count = int(self._prot_last_seen_count) + 1
+                    else:
+                        self._prot_last_signature = str(p_sig)
+                        self._prot_last_seen_count = 1
+                    self._reset_prot_log_once("ACTIVE_SEEN", f"MONITOR_PROT: active_seen sig={p_sig} count={self._prot_last_seen_count}")
+                    started_ts = float(p.get("started_ts") or 0.0)
+                    until_ts = float(p.get("until_ts") or 0.0)
+                    if started_ts > 0.0 and until_ts > now_ts:
+                        self._prot_window_sig = str(p_sig)
+                        self._prot_window_started_ts = float(started_ts)
+                        self._prot_window_until_ts = float(until_ts)
+                        self._prot_window_last_reason = str(p.get("reason") or "--")
+                        self._prot_window_last_drawdown = float(p.get("drawdown_pct") or 0.0)
+                        self._prot_window_last_active_ts = float(now_ts)
+                        self._prot_window_confirmed = True
+                        self._prot_inactive_transient_count = 0
+                    already_confirmed_same_sig = bool(
+                        self._prot_banner_visible_active
+                        and str(self._prot_banner_sig_confirmed) == str(p_sig)
+                    )
+                    if already_confirmed_same_sig:
+                        self._render_protection_window(now_ts)
+                        self._set_protection_status_label("PROTECCIÓN: ACTIVA")
+                    elif int(self._prot_last_seen_count) >= 2:
+                        self._render_protection_window(now_ts)
+                        self._prot_banner_sig_confirmed = str(p_sig)
+                        self._prot_banner_visible_active = True
+                        self._play_protection_transition_sound("activated")
+                        self._set_protection_status_label("PROTECCIÓN: ACTIVA")
+                        self._reset_prot_log_once(f"BANNER_CONF_{p_sig}", f"MONITOR_PROT: banner_confirmed sig={p_sig} count={self._prot_last_seen_count}", cooldown_s=999999.0)
+                        self._reset_prot_log_once(f"WIN_CONF_{p_sig}", f"MONITOR_PROT: window_confirmed sig={p_sig}", cooldown_s=999999.0)
+                        started_dt = datetime.fromtimestamp(float(self._prot_window_started_ts or 0.0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(self._prot_window_started_ts or 0.0) > 0 else None
+                        until_dt = datetime.fromtimestamp(float(self._prot_window_until_ts or 0.0), tz=timezone.utc).astimezone(DISPLAY_TZ) if float(self._prot_window_until_ts or 0.0) > 0 else None
+                        snap.warnings.insert(0, f"Evento pausa saldo: inicio={started_dt.strftime('%H:%M:%S') if started_dt else '--'} reanuda={until_dt.strftime('%H:%M:%S') if until_dt else '--'}")
+                    else:
+                        self.lbl_protection_banner.setVisible(False)
+                        self.lbl_protection_detail.setVisible(False)
+                        self._prot_banner_visible_active = False
+                else:
+                    keep_soft_latched = bool(
+                        self._prot_window_confirmed
+                        and float(now_ts) < float(self._prot_window_until_ts or 0.0)
+                        and float(now_ts) <= (float(self._prot_window_last_active_ts or 0.0) + float(PROT_ACTIVE_GRACE_S))
+                    )
+                    if keep_soft_latched and len(soft_suppress_reasons) > 0:
+                        self._render_protection_window(now_ts)
+                        self._prot_banner_visible_active = True
+                        self._set_protection_status_label("PROTECCIÓN: ACTIVA")
+                        self._prot_inactive_transient_count = 0
+                        self._reset_prot_log_once("SOFT_SUPP_KEEP", f"MONITOR_PROT: soft_suppress_ignored reason={'+'.join(soft_suppress_reasons)}")
+                        self._reset_prot_log_once("WIN_KEEP", f"MONITOR_PROT: window_kept_alive until={float(self._prot_window_until_ts):.3f}")
+                    elif bool(self._prot_window_confirmed) and float(now_ts) < float(self._prot_window_until_ts or 0.0):
+                        self._prot_inactive_transient_count = int(self._prot_inactive_transient_count) + 1
+                        self._reset_prot_log_once("WIN_TRANSIENT", f"MONITOR_PROT: transient_inactive count={self._prot_inactive_transient_count}")
+                        if int(self._prot_inactive_transient_count) < int(PROT_HIDE_CONFIRM_REFRESHES):
+                            self._render_protection_window(now_ts)
+                            self._prot_banner_visible_active = True
+                            self._set_protection_status_label("PROTECCIÓN: ACTIVA")
+                            self._reset_prot_log_once("WIN_KEEP", f"MONITOR_PROT: window_kept_alive until={float(self._prot_window_until_ts):.3f}")
+                        else:
+                            self._clear_prot_window_latch()
+                            self._prot_last_signature = ""
+                            self._prot_last_seen_count = 0
+                            self._prot_banner_sig_confirmed = ""
+                            self._prot_banner_visible_active = False
+                            self.lbl_protection_banner.setVisible(False)
+                            self.lbl_protection_detail.setVisible(False)
+                            self._play_protection_transition_sound("cleared")
+                            self._set_protection_status_label("PROTECCIÓN: MONITOREANDO")
+                            self._reset_prot_log_once("WIN_CLEAR_INACTIVE", "MONITOR_PROT: window_cleared reason=confirmed_inactive")
+                    else:
+                        if bool(self._prot_window_confirmed) and float(now_ts) >= float(self._prot_window_until_ts or 0.0):
+                            self._reset_prot_log_once("WIN_CLEAR_EXP", "MONITOR_PROT: window_cleared reason=expired")
+                        self._clear_prot_window_latch()
+                        self._prot_last_signature = ""
+                        self._prot_last_seen_count = 0
+                        self._prot_banner_sig_confirmed = ""
+                        self._prot_banner_visible_active = False
+                        self.lbl_protection_banner.setVisible(False)
+                        self.lbl_protection_detail.setVisible(False)
+                        self._play_protection_transition_sound("cleared")
+                        self._set_protection_status_label("PROTECCIÓN: MONITOREANDO")
+                        if str(p.get("diag_reason") or "") == "POST_RESET_WARMUP":
+                            snap.warnings.insert(0, "Protección en warmup post-reset")
+                        elif str(p.get("diag_reason") or "") == "INCIDENT_LOCK_ACTIVE":
+                            snap.warnings.insert(0, "Protección bloqueada por incidencia ya atendida")
 
             main_scale = "--"
             main_y0, main_y1 = 0.0, 0.0
