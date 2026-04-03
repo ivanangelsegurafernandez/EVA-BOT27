@@ -1447,6 +1447,13 @@ PROTECTION_RESET_ACK_PATH = os.path.abspath(
         os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_ACK_FILE),
     )
 )
+PROTECTION_EPOCH_STATE_FILE = "protection_epoch_state.json"
+PROTECTION_EPOCH_STATE_PATH = os.path.abspath(
+    os.getenv(
+        "PROTECTION_EPOCH_STATE_PATH",
+        os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_EPOCH_STATE_FILE),
+    )
+)
 EMA_ALERTA_SPAN = 8
 EMA_CALMA_SPAN = 26
 DD_PROTECTION_THRESHOLD_PCT = -2.5
@@ -1547,6 +1554,8 @@ protection_reset_baseline_equity = 0.0
 protection_reset_baseline_peak = 0.0
 protection_post_reset_samples = 0
 protection_post_reset_span_s = 0.0
+protection_epoch_id = 0
+protection_epoch_last_seen_ts = 0.0
 PROTECTION_LAST_JSON_WARN_TS = 0.0
 PROTECTION_LAST_ACTIVE_LOG_TS = 0.0
 PROTECTION_DIAG_STATUS = "ok"
@@ -16226,6 +16235,7 @@ def _write_protection_health_state(now_ts: float | None = None):
         "post_reset_span_s": float(protection_post_reset_span_s or 0.0),
         "reset_baseline_equity": float(protection_reset_baseline_equity or 0.0),
         "reset_baseline_peak": float(protection_reset_baseline_peak or 0.0),
+        "epoch_id": int(protection_epoch_id or 0),
     }
     try:
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
@@ -16254,11 +16264,35 @@ def _write_protection_reset_ack(
         "ts": float(now_ts),
         "hold_until_ts": float(hold_until_ts or 0.0),
         "status": str(status or ("ok" if accepted else "error")),
+        "epoch_id": int(protection_epoch_id or 0),
     }
     if str(reason or "").strip():
         payload["reason"] = str(reason)
     try:
         _json_dump_atomic(payload, PROTECTION_RESET_ACK_PATH)
+    except Exception:
+        pass
+
+
+def _read_protection_epoch_state() -> dict:
+    try:
+        if not os.path.exists(PROTECTION_EPOCH_STATE_PATH):
+            return {"epoch_id": 0, "updated_ts": 0.0, "reason": ""}
+        with open(PROTECTION_EPOCH_STATE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            obj = json.load(f) or {}
+        return obj if isinstance(obj, dict) else {"epoch_id": 0, "updated_ts": 0.0, "reason": ""}
+    except Exception:
+        return {"epoch_id": 0, "updated_ts": 0.0, "reason": ""}
+
+
+def _write_protection_epoch_state(epoch_id: int, now_ts: float, reason: str):
+    payload = {
+        "epoch_id": int(max(0, int(epoch_id))),
+        "updated_ts": float(now_ts),
+        "reason": str(reason or ""),
+    }
+    try:
+        _json_dump_atomic(payload, PROTECTION_EPOCH_STATE_PATH)
     except Exception:
         pass
 
@@ -16271,6 +16305,7 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
     global protection_test_reset_hold_until_ts, protection_last_reset_request_id, protection_last_reset_request_ts
     global protection_eval_from_ts, protection_reset_baseline_equity, protection_reset_baseline_peak
     global protection_post_reset_samples, protection_post_reset_span_s
+    global protection_epoch_id, protection_epoch_last_seen_ts
     now_ts = float(now_ts if now_ts is not None else time.time())
     req_id = str(request_id or "").strip()
     try:
@@ -16289,6 +16324,11 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
         protection_test_reset_hold_until_ts = now_ts + float(PROTECTION_TEST_RESET_HOLD_S)
         protection_last_reset_request_id = req_id
         protection_last_reset_request_ts = now_ts
+        epoch_obj = _read_protection_epoch_state()
+        current_epoch = int(epoch_obj.get("epoch_id") or 0)
+        protection_epoch_id = int(max(0, current_epoch) + 1)
+        protection_epoch_last_seen_ts = now_ts
+        _write_protection_epoch_state(protection_epoch_id, now_ts, "manual_test_reset")
         protection_eval_from_ts = now_ts
         try:
             protection_reset_baseline_equity = float(SALDO_LAST_VALID_VALUE) if SALDO_LAST_VALID_VALUE is not None else 0.0
@@ -16350,6 +16390,7 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
             "post_reset_span_s": float(protection_post_reset_span_s or 0.0),
             "reset_baseline_equity": float(protection_reset_baseline_equity or 0.0),
             "reset_baseline_peak": float(protection_reset_baseline_peak or 0.0),
+            "epoch_id": int(protection_epoch_id or 0),
         }
         _json_dump_atomic(payload, PROTECTION_HEALTH_STATE_PATH)
         _write_protection_reset_ack(
@@ -16421,8 +16462,29 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_test_reset_hold_until_ts, protection_last_reset_request_id
     global protection_eval_from_ts, protection_reset_baseline_equity, protection_reset_baseline_peak
     global protection_post_reset_samples, protection_post_reset_span_s
+    global protection_epoch_id, protection_epoch_last_seen_ts
     global PROTECTION_LAST_ACTIVE_LOG_TS
     now_ts = float(now_ts if now_ts is not None else time.time())
+    try:
+        epoch_obj = _read_protection_epoch_state()
+        shared_epoch = int(epoch_obj.get("epoch_id") or 0)
+    except Exception:
+        shared_epoch = int(protection_epoch_id or 0)
+    if int(shared_epoch) > int(protection_epoch_id or 0):
+        protection_epoch_id = int(shared_epoch)
+        protection_epoch_last_seen_ts = now_ts
+        protection_pause_active = False
+        protection_pause_reason = ""
+        protection_pause_started_ts = 0.0
+        protection_pause_until_ts = 0.0
+        protection_pause_last_trigger_ts = 0.0
+        protection_last_trigger_ts = 0.0
+        _protection_diag_event_once(
+            "EPOCH_ADOPT",
+            "PROTECCION_SALDO: epoch adoptado | estado viejo invalidado",
+            now_ts,
+        )
+        _write_protection_health_state(now_ts)
     if _consume_protection_reset_request(now_ts):
         return
     if now_ts < float(protection_test_reset_hold_until_ts or 0.0):
