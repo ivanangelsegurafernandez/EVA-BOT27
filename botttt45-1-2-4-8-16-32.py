@@ -1519,11 +1519,16 @@ async def check_token_and_reconnect(ws, current_token):
                         if not estado_bot.get("barra_activa", False):
                             print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
                     else:
-                        ciclo_prev = int(estado_bot.get("ciclo_actual", 1) or 1)
-                        if bool(real_activation_confirmed) and ciclo_prev > 1:
+                        ciclo_prev_raw = estado_bot.get("ciclo_actual")
+                        try:
+                            ciclo_prev = int(ciclo_prev_raw) if str(ciclo_prev_raw).strip() else 0
+                        except Exception:
+                            ciclo_prev = 0
+                        ciclo_prev_ok = 1 <= int(ciclo_prev) <= int(MAX_CICLOS)
+                        if bool(real_activation_confirmed) and bool(ciclo_prev_ok):
                             estado_bot["ciclo_forzado"] = ciclo_prev
                             if not estado_bot.get("barra_activa", False):
-                                print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(ciclo_prev)}.")
+                                print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo local C{int(ciclo_prev)}.")
                         else:
                             estado_bot["ciclo_forzado"] = 1
                             if not estado_bot.get("barra_activa", False):
@@ -1582,11 +1587,16 @@ async def check_token_and_reconnect(ws, current_token):
                 if not estado_bot.get("barra_activa", False):
                     print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
             else:
-                ciclo_prev = int(estado_bot.get("ciclo_actual", 1) or 1)
-                if bool(real_activation_confirmed) and ciclo_prev > 1:
+                ciclo_prev_raw = estado_bot.get("ciclo_actual")
+                try:
+                    ciclo_prev = int(ciclo_prev_raw) if str(ciclo_prev_raw).strip() else 0
+                except Exception:
+                    ciclo_prev = 0
+                ciclo_prev_ok = 1 <= int(ciclo_prev) <= int(MAX_CICLOS)
+                if bool(real_activation_confirmed) and bool(ciclo_prev_ok):
                     estado_bot["ciclo_forzado"] = ciclo_prev
                     if not estado_bot.get("barra_activa", False):
-                        print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(ciclo_prev)}.")
+                        print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo local C{int(ciclo_prev)}.")
                 else:
                     estado_bot["ciclo_forzado"] = 1
                     if not estado_bot.get("barra_activa", False):
