@@ -16740,24 +16740,65 @@ def _equity_protection_update(now_ts: float | None = None):
     _set_protection_diag(status="ok", reason="", source_column=source_col, series_len=eq_len)
 
     now_eq = float(eq.iloc[-1])
-    ema_short = eq.ewm(span=int(EMA_ALERTA_SPAN), adjust=False).mean()
-    ema_long = eq.ewm(span=int(EMA_CALMA_SPAN), adjust=False).mean()
+    ts_series = pd.to_datetime(rs["ts"], errors="coerce", utc=True)
+    ts_epoch = pd.to_numeric(ts_series.astype("int64"), errors="coerce") / 1e9
+    if float(protection_eval_from_ts or 0.0) <= 0.0:
+        protection_eval_from_ts = float(now_ts)
+        protection_reset_baseline_equity = float(now_eq)
+        protection_reset_baseline_peak = float(now_eq)
+        protection_post_reset_samples = 0
+        protection_post_reset_span_s = 0.0
+        protection_pause_active = False
+        protection_pause_reason = ""
+        protection_pause_started_ts = 0.0
+        protection_pause_until_ts = 0.0
+        protection_resume_status = "BOOT_WARMUP"
+        _set_protection_diag(status="ok", reason="BOOT_WARMUP", source_column=source_col, series_len=eq_len)
+        _write_protection_health_state(now_ts)
+        return
+    try:
+        mask_post = ts_epoch >= float(protection_eval_from_ts or 0.0)
+        eq_post = pd.to_numeric(rs.loc[mask_post.fillna(False), "saldo_real"], errors="coerce").dropna()
+        ts_post = pd.to_numeric(ts_epoch.loc[mask_post.fillna(False)], errors="coerce").dropna()
+    except Exception:
+        eq_post = pd.Series(dtype="float64")
+        ts_post = pd.Series(dtype="float64")
+    protection_post_reset_samples = int(len(eq_post))
+    if len(ts_post) >= 2:
+        protection_post_reset_span_s = float(max(0.0, float(ts_post.iloc[-1]) - float(ts_post.iloc[0])))
+    else:
+        protection_post_reset_span_s = 0.0
+    warmup_samples_ok = int(protection_post_reset_samples) >= int(PROTECTION_POST_RESET_MIN_SAMPLES)
+    warmup_time_ok = float(protection_post_reset_span_s or 0.0) >= float(PROTECTION_POST_RESET_MIN_SECONDS)
+    if not (warmup_samples_ok and warmup_time_ok):
+        protection_pause_active = False
+        protection_pause_reason = ""
+        protection_pause_started_ts = 0.0
+        protection_pause_until_ts = 0.0
+        protection_resume_status = "BOOT_WARMUP"
+        _set_protection_diag(status="ok", reason="BOOT_WARMUP", source_column=source_col, series_len=int(protection_post_reset_samples))
+        _write_protection_health_state(now_ts)
+        return
+    eq_eval = eq_post if len(eq_post) >= 2 else eq
+    now_eq = float(eq_eval.iloc[-1])
+    ema_short = eq_eval.ewm(span=int(EMA_ALERTA_SPAN), adjust=False).mean()
+    ema_long = eq_eval.ewm(span=int(EMA_CALMA_SPAN), adjust=False).mean()
     protection_ema_alerta = float(ema_short.iloc[-1])
     protection_ema_calma = float(ema_long.iloc[-1])
 
-    diffs = eq.diff().abs().dropna()
+    diffs = eq_eval.diff().abs().dropna()
     vol_base = float(diffs.tail(120).median()) if not diffs.empty else 0.0
     vol_base = max(0.01, vol_base)
     protection_vol_base = float(vol_base)
 
-    n3 = min(len(eq), 4)
-    ref_3m = float(eq.iloc[-n3]) if n3 > 0 else now_eq
+    n3 = min(len(eq_eval), 4)
+    ref_3m = float(eq_eval.iloc[-n3]) if n3 > 0 else now_eq
     drop_3m = max(0.0, float(ref_3m - now_eq))
     pct_drop_3m = (drop_3m / max(1e-9, ref_3m)) if ref_3m > 0 else 0.0
     protection_drop_3m = float(drop_3m)
     protection_pct_drop_3m = float(pct_drop_3m)
 
-    peak_ref = float(eq.tail(30).max())
+    peak_ref = float(eq_eval.tail(30).max())
     protection_peak_ref = float(peak_ref)
     protection_last_peak_equity = float(peak_ref)
     dd_now = ((peak_ref - now_eq) / peak_ref) if peak_ref > 1e-9 else 0.0
@@ -16766,7 +16807,7 @@ def _equity_protection_update(now_ts: float | None = None):
 
     short_slope = float(ema_short.iloc[-1] - ema_short.iloc[max(0, len(ema_short) - 4)])
     long_slope = float(ema_long.iloc[-1] - ema_long.iloc[max(0, len(ema_long) - 4)])
-    recent = eq.tail(10)
+    recent = eq_eval.tail(10)
     new_lows_repeated = bool(len(recent) >= 6 and float(recent.iloc[-1]) <= float(recent.min()) + 1e-9)
     shock_trigger = bool(
         drop_3m >= max(3.0 * vol_base, 0.018 * max(now_eq, 1.0))
@@ -16843,11 +16884,11 @@ def _equity_protection_update(now_ts: float | None = None):
             protection_resume_status = "WAIT_MIN_TIME"
         else:
             margin_stab = max(0.3 * vol_base, 0.002 * max(now_eq, 1.0))
-            last_10 = eq.tail(10)
+            last_10 = eq_eval.tail(10)
             min_10 = float(last_10.min()) if len(last_10) > 0 else now_eq
-            min_idx = last_10.idxmin() if len(last_10) > 0 else eq.index[-1]
-            min_pos = eq.index.get_loc(min_idx)
-            min_age_samples = max(0, len(eq) - 1 - int(min_pos))
+            min_idx = last_10.idxmin() if len(last_10) > 0 else eq_eval.index[-1]
+            min_pos = eq_eval.index.get_loc(min_idx)
+            min_age_samples = max(0, len(eq_eval) - 1 - int(min_pos))
             min_age_s = float(min_age_samples * 60.0)
             no_new_lows = bool(min_age_s >= float(PROTECTION_NO_NEW_LOWS_STALE_S) and now_eq >= (float(protection_worst_saldo or min_10) + margin_stab))
             ema_prev = float(ema_short.iloc[max(0, len(ema_short) - 4)])

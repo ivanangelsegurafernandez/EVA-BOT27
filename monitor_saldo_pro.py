@@ -111,6 +111,7 @@ CAPITAL_BASE_USD = float(os.getenv("CAPITAL_BASE_USD", "0") or "0")
 MIN_X_SPAN_SECONDS = 20.0
 OBSERVED_TAIL_BYTES = int(os.getenv("OBSERVED_TAIL_BYTES", str(256 * 1024)))
 ESTIMATED_REFRESH_SECONDS = int(os.getenv("ESTIMATED_REFRESH_SECONDS", "30"))
+PROTECTION_STATE_MAX_AGE_S = float(os.getenv("PROTECTION_STATE_MAX_AGE_S", "15.0"))
 
 def _main_window_seconds() -> int:
     """
@@ -1524,12 +1525,22 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
             protection_obj, _ = _read_json_if_exists(PROTECTION_HEALTH_STATE_PATH)
             pstate = protection_obj or {}
-            protection_active = bool(pstate.get("active", False))
+            now_ts = float(time.time())
+            p_active = bool(pstate.get("active", False))
+            p_updated = float(pstate.get("updated_ts") or 0.0)
+            p_until = float(pstate.get("until_ts") or 0.0)
+            p_left = int(pstate.get("time_left_s") or 0)
+            is_fresh = p_updated > 0.0 and (now_ts - p_updated) <= float(PROTECTION_STATE_MAX_AGE_S)
+            is_alive = p_until > now_ts and p_left > 0
+            protection_active = bool(p_active and is_fresh and is_alive)
+            if not protection_active:
+                pstate = dict(pstate)
+                pstate["active"] = False
+                pstate["time_left_s"] = 0
             self._render_protection_panel(pstate)
 
             ack_obj, _ = _read_json_if_exists(PROTECTION_RESET_ACK_PATH)
             ack = ack_obj or {}
-            now_ts = float(time.time())
             if self.manual_resume_pending and self.manual_resume_request_id:
                 ack_action = str(ack.get("action", "")).strip()
                 ack_req = str(ack.get("request_id", "")).strip()
