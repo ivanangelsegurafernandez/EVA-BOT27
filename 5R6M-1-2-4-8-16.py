@@ -2627,6 +2627,11 @@ def path_orden(bot: str) -> str:
 #   asegurar que el bot tenga también su orden_real.json escrita (sin recursión).
 
 _last_real_push_ts = {bot: 0.0 for bot in BOT_NAMES}
+LAST_LXV_SYNC_SNAPSHOT_ID = ""
+LAST_LXV_SYNC_ROUND_CONSUMED = 0
+LAST_LXV_SYNC_SELECTED_BOT = ""
+LAST_LXV_SYNC_TS = 0.0
+LAST_REAL_ORDER_FAIL_REASON = ""
 
 def limpiar_orden_real(bot: str):
     """
@@ -2705,16 +2710,19 @@ def _enforce_single_real_standby(owner: str | None):
     except Exception:
         pass
 
-def _escribir_orden_real_raw(bot: str, ciclo: int):
+def _escribir_orden_real_raw(bot: str, ciclo: int, extra_payload: dict | None = None):
     """
     Escritura RAW de orden_real (sin activar_real_inmediato, sin recursión).
     """
     ciclo = max(1, min(int(ciclo), MAX_CICLOS))
     payload = {"bot": bot, "ciclo": ciclo, "ts": time.time()}
+    if isinstance(extra_payload, dict) and extra_payload:
+        payload.update({k: v for k, v in extra_payload.items() if v is not None})
     try:
         _atomic_write(path_orden(bot), json.dumps(payload, ensure_ascii=False))
         agregar_evento(f"📝 Orden REAL escrita para {bot}: ciclo #{ciclo}")
     except Exception as e:
+        globals()["LAST_REAL_ORDER_FAIL_REASON"] = "order_write_fail"
         try:
             agregar_evento(f"⚠️ Falló escritura de orden para {bot}: {e}")
         except Exception:
@@ -2817,6 +2825,7 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
         if origen in ("orden_real", "manual", "token_sync"):
             with file_lock_required("real.lock", timeout=6.0, stale_after=30.0) as got:
                 if not got:
+                    globals()["LAST_REAL_ORDER_FAIL_REASON"] = "real_lock"
                     agregar_evento("⚠️ Token REAL no escrito: lock real.lock ocupado. Se evita activar sin exclusión.")
                     try:
                         if origen == "orden_real":
@@ -2825,6 +2834,7 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
                         pass
                     return False
                 if _bot_blocked_by_bg_close(bot):
+                    globals()["LAST_REAL_ORDER_FAIL_REASON"] = "bg_close"
                     try:
                         if origen == "orden_real":
                             limpiar_orden_real(bot)
@@ -2833,6 +2843,7 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
                     return False
                 ok_write = bool(write_token_atomic(TOKEN_FILE, f"REAL:{bot}"))
                 if not ok_write:
+                    globals()["LAST_REAL_ORDER_FAIL_REASON"] = "token_write_fail"
                     agregar_evento("⚠️ Token REAL no escrito: fallo de persistencia en token_actual.txt.")
                     try:
                         if origen == "orden_real":
@@ -2921,7 +2932,7 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
     except Exception:
         return False
 
-def escribir_orden_real(bot: str, ciclo: int) -> bool:
+def escribir_orden_real(bot: str, ciclo: int, extra_payload: dict | None = None) -> bool:
     global REAL_OWNER_LOCK
     """
     Wrapper oficial:
@@ -2929,9 +2940,11 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
     - Activa REAL inmediato en HUD + token file
     """
     ciclo = max(1, min(int(ciclo), MAX_CICLOS))
+    globals()["LAST_REAL_ORDER_FAIL_REASON"] = ""
     now = time.time()
     _equity_protection_update(now)
     if _equity_protection_is_active(now):
+        globals()["LAST_REAL_ORDER_FAIL_REASON"] = "proteccion_saldo"
         try:
             agregar_evento(
                 f"PROTECCION_SALDO: orden REAL bloqueada para {bot.upper()} | restante={_fmt_protection_countdown(_equity_protection_time_left_s(now))}"
@@ -2947,6 +2960,7 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
         owner_lock = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else None
 
     if owner_lock in BOT_NAMES and owner_lock != bot:
+        globals()["LAST_REAL_ORDER_FAIL_REASON"] = "owner_real_ocupado"
         try:
             agregar_evento(f"🔒 Orden REAL bloqueada para {bot.upper()}: {owner_lock.upper()} está activo.")
         except Exception:
@@ -2956,6 +2970,7 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
     # Veto operativo temprano: no materializar REAL ni escribir orden fantasma
     # mientras el bot tenga cierre BG pendiente.
     if _bot_blocked_by_bg_close(bot):
+        globals()["LAST_REAL_ORDER_FAIL_REASON"] = "bg_close"
         return False
 
     # ✅ Auditoría Real vs Ficticia: abrir señal SOLO si esta orden está respaldada por IA (prob >= umbral)
@@ -2971,12 +2986,14 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
     except Exception:
         pass
 
-    _escribir_orden_real_raw(bot, ciclo)
+    _escribir_orden_real_raw(bot, ciclo, extra_payload=extra_payload)
     ok_activate = bool(activar_real_inmediato(bot, ciclo, origen="orden_real"))
 
     owner_after_mem = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else None
     owner_after_file = leer_token_archivo_raw()
     ok = bool(ok_activate and owner_after_mem == bot and owner_after_file == bot)
+    if not ok and not str(globals().get("LAST_REAL_ORDER_FAIL_REASON", "") or "").strip():
+        globals()["LAST_REAL_ORDER_FAIL_REASON"] = "token_write_fail"
     if ok:
         _marti_audit_log_orden(ciclo, bot=bot, origen="escribir_orden_real")
         if int(ciclo) == 1:
@@ -15362,12 +15379,13 @@ def _resolver_lxv_sincronizado(candidatos: list, estado: dict, bot_names: list[s
     out = {
         "triggered": False, "selected_bot": None, "selected_case": None, "selected_score": 0.0,
         "reason": "estructura_insuficiente", "valids": 0, "greens": 0, "reds": 0,
-        "red_bots": [], "round": 0, "missing_bots": [], "pending_bots": [],
+        "red_bots": [], "round": 0, "missing_bots": [], "pending_bots": [], "cells": {},
     }
     try:
         bots = [str(b) for b in list(bot_names or []) if str(b).strip()]
         sync = _construir_columna_lxv_sincronizada(estado if isinstance(estado, dict) else {}, bots, max_rounds=120)
         out["round"] = int(sync.get("round", 0) or 0)
+        out["cells"] = dict(sync.get("cells", {}) or {})
         out["missing_bots"] = list(sync.get("missing_bots", []) or [])
         out["pending_bots"] = list(sync.get("pending_bots", []) or [])
         if sync.get("reason") == "pendiente_abierta":
@@ -15425,6 +15443,23 @@ def _resolver_lxv_sincronizado(candidatos: list, estado: dict, bot_names: list[s
         if emitir_log:
             agregar_evento(f"LXV_SYNC_REAL: NO | ronda={int(out.get('round', 0) or 0)} | motivo=estructura_insuficiente")
         return out
+
+
+def _build_lxv_sync_snapshot_id(round_lxv: int, cells: dict, selected_bot: str, selected_case: str) -> tuple[str, str]:
+    cells_norm = {str(k): str(v) for k, v in sorted((cells or {}).items(), key=lambda kv: str(kv[0]))}
+    raw = json.dumps(
+        {
+            "round_lxv": int(round_lxv or 0),
+            "cells": cells_norm,
+            "selected_bot": str(selected_bot or ""),
+            "selected_case": str(selected_case or ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    return f"lxv-{int(round_lxv or 0)}-{digest[:16]}", digest
 
 
 
@@ -18255,12 +18290,119 @@ async def main():
                                     )
                         # ==================== /AUTO-PRESELECCIÓN ====================
 
-                        if candidatos and not MODO_REAL_MANUAL:
+                        lxv_sync_order_payload = None
+                        if lxv_permite_real_nuevo and selected_bot_operativo:
+                            try:
+                                round_lxv = int(logica_unica_real.get("round", 0) or 0)
+                                cells_lxv = dict(logica_unica_real.get("cells", {}) or {})
+                                selected_case = str(logica_unica_real.get("selected_case") or "")
+                                snapshot_id, cells_hash = _build_lxv_sync_snapshot_id(
+                                    round_lxv=round_lxv,
+                                    cells=cells_lxv,
+                                    selected_bot=str(selected_bot_operativo),
+                                    selected_case=selected_case,
+                                )
+                                is_repeated = bool(
+                                    snapshot_id
+                                    and (
+                                        str(snapshot_id) == str(LAST_LXV_SYNC_SNAPSHOT_ID or "")
+                                        or int(round_lxv) <= int(LAST_LXV_SYNC_ROUND_CONSUMED or 0)
+                                    )
+                                )
+                                if is_repeated:
+                                    lxv_permite_real_nuevo = False
+                                    logica_unica_real["triggered"] = False
+                                    logica_unica_real["reason"] = "snapshot_repetido_o_ronda_consumida"
+                                    agregar_evento(
+                                        f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | snapshot={snapshot_id} | motivo=snapshot_repetido_o_ronda_consumida"
+                                    )
+                                elif round_lxv <= 0 or not cells_lxv:
+                                    lxv_permite_real_nuevo = False
+                                    logica_unica_real["triggered"] = False
+                                    logica_unica_real["reason"] = "snapshot_incompleto"
+                                    agregar_evento(
+                                        f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | motivo=snapshot_incompleto"
+                                    )
+                                else:
+                                    lxv_sync_order_payload = {
+                                        "bot": str(selected_bot_operativo),
+                                        "src": "LXV_SYNC",
+                                        "ciclo": int(ciclo_martingala_siguiente()),
+                                        "ts": float(time.time()),
+                                        "ttl": 120,
+                                        "round_lxv": int(round_lxv),
+                                        "snapshot_id": str(snapshot_id),
+                                        "selected_bot": str(selected_bot_operativo),
+                                        "selected_case": str(selected_case or ""),
+                                        "cells_hash": str(cells_hash),
+                                        "cells": cells_lxv,
+                                        "quiet": 1,
+                                    }
+                            except Exception as e_lxv_payload:
+                                lxv_permite_real_nuevo = False
+                                logica_unica_real["triggered"] = False
+                                logica_unica_real["reason"] = "snapshot_build_error"
+                                agregar_evento(f"LXV_SYNC_SKIP: motivo=snapshot_build_error ({type(e_lxv_payload).__name__})")
+
+                        lxv_exec_handled = False
+                        if (not MODO_REAL_MANUAL) and lxv_permite_real_nuevo:
+                            lxv_exec_handled = True
+                            ciclo_auto = ciclo_martingala_siguiente()
+                            if reset_martingala_por_saldo(ciclo_auto, saldo_val):
+                                ciclo_auto = 1
+                            mejor_bot = str(selected_bot_operativo or "").strip()
+                            monto = MARTI_ESCALADO[max(0, min(len(MARTI_ESCALADO)-1, ciclo_auto - 1))]
+                            ciclo_tag = _marti_ciclo_tag(ciclo_auto)
+                            snapshot_tag = str((lxv_sync_order_payload or {}).get("snapshot_id", "") or "--")
+                            round_tag = int((lxv_sync_order_payload or {}).get("round_lxv", 0) or 0)
+                            if not mejor_bot:
+                                agregar_evento("LXV_EXEC_BLOCKED: motivo=selected_bot_invalido")
+                            elif not isinstance(lxv_sync_order_payload, dict):
+                                agregar_evento("LXV_EXEC_BLOCKED: motivo=payload_incompleto")
+                            else:
+                                agregar_evento(
+                                    f"LXV_EXEC_START: bot={mejor_bot} ciclo={ciclo_tag} round={round_tag} snapshot={snapshot_tag}"
+                                )
+                                owner_prev = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
+                                owner_mem = next((b for b in BOT_NAMES if estado_bots.get(b, {}).get('token') == "REAL"), None)
+                                owner_activo = owner_prev if owner_prev in BOT_NAMES else (owner_mem if owner_mem in BOT_NAMES else None)
+                                if owner_activo and owner_activo != mejor_bot:
+                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=owner_real_ocupado")
+                                elif _equity_protection_is_active(time.time()):
+                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=proteccion_saldo")
+                                elif _bot_blocked_by_bg_close(mejor_bot):
+                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=bg_close")
+                                else:
+                                    estado_bots[mejor_bot]["ia_senal_pendiente"] = True
+                                    extra_payload = dict(lxv_sync_order_payload)
+                                    extra_payload["ciclo"] = int(ciclo_auto)
+                                    ok_real = escribir_orden_real(mejor_bot, ciclo_auto, extra_payload=extra_payload)
+                                    if ok_real:
+                                        try:
+                                            globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
+                                            globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
+                                            globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
+                                            globals()["LAST_LXV_SYNC_TS"] = float(time.time())
+                                        except Exception:
+                                            pass
+                                        estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
+                                        estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
+                                        activo_real = mejor_bot
+                                        marti_activa = True
+                                        agregar_evento(
+                                            f"LXV_EXEC_OK: bot={mejor_bot} ciclo={ciclo_tag} round={round_tag} snapshot={snapshot_tag}"
+                                        )
+                                    else:
+                                        estado_bots[mejor_bot]["ia_senal_pendiente"] = False
+                                        motivo_fail = str(globals().get("LAST_REAL_ORDER_FAIL_REASON", "") or "order_write_fail")
+                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
+
+                        if candidatos and not MODO_REAL_MANUAL and (not lxv_exec_handled):
                             agregar_evento(
                                 f"🧭 LOGICA_UNICA_REAL lista: bot={selected_bot_operativo or '--'} p_oper={selected_prob_operativo*100:.1f}% source={real_source_operativo}"
                             )
 
-                        if candidatos and not MODO_REAL_MANUAL:
+                        if candidatos and not MODO_REAL_MANUAL and (not lxv_exec_handled):
                             ciclo_auto = ciclo_martingala_siguiente()
                             if reset_martingala_por_saldo(ciclo_auto, saldo_val):
                                 ciclo_auto = 1
@@ -18307,8 +18449,21 @@ async def main():
                                         estado_bots[mejor_bot]["ia_senal_pendiente"] = True
                                         estado_bots[mejor_bot]["ia_prob_senal"] = prob
 
-                                        ok_real = escribir_orden_real(mejor_bot, ciclo_auto)
+                                        extra_payload = dict(lxv_sync_order_payload or {}) if lxv_permite_real_nuevo else None
+                                        if lxv_permite_real_nuevo and not isinstance(extra_payload, dict):
+                                            agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=orden_lxv_no_trazable")
+                                            ok_real = False
+                                        else:
+                                            ok_real = escribir_orden_real(mejor_bot, ciclo_auto, extra_payload=extra_payload)
                                         if ok_real:
+                                            if isinstance(extra_payload, dict):
+                                                try:
+                                                    globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
+                                                    globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
+                                                    globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
+                                                    globals()["LAST_LXV_SYNC_TS"] = float(time.time())
+                                                except Exception:
+                                                    pass
                                             estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                             estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                             activo_real = mejor_bot

@@ -260,10 +260,10 @@ def leer_orden_real(bot: str):
             src = str(data.get("src", "") or "").upper() or None
             lim = max(30, min(ttl, 300))  # margen seguro
             if time.time() - ts > lim:
-                if _lxv_post_real_confirmed():
-                    if _print_once("lxv-snapshot-exp-post-real", ttl=15):
-                        print(Fore.YELLOW + "LXV_REVALIDATE: snapshot vencido pero REAL ya confirmado -> warning informativo, BUY permitido")
-                    return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
+                if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                    if _print_once("lxv-snapshot-exp-hard-block", ttl=15):
+                        print(Fore.YELLOW + "LXV_SYNC_ABORT: orden_vencida")
+                    return None, None, 0, src
                 if _print_once("lxv-snapshot-exp-pre-real", ttl=15):
                     print(Fore.YELLOW + "LXV_REVALIDATE: snapshot vencido antes de activación REAL -> REAL cancelado")
                 return None, None, 0, None
@@ -272,11 +272,6 @@ def leer_orden_real(bot: str):
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
-        if _lxv_post_real_confirmed():
-            if _print_once("lxv-snapshot-incompat-post-real", ttl=15):
-                print(Fore.YELLOW + "LXV_REVALIDATE: snapshot incompatible pero REAL ya confirmado -> warning informativo, BUY permitido")
-            cyc_ret = int(estado_bot.get("ciclo_forzado") or 1)
-            return max(1, min(cyc_ret, MAX_CICLOS)), None, 0, None
         return None, None, 0, None
 
 
@@ -1434,6 +1429,10 @@ async def check_token_and_reconnect(ws, current_token):
                     if cyc:
                         estado_bot["ciclo_forzado"] = cyc
                         print(Fore.YELLOW + f"Orden maestro detectada: arrancaré en ciclo #{cyc}.")
+                    elif str(src or "").upper() in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                        estado_bot["ciclo_forzado"] = None
+                        if _print_once("lxv-token-real-sin-orden", ttl=10):
+                            print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
                     elif estado_bot.get("ciclo_forzado"):
                         print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
                     else:
@@ -1455,6 +1454,10 @@ async def check_token_and_reconnect(ws, current_token):
                         estado_bot["ciclo_forzado"] = cyc
                         if not estado_bot.get("barra_activa", False):
                             print(Fore.YELLOW + f"Orden maestro detectada: continuaré en ciclo #{cyc}.")
+                    elif str(src or "").upper() in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                        estado_bot["ciclo_forzado"] = None
+                        if not estado_bot.get("barra_activa", False) and _print_once("lxv-token-real-sin-orden-2", ttl=10):
+                            print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
                     elif not estado_bot.get("ciclo_forzado"):
                         estado_bot["ciclo_forzado"] = 1
 
@@ -1507,6 +1510,10 @@ async def check_token_and_reconnect(ws, current_token):
             cyc, _, _quiet, _src = leer_orden_real(NOMBRE_BOT)
             if cyc:
                 estado_bot["ciclo_forzado"] = cyc
+            elif str(_src or "").upper() in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                estado_bot["ciclo_forzado"] = None
+                if not estado_bot.get("barra_activa", False) and _print_once("lxv-token-real-sin-orden-3", ttl=10):
+                    print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
 
         ultimo_token = token_desde_archivo  # mantén vigilante y lazo alineados
         return ws, current_token
