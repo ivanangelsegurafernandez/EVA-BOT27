@@ -1515,8 +1515,19 @@ async def check_token_and_reconnect(ws, current_token):
                         estado_bot["ciclo_forzado"] = cyc
                         if not estado_bot.get("barra_activa", False):
                             print(Fore.YELLOW + f"Orden maestro detectada: continuaré en ciclo #{cyc}.")
-                    elif not estado_bot.get("ciclo_forzado"):
-                        estado_bot["ciclo_forzado"] = 1
+                    elif estado_bot.get("ciclo_forzado"):
+                        if not estado_bot.get("barra_activa", False):
+                            print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
+                    else:
+                        ciclo_prev = int(estado_bot.get("ciclo_actual", 1) or 1)
+                        if bool(real_activation_confirmed) and ciclo_prev > 1:
+                            estado_bot["ciclo_forzado"] = ciclo_prev
+                            if not estado_bot.get("barra_activa", False):
+                                print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(ciclo_prev)}.")
+                        else:
+                            estado_bot["ciclo_forzado"] = 1
+                            if not estado_bot.get("barra_activa", False):
+                                print(Fore.YELLOW + "Fallback excepcional a C1.")
 
                     if quiet or (str(src).upper() == "MANUAL"):
                         asyncio.create_task(_silencio_temporal(90, fuente=src))
@@ -1567,6 +1578,19 @@ async def check_token_and_reconnect(ws, current_token):
             cyc, _, _quiet, _src = leer_orden_real(NOMBRE_BOT)
             if cyc:
                 estado_bot["ciclo_forzado"] = cyc
+            elif estado_bot.get("ciclo_forzado"):
+                if not estado_bot.get("barra_activa", False):
+                    print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
+            else:
+                ciclo_prev = int(estado_bot.get("ciclo_actual", 1) or 1)
+                if bool(real_activation_confirmed) and ciclo_prev > 1:
+                    estado_bot["ciclo_forzado"] = ciclo_prev
+                    if not estado_bot.get("barra_activa", False):
+                        print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(ciclo_prev)}.")
+                else:
+                    estado_bot["ciclo_forzado"] = 1
+                    if not estado_bot.get("barra_activa", False):
+                        print(Fore.YELLOW + "Fallback excepcional a C1.")
 
         ultimo_token = token_desde_archivo  # mantén vigilante y lazo alineados
         return ws, current_token
