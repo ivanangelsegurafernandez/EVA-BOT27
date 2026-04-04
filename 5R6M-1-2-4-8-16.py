@@ -1379,6 +1379,7 @@ def _bot_blocked_by_bg_close(bot: str) -> bool:
         contract_id = str((data or {}).get("contract_id", "") or "")
         try:
             agregar_evento(f"LXV_BG_BLOCK: {bot} waiting_bg_close contract_id={contract_id}")
+            agregar_evento(f"LXV_EXEC_BLOCKED: bot={bot} | motivo=bg_close_pending")
         except Exception:
             pass
     return True
@@ -18075,7 +18076,7 @@ async def main():
                                             f"AUTO_REAL: cancelado por saldo no disponible bot={mejor_bot} ciclo={ciclo_tag}"
                                         )
                                         if lxv_permite_real_nuevo:
-                                            agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=proteccion_activa")
+                                            agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=saldo_no_disponible")
                                     elif float(val) < float(monto):
                                         agregar_evento(
                                             f"AUTO_REAL: cancelado por saldo insuficiente bot={mejor_bot} ciclo={ciclo_tag} saldo={float(val):.2f} monto={float(monto):.2f}"
