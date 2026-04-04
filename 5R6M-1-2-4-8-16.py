@@ -2627,6 +2627,10 @@ def path_orden(bot: str) -> str:
 #   asegurar que el bot tenga también su orden_real.json escrita (sin recursión).
 
 _last_real_push_ts = {bot: 0.0 for bot in BOT_NAMES}
+LAST_LXV_SYNC_SNAPSHOT_ID = ""
+LAST_LXV_SYNC_ROUND_CONSUMED = 0
+LAST_LXV_SYNC_SELECTED_BOT = ""
+LAST_LXV_SYNC_TS = 0.0
 
 def limpiar_orden_real(bot: str):
     """
@@ -2705,12 +2709,14 @@ def _enforce_single_real_standby(owner: str | None):
     except Exception:
         pass
 
-def _escribir_orden_real_raw(bot: str, ciclo: int):
+def _escribir_orden_real_raw(bot: str, ciclo: int, extra_payload: dict | None = None):
     """
     Escritura RAW de orden_real (sin activar_real_inmediato, sin recursión).
     """
     ciclo = max(1, min(int(ciclo), MAX_CICLOS))
     payload = {"bot": bot, "ciclo": ciclo, "ts": time.time()}
+    if isinstance(extra_payload, dict) and extra_payload:
+        payload.update({k: v for k, v in extra_payload.items() if v is not None})
     try:
         _atomic_write(path_orden(bot), json.dumps(payload, ensure_ascii=False))
         agregar_evento(f"📝 Orden REAL escrita para {bot}: ciclo #{ciclo}")
@@ -2921,7 +2927,7 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
     except Exception:
         return False
 
-def escribir_orden_real(bot: str, ciclo: int) -> bool:
+def escribir_orden_real(bot: str, ciclo: int, extra_payload: dict | None = None) -> bool:
     global REAL_OWNER_LOCK
     """
     Wrapper oficial:
@@ -2971,7 +2977,7 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
     except Exception:
         pass
 
-    _escribir_orden_real_raw(bot, ciclo)
+    _escribir_orden_real_raw(bot, ciclo, extra_payload=extra_payload)
     ok_activate = bool(activar_real_inmediato(bot, ciclo, origen="orden_real"))
 
     owner_after_mem = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else None
@@ -15362,12 +15368,13 @@ def _resolver_lxv_sincronizado(candidatos: list, estado: dict, bot_names: list[s
     out = {
         "triggered": False, "selected_bot": None, "selected_case": None, "selected_score": 0.0,
         "reason": "estructura_insuficiente", "valids": 0, "greens": 0, "reds": 0,
-        "red_bots": [], "round": 0, "missing_bots": [], "pending_bots": [],
+        "red_bots": [], "round": 0, "missing_bots": [], "pending_bots": [], "cells": {},
     }
     try:
         bots = [str(b) for b in list(bot_names or []) if str(b).strip()]
         sync = _construir_columna_lxv_sincronizada(estado if isinstance(estado, dict) else {}, bots, max_rounds=120)
         out["round"] = int(sync.get("round", 0) or 0)
+        out["cells"] = dict(sync.get("cells", {}) or {})
         out["missing_bots"] = list(sync.get("missing_bots", []) or [])
         out["pending_bots"] = list(sync.get("pending_bots", []) or [])
         if sync.get("reason") == "pendiente_abierta":
@@ -15425,6 +15432,23 @@ def _resolver_lxv_sincronizado(candidatos: list, estado: dict, bot_names: list[s
         if emitir_log:
             agregar_evento(f"LXV_SYNC_REAL: NO | ronda={int(out.get('round', 0) or 0)} | motivo=estructura_insuficiente")
         return out
+
+
+def _build_lxv_sync_snapshot_id(round_lxv: int, cells: dict, selected_bot: str, selected_case: str) -> tuple[str, str]:
+    cells_norm = {str(k): str(v) for k, v in sorted((cells or {}).items(), key=lambda kv: str(kv[0]))}
+    raw = json.dumps(
+        {
+            "round_lxv": int(round_lxv or 0),
+            "cells": cells_norm,
+            "selected_bot": str(selected_bot or ""),
+            "selected_case": str(selected_case or ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+    return f"lxv-{int(round_lxv or 0)}-{digest[:16]}", digest
 
 
 
@@ -18255,6 +18279,60 @@ async def main():
                                     )
                         # ==================== /AUTO-PRESELECCIÓN ====================
 
+                        lxv_sync_order_payload = None
+                        if lxv_permite_real_nuevo and selected_bot_operativo:
+                            try:
+                                round_lxv = int(logica_unica_real.get("round", 0) or 0)
+                                cells_lxv = dict(logica_unica_real.get("cells", {}) or {})
+                                selected_case = str(logica_unica_real.get("selected_case") or "")
+                                snapshot_id, cells_hash = _build_lxv_sync_snapshot_id(
+                                    round_lxv=round_lxv,
+                                    cells=cells_lxv,
+                                    selected_bot=str(selected_bot_operativo),
+                                    selected_case=selected_case,
+                                )
+                                is_repeated = bool(
+                                    snapshot_id
+                                    and (
+                                        str(snapshot_id) == str(LAST_LXV_SYNC_SNAPSHOT_ID or "")
+                                        or int(round_lxv) <= int(LAST_LXV_SYNC_ROUND_CONSUMED or 0)
+                                    )
+                                )
+                                if is_repeated:
+                                    lxv_permite_real_nuevo = False
+                                    logica_unica_real["triggered"] = False
+                                    logica_unica_real["reason"] = "snapshot_repetido_o_ronda_consumida"
+                                    agregar_evento(
+                                        f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | snapshot={snapshot_id} | motivo=snapshot_repetido_o_ronda_consumida"
+                                    )
+                                elif round_lxv <= 0 or not cells_lxv:
+                                    lxv_permite_real_nuevo = False
+                                    logica_unica_real["triggered"] = False
+                                    logica_unica_real["reason"] = "snapshot_incompleto"
+                                    agregar_evento(
+                                        f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | motivo=snapshot_incompleto"
+                                    )
+                                else:
+                                    lxv_sync_order_payload = {
+                                        "bot": str(selected_bot_operativo),
+                                        "src": "LXV_SYNC",
+                                        "ciclo": int(ciclo_martingala_siguiente()),
+                                        "ts": float(time.time()),
+                                        "ttl": 120,
+                                        "round_lxv": int(round_lxv),
+                                        "snapshot_id": str(snapshot_id),
+                                        "selected_bot": str(selected_bot_operativo),
+                                        "selected_case": str(selected_case or ""),
+                                        "cells_hash": str(cells_hash),
+                                        "cells": cells_lxv,
+                                        "quiet": 1,
+                                    }
+                            except Exception as e_lxv_payload:
+                                lxv_permite_real_nuevo = False
+                                logica_unica_real["triggered"] = False
+                                logica_unica_real["reason"] = "snapshot_build_error"
+                                agregar_evento(f"LXV_SYNC_SKIP: motivo=snapshot_build_error ({type(e_lxv_payload).__name__})")
+
                         if candidatos and not MODO_REAL_MANUAL:
                             agregar_evento(
                                 f"🧭 LOGICA_UNICA_REAL lista: bot={selected_bot_operativo or '--'} p_oper={selected_prob_operativo*100:.1f}% source={real_source_operativo}"
@@ -18307,8 +18385,21 @@ async def main():
                                         estado_bots[mejor_bot]["ia_senal_pendiente"] = True
                                         estado_bots[mejor_bot]["ia_prob_senal"] = prob
 
-                                        ok_real = escribir_orden_real(mejor_bot, ciclo_auto)
+                                        extra_payload = dict(lxv_sync_order_payload or {}) if lxv_permite_real_nuevo else None
+                                        if lxv_permite_real_nuevo and not isinstance(extra_payload, dict):
+                                            agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=orden_lxv_no_trazable")
+                                            ok_real = False
+                                        else:
+                                            ok_real = escribir_orden_real(mejor_bot, ciclo_auto, extra_payload=extra_payload)
                                         if ok_real:
+                                            if isinstance(extra_payload, dict):
+                                                try:
+                                                    globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
+                                                    globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
+                                                    globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
+                                                    globals()["LAST_LXV_SYNC_TS"] = float(time.time())
+                                                except Exception:
+                                                    pass
                                             estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                             estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                             activo_real = mejor_bot

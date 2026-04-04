@@ -163,6 +163,8 @@ estado_bot = {
     "barra_activa": False,
     "score_senal": None,
     "ciclo_actual": 1,
+    "last_lxv_snapshot_consumed": "",
+    "last_lxv_round_consumed": 0,
 }  # Added modo_manual and barra_activa
 racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de PÉRDIDAS
 
@@ -325,50 +327,53 @@ def _lxv_sync_tiene_pendiente_abierta(archivo_csv: str) -> bool:
 def _lxb_sync_tiene_pendiente_abierta(archivo_csv: str) -> bool:
     return _lxv_sync_tiene_pendiente_abierta(archivo_csv)
 
+def leer_orden_real_full(bot: str):
+    """Lee JSON completo de orden_real de forma tolerante/atómica."""
+    ruta = os.path.join(ORDEN_DIR, f"{bot}.json")
+    tmp = ruta + ".tmp"
+    try:
+        if not os.path.exists(ruta):
+            return None
+        with open(ruta, "r", encoding="utf-8") as f, open(tmp, "w", encoding="utf-8") as t:
+            t.write(f.read())
+        with open(tmp, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        os.remove(tmp)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return None
+
 def leer_orden_real(bot: str):
     """
     Devuelve (ciclo, ts, quiet, src) si existe orden fresca, o (None, None, 0, None) si no.
     """
-    ruta = os.path.join(ORDEN_DIR, f"{bot}.json")
-    tmp = ruta + ".tmp"
-    try:
-        if os.path.exists(ruta):
-            with open(ruta, "r", encoding="utf-8") as f, open(tmp, "w", encoding="utf-8") as t:
-                t.write(f.read())
-            with open(tmp, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            os.remove(tmp)
-            if data.get("bot") != bot:
-                return None, None, 0, None
-            cyc = int(data.get("ciclo", 1))
-            ts = float(data.get("ts", 0.0))
-            ttl = int(data.get("ttl", 120))
-            quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
-            src = str(data.get("src", "") or "").upper() or None
-            if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"} and _lxv_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
-                if _print_once("lxv-sync-skip-pendiente", ttl=10):
-                    print(Fore.YELLOW + "LXV_SYNC_SKIP: ronda=0 | motivo=pendiente_abierta")
-                return None, None, 0, src
-            lim = max(30, min(ttl, 300))  # margen seguro
-            if time.time() - ts > lim:
-                if _lxv_post_real_confirmed():
-                    if _print_once("lxv-snapshot-exp-post-real", ttl=15):
-                        print(Fore.YELLOW + "LXV_REVALIDATE: snapshot vencido pero REAL ya confirmado -> warning informativo, BUY permitido")
-                    return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
-                if _print_once("lxv-snapshot-exp-pre-real", ttl=15):
-                    print(Fore.YELLOW + "LXV_REVALIDATE: snapshot vencido antes de activación REAL -> REAL cancelado")
-                return None, None, 0, None
-            return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
+    data = leer_orden_real_full(bot)
+    if not isinstance(data, dict):
         return None, None, 0, None
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        if _lxv_post_real_confirmed():
-            if _print_once("lxv-snapshot-incompat-post-real", ttl=15):
-                print(Fore.YELLOW + "LXV_REVALIDATE: snapshot incompatible pero REAL ya confirmado -> warning informativo, BUY permitido")
-            cyc_ret = int(estado_bot.get("ciclo_forzado") or 1)
-            return max(1, min(cyc_ret, MAX_CICLOS)), None, 0, None
+    if data.get("bot") != bot:
         return None, None, 0, None
+    cyc = int(data.get("ciclo", 1))
+    ts = float(data.get("ts", 0.0))
+    ttl = int(data.get("ttl", 120))
+    quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
+    src = str(data.get("src", "") or "").upper() or None
+    if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+        if _lxv_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
+            if _print_once("lxv-sync-skip-pendiente", ttl=10):
+                print(Fore.YELLOW + "LXV_SYNC_SKIP: ronda=0 | motivo=pendiente_abierta")
+            return None, None, 0, src
+    lim = max(30, min(ttl, 300))  # margen seguro
+    if time.time() - ts > lim:
+        if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+            if _print_once("lxv-snapshot-exp-hard-block", ttl=15):
+                print(Fore.YELLOW + "LXV_SYNC_ABORT: orden_vencida")
+            return None, None, 0, src
+        return None, None, 0, None
+    return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
 
 def _es_token_real(token_val) -> bool:
     return str(token_val or "").strip() == str(TOKEN_REAL).strip()
@@ -399,6 +404,48 @@ def _retener_ciclo_para_reinicio(ciclo_actual: int):
         return int(ciclo_forzado), "retenido"
     estado_bot["ciclo_forzado"] = int(ciclo_actual or 1)
     return int(estado_bot["ciclo_forzado"]), "actual"
+
+def validar_permiso_buy_lxv_sync(bot: str, ciclo: int, token_actual, owner_ok: bool = True):
+    data = leer_orden_real_full(bot)
+    if _es_token_real(token_actual) and not isinstance(data, dict):
+        return False, "token_real_sin_orden_valida", None
+    src = str((data or {}).get("src", "") or "").upper()
+    if src not in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+        return True, "not_lxv_sync", None
+    if not _es_token_real(token_actual):
+        return False, "token_no_real", data
+    if not bool(owner_ok and _is_real_owner_valid_now()):
+        return False, "owner_lock_invalido", data
+    if not isinstance(data, dict):
+        return False, "orden_ausente", None
+    if str(data.get("bot", "")).strip() != str(bot):
+        return False, "bot_mismatch", data
+    if str(data.get("selected_bot", "")).strip() != str(bot):
+        return False, "selected_bot_mismatch", data
+    round_lxv = int(data.get("round_lxv", 0) or 0)
+    snapshot_id = str(data.get("snapshot_id", "") or "").strip()
+    if round_lxv <= 0:
+        return False, "round_lxv_missing", data
+    if not snapshot_id:
+        return False, "snapshot_id_missing", data
+    if int(ciclo or 0) != int(data.get("ciclo", 0) or 0):
+        return False, "ciclo_mismatch", data
+    ts = float(data.get("ts", 0.0) or 0.0)
+    ttl = int(data.get("ttl", 120) or 120)
+    lim = max(30, min(ttl, 300))
+    if (time.time() - ts) > lim:
+        return False, "ttl_vencido", data
+    if str(estado_bot.get("last_lxv_snapshot_consumed", "") or "") == snapshot_id:
+        return False, "snapshot_ya_consumido", data
+    if int(round_lxv) <= int(estado_bot.get("last_lxv_round_consumed", 0) or 0):
+        return False, "ronda_ya_consumida", data
+    if _lxv_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
+        return False, "pendiente_abierta_local", data
+    if _has_bg_close_pending():
+        return False, "bg_close_pending", data
+    if commit_guard_active():
+        return False, "commit_guard_activo", data
+    return True, "ok", data
 
 # <<< PATCH 1
 
@@ -1524,6 +1571,10 @@ async def check_token_and_reconnect(ws, current_token):
                     if cyc:
                         estado_bot["ciclo_forzado"] = cyc
                         print(Fore.YELLOW + f"Orden maestro detectada: arrancaré en ciclo #{cyc}.")
+                    elif str(src or "").upper() in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                        estado_bot["ciclo_forzado"] = None
+                        if _print_once("lxv-token-real-sin-orden", ttl=10):
+                            print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
                     elif estado_bot.get("ciclo_forzado"):
                         print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
                     else:
@@ -1545,6 +1596,10 @@ async def check_token_and_reconnect(ws, current_token):
                         estado_bot["ciclo_forzado"] = cyc
                         if not estado_bot.get("barra_activa", False):
                             print(Fore.YELLOW + f"Orden maestro detectada: continuaré en ciclo #{cyc}.")
+                    elif str(src or "").upper() in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                        estado_bot["ciclo_forzado"] = None
+                        if not estado_bot.get("barra_activa", False) and _print_once("lxv-token-real-sin-orden-2", ttl=10):
+                            print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
                     elif estado_bot.get("ciclo_forzado"):
                         if not estado_bot.get("barra_activa", False):
                             print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
@@ -1613,6 +1668,10 @@ async def check_token_and_reconnect(ws, current_token):
             cyc, _, _quiet, _src = leer_orden_real(NOMBRE_BOT)
             if cyc:
                 estado_bot["ciclo_forzado"] = cyc
+            elif str(_src or "").upper() in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                estado_bot["ciclo_forzado"] = None
+                if not estado_bot.get("barra_activa", False) and _print_once("lxv-token-real-sin-orden-3", ttl=10):
+                    print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
             elif estado_bot.get("ciclo_forzado"):
                 if not estado_bot.get("barra_activa", False):
                     print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
@@ -2685,6 +2744,20 @@ async def ejecutar_panel():
 
 # ==================== /VENTANA DE DECISIÓN IA ====================
 
+                data_lxv_buy = None
+                if modo_real:
+                    ok_lxv_buy, motivo_lxv_buy, data_lxv_buy = validar_permiso_buy_lxv_sync(
+                        NOMBRE_BOT,
+                        ciclo=int(ciclo),
+                        token_actual=current_token,
+                        owner_ok=True,
+                    )
+                    if not ok_lxv_buy:
+                        if _print_once(f"lxv-buy-abort-{motivo_lxv_buy}", ttl=10):
+                            print(Fore.YELLOW + f"LXV_SYNC_ABORT: {motivo_lxv_buy}")
+                        await asyncio.sleep(0.8)
+                        continue
+
                 try:
                     data_buy = await api_call(ws, {
                         "buy": 1,
@@ -2715,6 +2788,12 @@ async def ejecutar_panel():
                     raise
 
                 contract_id = data_buy["buy"]["contract_id"]
+                if isinstance(data_lxv_buy, dict):
+                    try:
+                        estado_bot["last_lxv_snapshot_consumed"] = str(data_lxv_buy.get("snapshot_id", "") or "")
+                        estado_bot["last_lxv_round_consumed"] = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                    except Exception:
+                        pass
 
                 # ✅ Ciclo en progreso significa: YA hay contrato abierto
                 estado_bot["ciclo_en_progreso"] = True
