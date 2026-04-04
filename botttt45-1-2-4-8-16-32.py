@@ -299,6 +299,28 @@ def _lxv_post_real_confirmed() -> bool:
     except Exception:
         return False
 
+
+def _lxb_sync_tiene_pendiente_abierta(archivo_csv: str) -> bool:
+    """True si hay operación PRE_TRADE/PENDIENTE sin cierre definitivo asociado."""
+    try:
+        rec = {}
+        with open(archivo_csv, "r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                key = _trade_key_from_row(row)
+                if not key:
+                    continue
+                st = str(row.get("trade_status", "") or "").strip().upper()
+                cur = rec.get(key, {"has_pre": False, "has_close": False})
+                if st in {"PRE_TRADE", "PENDIENTE", "OPEN", "ABIERTO"}:
+                    cur["has_pre"] = True
+                elif st == "CERRADO":
+                    cur["has_close"] = True
+                rec[key] = cur
+        return any(bool(v.get("has_pre")) and not bool(v.get("has_close")) for v in rec.values())
+    except Exception:
+        return False
+
 def leer_orden_real(bot: str):
     """
     Devuelve (ciclo, ts, quiet, src) si existe orden fresca, o (None, None, 0, None) si no.
@@ -319,6 +341,10 @@ def leer_orden_real(bot: str):
             ttl = int(data.get("ttl", 120))
             quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
             src = str(data.get("src", "") or "").upper() or None
+            if src in {"LXB_SYNC", "LXB_SINCRONIZADO"} and _lxb_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
+                if _print_once("lxb-sync-skip-pendiente", ttl=10):
+                    print(Fore.YELLOW + "LXB_SYNC_SKIP: ronda=0 | motivo=pendiente_abierta")
+                return None, None, 0, src
             lim = max(30, min(ttl, 300))  # margen seguro
             if time.time() - ts > lim:
                 if _lxv_post_real_confirmed():
@@ -1488,7 +1514,7 @@ async def check_token_and_reconnect(ws, current_token):
                     real_activado_en_bot = time.time()  # BLOQUE 5 and 2: Set activation time
                     real_activation_confirmed = True
                     if _print_once("lxv-activation-ok", ttl=10):
-                        print(Fore.YELLOW + f"LXV_ACTIVATION: snapshot válido -> REAL habilitado para {NOMBRE_BOT}")
+                        print(Fore.YELLOW + f"LXB_SYNC_ACTIVATION: orden válida -> REAL habilitado para {NOMBRE_BOT}")
                     # Lee la orden del maestro y deja seteado el ciclo para la siguiente vuelta
                     cyc, _, quiet, src = leer_orden_real(NOMBRE_BOT)  # BLOQUE 7: Relee fresh
                     if cyc:
@@ -1569,7 +1595,7 @@ async def check_token_and_reconnect(ws, current_token):
                 primer_ingreso_real = True
                 real_activation_confirmed = True
                 if _print_once("lxv-activation-ok", ttl=10):
-                    print(Fore.YELLOW + f"LXV_ACTIVATION: snapshot válido -> REAL habilitado para {NOMBRE_BOT}")
+                    print(Fore.YELLOW + f"LXB_SYNC_ACTIVATION: orden válida -> REAL habilitado para {NOMBRE_BOT}")
                 try:
                     real_activado_en_bot = time.time()
                 except Exception:
