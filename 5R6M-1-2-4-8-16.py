@@ -15929,6 +15929,39 @@ def _persistir_saldo_series_csv(payload: dict, now_utc: datetime, event_type: st
         "event_type": str(event_type),
     }
 
+    backup_path = os.path.join(os.path.dirname(csv_path) or ".", "saldo_real_series_backup_mixto.csv")
+    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+        try:
+            with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+                header = next(csv.reader(f), [])
+            header = [str(h).strip() for h in (header or [])]
+            if header != cols:
+                try:
+                    shutil.copy2(csv_path, backup_path)
+                except Exception:
+                    pass
+                with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=cols)
+                    writer.writeheader()
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                try:
+                    agregar_evento("PROTECCION_SALDO: CSV mixto detectado | backup saldo_real_series_backup_mixto.csv | header oficial regenerado")
+                except Exception:
+                    pass
+        except Exception as e:
+            now_log = float(time.time())
+            if (now_log - float(PROTECTION_CSV_WRITE_WARN_LAST_TS or 0.0)) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
+                PROTECTION_CSV_WRITE_WARN_LAST_TS = now_log
+                try:
+                    agregar_evento(f"PROTECCION_SALDO: CSV_HEADER_WARNING | read_error={type(e).__name__}")
+                except Exception:
+                    pass
+            return
+
     last_ts = ""
     last_saldo = None
     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
@@ -15949,44 +15982,9 @@ def _persistir_saldo_series_csv(payload: dict, now_utc: datetime, event_type: st
         return
 
     write_header = (not os.path.exists(csv_path)) or os.path.getsize(csv_path) <= 0
-    write_cols = list(cols)
-    if not write_header:
-        try:
-            with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
-                reader = csv.reader(f)
-                header = next(reader, [])
-            header = [str(h).strip() for h in (header or []) if str(h).strip()]
-            if header:
-                has_saldo_real = "saldo_real" in header
-                has_equity = "equity" in header
-                if has_saldo_real and (not has_equity):
-                    write_cols = [c for c in cols if c != "equity"]
-                    row.pop("equity", None)
-                elif has_saldo_real and has_equity:
-                    write_cols = list(cols)
-                else:
-                    now_log = float(time.time())
-                    if (now_log - float(PROTECTION_CSV_WRITE_WARN_LAST_TS or 0.0)) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
-                        PROTECTION_CSV_WRITE_WARN_LAST_TS = now_log
-                        try:
-                            agregar_evento(
-                                f"PROTECCION_SALDO: CSV_HEADER_WARNING | schema={','.join(header) if header else 'vacio'}"
-                            )
-                        except Exception:
-                            pass
-                    return
-        except Exception as e:
-            now_log = float(time.time())
-            if (now_log - float(PROTECTION_CSV_WRITE_WARN_LAST_TS or 0.0)) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
-                PROTECTION_CSV_WRITE_WARN_LAST_TS = now_log
-                try:
-                    agregar_evento(f"PROTECCION_SALDO: CSV_HEADER_WARNING | read_error={type(e).__name__}")
-                except Exception:
-                    pass
-            return
     try:
         with open(csv_path, "a", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=write_cols)
+            writer = csv.DictWriter(f, fieldnames=cols)
             if write_header:
                 writer.writeheader()
             writer.writerow(row)

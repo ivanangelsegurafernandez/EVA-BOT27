@@ -468,15 +468,25 @@ class DataEngine:
             if not p.exists():
                 continue
             try:
-                rows = []
                 with p.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
-                    reader = pd.read_csv(fh)
+                    try:
+                        reader = pd.read_csv(fh, on_bad_lines="skip")
+                    except TypeError:
+                        reader = pd.read_csv(fh)
                 if "saldo_real" not in reader.columns:
                     continue
-                ts = pd.to_datetime(reader.get("ts_utc"), errors="coerce", utc=True)
-                if ts.isna().all() and "epoch" in reader.columns:
-                    ts = pd.to_datetime(pd.to_numeric(reader["epoch"], errors="coerce"), unit="s", errors="coerce", utc=True)
-                vals = pd.to_numeric(reader["saldo_real"], errors="coerce")
+                ts_utc = pd.to_datetime(reader.get("ts_utc"), errors="coerce", utc=True) if "ts_utc" in reader.columns else pd.Series(pd.NaT, index=reader.index)
+                ts_epoch = pd.to_datetime(pd.to_numeric(reader.get("epoch"), errors="coerce"), unit="s", errors="coerce", utc=True) if "epoch" in reader.columns else pd.Series(pd.NaT, index=reader.index)
+                ts_lima = pd.to_datetime(reader.get("ts_lima"), errors="coerce", utc=False) if "ts_lima" in reader.columns else pd.Series(pd.NaT, index=reader.index)
+                try:
+                    ts_lima = ts_lima.dt.tz_localize("America/Lima", ambiguous="NaT", nonexistent="NaT").dt.tz_convert("UTC")
+                except Exception:
+                    ts_lima = pd.Series(pd.NaT, index=reader.index)
+                ts = ts_utc.where(ts_utc.notna(), ts_epoch)
+                ts = ts.where(ts.notna(), ts_lima)
+                vals = pd.to_numeric(reader.get("saldo_real"), errors="coerce")
+                eq_vals = pd.to_numeric(reader.get("equity"), errors="coerce") if "equity" in reader.columns else pd.Series(np.nan, index=reader.index)
+                vals = vals.where(vals.notna(), eq_vals)
                 d = pd.DataFrame({"timestamp": ts, "equity": vals}).dropna(subset=["timestamp", "equity"])
                 if d.empty:
                     continue
@@ -781,7 +791,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.rule_enabled = False
         self.markers_enabled = SHOW_LAST_MARKER
         self.rule_points: List[Tuple[float, float]] = []
-        self._csv_last_epoch_written: Optional[int] = None
         self.setWindowTitle(f"Monitor Saldo Real Deriv {MONITOR_VERSION}")
         self.resize(1600, 900)
 
@@ -1084,62 +1093,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.markers_enabled = not self.markers_enabled
         self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
 
-    def _append_or_sync_saldo_series_csv(self, snap: Snapshot, effective_source: str):
-        if self.view != "REAL":
-            return
-        series = _sanitize_series_for_plot(snap.series_real)
-        if series.empty:
-            return
-        row = series.iloc[-1]
-        ts = pd.to_datetime(row.get("timestamp"), errors="coerce", utc=True)
-        value = _safe_float(row.get("equity"), default=np.nan)
-        if pd.isna(ts) or not np.isfinite(value):
-            return
-        epoch = int(ts.timestamp())
-        if self._csv_last_epoch_written is not None and epoch <= int(self._csv_last_epoch_written):
-            return
-        csv_path = Path(SALDO_SERIES_CSV_PATH).expanduser()
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        if csv_path.exists():
-            try:
-                last_epoch = None
-                with csv_path.open("rb") as fh:
-                    fh.seek(0, os.SEEK_END)
-                    size = fh.tell()
-                    read_from = max(0, size - 4096)
-                    fh.seek(read_from, os.SEEK_SET)
-                    tail = fh.read().decode("utf-8", errors="ignore").splitlines()
-                for line in reversed(tail):
-                    line = line.strip()
-                    if not line or line.lower().startswith("ts_utc,"):
-                        continue
-                    parts = line.split(",")
-                    if len(parts) >= 2:
-                        try:
-                            last_epoch = int(float(parts[1]))
-                            break
-                        except Exception:
-                            continue
-                if last_epoch is not None and epoch <= last_epoch:
-                    self._csv_last_epoch_written = int(last_epoch)
-                    return
-            except Exception as e:
-                self._throttled_warn("saldo_series_tail", f"No se pudo verificar tail CSV: {e}")
-        ts_utc = ts.to_pydatetime().strftime("%Y-%m-%dT%H:%M:%SZ")
-        source_txt = (effective_source or snap.source or "--").strip().replace(",", "_")
-        line = f"{ts_utc},{epoch},{float(value):.10f},{source_txt}\n"
-        write_header = (not csv_path.exists()) or (csv_path.stat().st_size == 0)
-        with csv_path.open("a", encoding="utf-8", newline="") as f:
-            if write_header:
-                f.write("ts_utc,epoch,saldo_real,source\n")
-            f.write(line)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except Exception:
-                pass
-        self._csv_last_epoch_written = epoch
-
     def _init_crosshair(self):
         self.cross_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#6688aa88"))
         self.cross_h = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#6688aa88"))
@@ -1423,8 +1376,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
             else:
                 self.lbl_source.setObjectName("BadgeNeutral"); self.lbl_big.setStyleSheet("color:#d8e7ff;")
             self.lbl_source.style().unpolish(self.lbl_source); self.lbl_source.style().polish(self.lbl_source)
-            self._append_or_sync_saldo_series_csv(snap, effective_src)
-
             main_scale = "--"
             main_y0, main_y1 = 0.0, 0.0
             series_map = {
