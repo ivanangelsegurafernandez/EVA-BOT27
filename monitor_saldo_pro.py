@@ -16,6 +16,7 @@ Lectura de datos (prioridad REAL):
 from __future__ import annotations
 
 import glob
+import csv
 import json
 import os
 import re
@@ -66,9 +67,6 @@ CSV_PATTERN = "registro_enriquecido_fulll*.csv"
 SALDO_LIVE_FILE = "saldo_real_live.json"
 SALDO_LIVE_HISTORY_FILE = "saldo_real_live_history.jsonl"
 SALDO_SERIES_CSV_FILE = "saldo_real_series.csv"
-PROTECTION_HEALTH_STATE_FILE = "protection_health_state.json"
-PROTECTION_RESET_REQUEST_FILE = "protection_reset_request.json"
-PROTECTION_RESET_ACK_FILE = "protection_reset_ack.json"
 DISPLAY_TIMEZONE = "America/Lima"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SALDO_LIVE_SHARED_PATH = os.path.abspath(
@@ -88,15 +86,6 @@ def resolver_ruta_saldo_series() -> str:
 
 SALDO_SERIES_CSV_PATH = resolver_ruta_saldo_series()
 SALDO_LIVE_PATH = os.getenv("SALDO_LIVE_PATH", "").strip()
-PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
-    os.getenv("PROTECTION_HEALTH_STATE_PATH", os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_HEALTH_STATE_FILE))
-)
-PROTECTION_RESET_REQUEST_PATH = os.path.abspath(
-    os.getenv("PROTECTION_RESET_REQUEST_PATH", os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_REQUEST_FILE))
-)
-PROTECTION_RESET_ACK_PATH = os.path.abspath(
-    os.getenv("PROTECTION_RESET_ACK_PATH", os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_ACK_FILE))
-)
 
 MONITOR_VERSION = "v2026.03.31-r1"
 MONITOR_BUILD_ID = "MONITOR_SALDO_PRO_REAL_SERIES_GUARD"
@@ -111,7 +100,6 @@ CAPITAL_BASE_USD = float(os.getenv("CAPITAL_BASE_USD", "0") or "0")
 MIN_X_SPAN_SECONDS = 20.0
 OBSERVED_TAIL_BYTES = int(os.getenv("OBSERVED_TAIL_BYTES", str(256 * 1024)))
 ESTIMATED_REFRESH_SECONDS = int(os.getenv("ESTIMATED_REFRESH_SECONDS", "30"))
-PROTECTION_STATE_MAX_AGE_S = float(os.getenv("PROTECTION_STATE_MAX_AGE_S", "15.0"))
 
 def _main_window_seconds() -> int:
     """
@@ -163,29 +151,6 @@ def _fmt_local_ts(ts_obj) -> str:
     except Exception:
         return "--"
     return "--"
-
-
-def _fmt_countdown(seconds_left: int) -> str:
-    try:
-        s = max(0, int(seconds_left))
-        h, rem = divmod(s, 3600)
-        m, sec = divmod(rem, 60)
-        if h > 0:
-            return f"{h:02d}:{m:02d}:{sec:02d}"
-        return f"{m:02d}:{sec:02d}"
-    except Exception:
-        return "00:00"
-
-
-def _read_json_if_exists(path: str) -> Tuple[Optional[dict], Optional[str]]:
-    try:
-        if not os.path.exists(path):
-            return None, None
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None, None
-    except Exception as e:
-        return None, str(e)
 
 
 def _sanitize_series_for_plot(s: pd.DataFrame) -> pd.DataFrame:
@@ -504,26 +469,7 @@ class DataEngine:
             if not p.exists():
                 continue
             try:
-                with p.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
-                    try:
-                        reader = pd.read_csv(fh, on_bad_lines="skip")
-                    except TypeError:
-                        reader = pd.read_csv(fh)
-                if "saldo_real" not in reader.columns:
-                    continue
-                ts_utc = pd.to_datetime(reader.get("ts_utc"), errors="coerce", utc=True) if "ts_utc" in reader.columns else pd.Series(pd.NaT, index=reader.index)
-                ts_epoch = pd.to_datetime(pd.to_numeric(reader.get("epoch"), errors="coerce"), unit="s", errors="coerce", utc=True) if "epoch" in reader.columns else pd.Series(pd.NaT, index=reader.index)
-                ts_lima = pd.to_datetime(reader.get("ts_lima"), errors="coerce", utc=False) if "ts_lima" in reader.columns else pd.Series(pd.NaT, index=reader.index)
-                try:
-                    ts_lima = ts_lima.dt.tz_localize("America/Lima", ambiguous="NaT", nonexistent="NaT").dt.tz_convert("UTC")
-                except Exception:
-                    ts_lima = pd.Series(pd.NaT, index=reader.index)
-                ts = ts_utc.where(ts_utc.notna(), ts_epoch)
-                ts = ts.where(ts.notna(), ts_lima)
-                vals = pd.to_numeric(reader.get("saldo_real"), errors="coerce")
-                eq_vals = pd.to_numeric(reader.get("equity"), errors="coerce") if "equity" in reader.columns else pd.Series(np.nan, index=reader.index)
-                vals = vals.where(vals.notna(), eq_vals)
-                d = pd.DataFrame({"timestamp": ts, "equity": vals}).dropna(subset=["timestamp", "equity"])
+                d = self._normalize_saldo_series_csv(p)
                 if d.empty:
                     continue
                 d = d.sort_values("timestamp").drop_duplicates(subset=["timestamp", "equity"], keep="last")
@@ -532,6 +478,46 @@ class DataEngine:
                 warnings.append(f"{SALDO_SERIES_CSV_FILE} inválido en {p}: {e}")
         err = " | ".join(warnings[-3:]) if warnings else None
         return self._store_cache("series_csv", sig, (pd.DataFrame(columns=["timestamp", "equity"]), err, None))
+
+    def _normalize_saldo_series_csv(self, path: Path) -> pd.DataFrame:
+        rows: List[Tuple[datetime, float]] = []
+        with path.open("r", encoding="utf-8", errors="ignore", newline="") as fh:
+            reader = csv.reader(fh)
+            for raw in reader:
+                if not raw:
+                    continue
+                row = [str(c).strip() for c in raw]
+                if not row:
+                    continue
+                if row[0].lower() == "ts_utc":
+                    continue
+                ts_utc = None
+                epoch = None
+                saldo_real = None
+                equity = None
+                if len(row) >= 8:
+                    ts_utc, _ts_lima, epoch, saldo_real, equity = row[0], row[1], row[2], row[3], row[4]
+                elif len(row) >= 4:
+                    ts_utc, epoch, saldo_real = row[0], row[1], row[2]
+                    equity = saldo_real
+                else:
+                    continue
+                ts = pd.to_datetime(ts_utc, errors="coerce", utc=True)
+                if pd.isna(ts):
+                    ts = pd.to_datetime(pd.to_numeric(epoch, errors="coerce"), unit="s", errors="coerce", utc=True)
+                if pd.isna(ts):
+                    continue
+                eq = pd.to_numeric(equity, errors="coerce")
+                if not np.isfinite(eq):
+                    eq = pd.to_numeric(saldo_real, errors="coerce")
+                if not np.isfinite(eq):
+                    continue
+                rows.append((ts.to_pydatetime(), float(eq)))
+        if not rows:
+            return pd.DataFrame(columns=["timestamp", "equity"])
+        out = pd.DataFrame(rows, columns=["timestamp", "equity"])
+        out = out.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+        return out.reset_index(drop=True)
 
     def _check_history_growth(self, path: Path, valid_rows: int) -> Optional[str]:
         try:
@@ -807,7 +793,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.engine = engine
         self.view = CUENTA_OBJETIVO if CUENTA_OBJETIVO in ("REAL", "DEMO", "ALL") else "REAL"
-        self.paused = False
         self.last_good_snapshot: Optional[Snapshot] = None
         self.last_good_saldo: Optional[float] = None
         self.last_good_source: Optional[str] = None
@@ -826,25 +811,23 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self._last_scale_mode = str(Y_SCALE_MODE)
         self.rule_enabled = False
         self.markers_enabled = SHOW_LAST_MARKER
+        self.show_ema_fast = True
+        self.show_ema_slow = True
+        self.show_last_value_line = True
+        self.show_breaks = True
+        self.smoothing_mode = "OFF"
         self.rule_points: List[Tuple[float, float]] = []
-        self.manual_resume_pending = False
-        self.manual_resume_request_id = ""
-        self.manual_resume_sent_ts = 0.0
-        self.manual_resume_last_ack_ok = False
-        self.manual_resume_last_error = ""
-        self.manual_resume_hold_until = 0.0
-        self._last_protection_active = False
         self.setWindowTitle(f"Monitor Saldo Real Deriv {MONITOR_VERSION}")
         self.resize(1600, 900)
 
         cw = QtWidgets.QWidget()
         self.setCentralWidget(cw)
         root = QtWidgets.QVBoxLayout(cw)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
 
         header = QtWidgets.QFrame(); header.setObjectName("HeaderCard")
-        hl = QtWidgets.QVBoxLayout(header); hl.setContentsMargins(12, 10, 12, 10); hl.setSpacing(8)
+        hl = QtWidgets.QVBoxLayout(header); hl.setContentsMargins(8, 6, 8, 6); hl.setSpacing(4)
 
         top = QtWidgets.QHBoxLayout(); top.setSpacing(10)
         self.lbl_title = QtWidgets.QLabel(f"SALDO REAL DERIV ACTUAL · {MONITOR_VERSION}"); self.lbl_title.setObjectName("Title")
@@ -853,60 +836,32 @@ class DashboardWindow(QtWidgets.QMainWindow):
         hl.addLayout(top)
 
         self.lbl_big = QtWidgets.QLabel("--"); self.lbl_big.setObjectName("Big")
-        self.lbl_big.setAlignment(QtCore.Qt.AlignCenter); self.lbl_big.setMinimumHeight(96)
+        self.lbl_big.setAlignment(QtCore.Qt.AlignCenter); self.lbl_big.setMinimumHeight(74)
         self.lbl_big.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         hl.addWidget(self.lbl_big)
 
-        self.lbl_protection_banner = QtWidgets.QLabel("")
-        self.lbl_protection_banner.setObjectName("ProtectionBanner")
-        self.lbl_protection_banner.setAlignment(QtCore.Qt.AlignCenter)
-        self.lbl_protection_banner.setVisible(False)
-        hl.addWidget(self.lbl_protection_banner)
-
-        self.lbl_protection_detail = QtWidgets.QLabel("")
-        self.lbl_protection_detail.setObjectName("ProtectionDetail")
-        self.lbl_protection_detail.setAlignment(QtCore.Qt.AlignCenter)
-        self.lbl_protection_detail.setVisible(False)
-        hl.addWidget(self.lbl_protection_detail)
-
-        self.btn_manual_resume = QtWidgets.QPushButton("CONTINUAR MANUALMENTE")
-        self.btn_manual_resume.setObjectName("ManualResumeButton")
-        self.btn_manual_resume.setMinimumWidth(260)
-        self.btn_manual_resume.setVisible(False)
-        hl.addWidget(self.btn_manual_resume, 0, QtCore.Qt.AlignCenter)
-
-        meta = QtWidgets.QHBoxLayout(); meta.setSpacing(6)
-        self.lbl_refresh = QtWidgets.QLabel("REFRESCO: ACTIVO"); self.lbl_refresh.setObjectName("MetaBox")
-        self.lbl_scale = QtWidgets.QLabel("ESCALA Y: --"); self.lbl_scale.setObjectName("MetaBox")
-        self.lbl_scale_mode = QtWidgets.QLabel("ESCALA: --"); self.lbl_scale_mode.setObjectName("MetaBox")
-        self.lbl_delta = QtWidgets.QLabel("Δ VIS: --"); self.lbl_delta.setObjectName("MetaBox")
-        self.lbl_samples = QtWidgets.QLabel("MUESTRAS: --"); self.lbl_samples.setObjectName("MetaBox")
-        self.lbl_tz = QtWidgets.QLabel(f"TZ: {DISPLAY_TIMEZONE}"); self.lbl_tz.setObjectName("MetaBox")
-        self.lbl_now = QtWidgets.QLabel("HORA LOCAL: --"); self.lbl_now.setObjectName("MetaNow")
-        self.lbl_last = QtWidgets.QLabel("ÚLTIMA ACT: --"); self.lbl_last.setObjectName("MetaLast")
-        meta.addWidget(self.lbl_refresh)
-        meta.addWidget(self.lbl_scale)
-        meta.addWidget(self.lbl_scale_mode)
-        meta.addWidget(self.lbl_delta)
-        meta.addWidget(self.lbl_samples)
-        meta.addWidget(self.lbl_tz)
-        meta.addWidget(self.lbl_now, 1)
-        meta.addWidget(self.lbl_last)
-        hl.addLayout(meta)
+        self.lbl_meta_compact = QtWidgets.QLabel("Estado: --")
+        self.lbl_meta_compact.setObjectName("MetaCompact")
+        hl.addWidget(self.lbl_meta_compact)
 
         controls = QtWidgets.QHBoxLayout(); controls.setSpacing(6)
         self.btn_real = QtWidgets.QPushButton("REAL")
         self.btn_demo = QtWidgets.QPushButton("DEMO")
         self.btn_all = QtWidgets.QPushButton("ALL")
-        self.btn_pause = QtWidgets.QPushButton("PAUSA")
         self.btn_reset = QtWidgets.QPushButton("RESET VISTA")
         self.btn_export = QtWidgets.QPushButton("EXPORTAR CSV")
         self.btn_rule = QtWidgets.QPushButton("REGLA: OFF")
-        self.btn_markers = QtWidgets.QPushButton("MARCADORES: ON")
+        self.btn_markers = QtWidgets.QPushButton("MÁX/MÍN: ON")
+        self.btn_last_line = QtWidgets.QPushButton("ÚLTIMA LÍNEA: ON")
+        self.btn_breaks = QtWidgets.QPushButton("QUIEBRES: ON")
+        self.btn_ema_fast = QtWidgets.QPushButton("EMA 8: ON")
+        self.btn_ema_slow = QtWidgets.QPushButton("EMA 26: ON")
         self.btn_freeze = QtWidgets.QPushButton("FREEZE VIEW: OFF")
-        for b in (self.btn_real, self.btn_demo, self.btn_all, self.btn_pause, self.btn_reset, self.btn_export, self.btn_rule, self.btn_markers, self.btn_freeze):
+        for b in (self.btn_real, self.btn_demo, self.btn_all, self.btn_reset, self.btn_export, self.btn_rule, self.btn_markers, self.btn_last_line, self.btn_breaks, self.btn_ema_fast, self.btn_ema_slow, self.btn_freeze):
             b.setObjectName("MetaBox")
             controls.addWidget(b)
+        self.cmb_smooth = QtWidgets.QComboBox(); self.cmb_smooth.setObjectName("MetaBox")
+        self.cmb_smooth.addItems(["SMOOTH: OFF", "SMOOTH: LEVE", "SMOOTH: MEDIO"])
         self.cmb_min = QtWidgets.QComboBox(); self.cmb_min.setObjectName("MetaBox")
         self.cmb_min.addItems(["15m", "30m", "60m", "90m", "120m"])
         self.cmb_hour = QtWidgets.QComboBox(); self.cmb_hour.setObjectName("MetaBox")
@@ -914,6 +869,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.cmb_day = QtWidgets.QComboBox(); self.cmb_day.setObjectName("MetaBox")
         self.cmb_day.addItems(["7d", "14d", "30d"])
         self._sync_window_combos()
+        controls.addWidget(self.cmb_smooth)
         controls.addWidget(self.cmb_min)
         controls.addWidget(self.cmb_hour)
         controls.addWidget(self.cmb_day)
@@ -950,33 +906,26 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.lbl_stats.setObjectName("Warn")
         self.lbl_stats.setMaximumHeight(20)
         root.addWidget(self.lbl_stats)
-        self.lbl_help = QtWidgets.QLabel(f"Teclas: [1]REAL [2]DEMO [3]ALL [F]Fullscreen [P]Pausa [R]Reset [E]Export [G]Regla [C]Limpiar regla [M]Marcadores [V]Freeze [Q]Salir · {MONITOR_VERSION} · {MONITOR_BUILD_ID}")
+        self.lbl_help = QtWidgets.QLabel(f"Teclas: [1]REAL [2]DEMO [3]ALL [F]Fullscreen [R]Reset [E]Export [G]Regla [C]Limpiar regla [M]Máx/Mín [V]Freeze [Q]Salir · {MONITOR_VERSION}")
         self.lbl_help.setObjectName("Help"); root.addWidget(self.lbl_help)
-        self.lbl_help.setMaximumHeight(18)
+        self.lbl_help.setMaximumHeight(14)
 
         self.setStyleSheet(
             """
             QMainWindow, QWidget { background: #0b0f14; color: #d9e2f2; }
             #HeaderCard { background: #0f1622; border: 1px solid #203047; border-radius: 14px; }
             #Title { font-size: 18px; color: #b9d3ff; font-weight: 780; }
-            #Big { font-size: 86px; color: #ecfff3; font-weight: 900; padding: 8px 0 10px 0; }
-            #MetaBox { font-size: 14px; color: #bdd6ff; background: #101e31; border: 1px solid #263e5f; border-radius: 10px; padding: 8px 12px; }
-            #MetaNow { font-size: 16px; color: #ecf6ff; background: #153153; border: 1px solid #2f5e92; border-radius: 10px; padding: 8px 12px; font-weight: 780; }
-            #MetaLast { font-size: 14px; color: #d9e8ff; background: #12263d; border: 1px solid #2c4b72; border-radius: 10px; padding: 8px 12px; }
+            #Big { font-size: 74px; color: #ecfff3; font-weight: 900; padding: 2px 0 4px 0; }
+            #MetaCompact { font-size: 11px; color: #9cb4d9; padding: 0px 2px; }
+            #MetaBox { font-size: 12px; color: #bdd6ff; background: #101e31; border: 1px solid #263e5f; border-radius: 8px; padding: 5px 9px; }
             #BadgeMaster { font-size: 13px; color: #041d13; background: #72f8b1; border: 1px solid #9dffd0; border-radius: 13px; padding: 4px 11px; font-weight: 900; }
             #BadgeObserved { font-size: 13px; color: #02222b; background: #67efff; border: 1px solid #8ff6ff; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #BadgeLive { font-size: 13px; color: #0b2a1f; background: #9ef7d8; border: 1px solid #c0ffe8; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #BadgeNeutral { font-size: 13px; color: #d8e7ff; background: #23364f; border: 1px solid #3d5c81; border-radius: 13px; padding: 4px 11px; font-weight: 800; }
             #BadgeWarn { font-size: 13px; color: #3d2a00; background: #ffd67f; border: 1px solid #ffe09e; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #BadgeBad { font-size: 13px; color: #390000; background: #ff9c9c; border: 1px solid #ffb8b8; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
-            #Warn { font-size: 10px; color: #ffc374; font-weight: 520; }
+            #Warn { font-size: 9px; color: #ffc374; font-weight: 520; }
             #Help { font-size: 8px; color: #6b84a6; }
-            #ProtectionBanner { font-size: 34px; color: #fff3f3; background:#8f1223; border:3px solid #ff4b66; border-radius:12px; padding:10px 14px; font-weight:950; }
-            #ProtectionDetail { font-size: 20px; color: #ffeaea; background:#4f131d; border:1px solid #f06f86; border-radius:10px; padding:8px 12px; font-weight:800; }
-            #ManualResumeButton { font-size: 14px; font-weight: 900; color: #ffffff; background: #1f5f2a; border: 2px solid #78d98d; border-radius: 10px; padding: 8px 14px; }
-            #ManualResumeButton:hover { background: #2f7c3b; border: 2px solid #a2efb3; }
-            #ManualResumeButton:pressed { background: #174a20; }
-            #ManualResumeButton:disabled { color: #e3e3e3; background: #4f4f4f; border: 2px solid #888888; }
             """
         )
         pg.setConfigOptions(antialias=True, background="#0b0f14", foreground="#d9e2f2")
@@ -988,13 +937,16 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.btn_real.clicked.connect(lambda: self._switch_view("REAL"))
         self.btn_demo.clicked.connect(lambda: self._switch_view("DEMO"))
         self.btn_all.clicked.connect(lambda: self._switch_view("ALL"))
-        self.btn_pause.clicked.connect(self._toggle_pause)
         self.btn_reset.clicked.connect(self._reset_view)
         self.btn_export.clicked.connect(self._export_visible_csv)
-        self.btn_manual_resume.clicked.connect(self._request_force_resume_protection)
         self.btn_rule.clicked.connect(self._toggle_rule_mode)
         self.btn_markers.clicked.connect(self._toggle_markers)
+        self.btn_last_line.clicked.connect(self._toggle_last_value_line)
+        self.btn_breaks.clicked.connect(self._toggle_breaks)
+        self.btn_ema_fast.clicked.connect(self._toggle_ema_fast)
+        self.btn_ema_slow.clicked.connect(self._toggle_ema_slow)
         self.btn_freeze.clicked.connect(self._toggle_freeze)
+        self.cmb_smooth.currentTextChanged.connect(self._on_smooth_changed)
         self.cmb_min.currentTextChanged.connect(self._on_window_combo_changed)
         self.cmb_hour.currentTextChanged.connect(self._on_window_combo_changed)
         self.cmb_day.currentTextChanged.connect(self._on_window_combo_changed)
@@ -1057,17 +1009,21 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _init_plot_state(self, plot: pg.PlotItem, color: str, endpoint: str, canonical_window_s: int) -> Dict[str, object]:
         glow = plot.plot([], [], pen=pg.mkPen(color + "55", width=8.0), name=None)
         line = plot.plot([], [], pen=pg.mkPen(color, width=5.2), name="Equity")
-        ema_alert = plot.plot([], [], pen=pg.mkPen("#ff2d2d", width=2.8), name="EMA alerta")
-        ema_calm = plot.plot([], [], pen=pg.mkPen("#4ea1ff", width=2.2, style=QtCore.Qt.DashLine), name="EMA calma")
-        peak_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#ffb1b1aa", width=1.2, style=QtCore.Qt.DotLine))
-        peak_line.setVisible(False)
-        plot.addItem(peak_line)
+        smooth_line = plot.plot([], [], pen=pg.mkPen("#ffffff66", width=2.0), name="Suavizado")
+        ema_alert = plot.plot([], [], pen=pg.mkPen("#ff8a5b", width=2.2), name="EMA 8")
+        ema_calm = plot.plot([], [], pen=pg.mkPen("#7ea4ff", width=2.0, style=QtCore.Qt.DashLine), name="EMA 26")
+        last_value_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#8ad6ffaa", width=1.1, style=QtCore.Qt.DotLine))
+        last_value_line.setVisible(False)
+        plot.addItem(last_value_line)
         last = plot.plot([], [], pen=None, symbol="o", symbolSize=5, symbolBrush=endpoint, name=None)
         vmax = plot.plot([], [], pen=None, symbol="o", symbolSize=4, symbolBrush="#ffd36b99", name=None)
         vmin = plot.plot([], [], pen=None, symbol="o", symbolSize=4, symbolBrush="#ff8f8f99", name=None)
+        cross_up = plot.plot([], [], pen=None, symbol="t", symbolSize=6, symbolBrush="#8ef0a8cc", name=None)
+        cross_down = plot.plot([], [], pen=None, symbol="t1", symbolSize=6, symbolBrush="#ff9b9bcc", name=None)
+        slope_break = plot.plot([], [], pen=None, symbol="d", symbolSize=5, symbolBrush="#f2d88acc", name=None)
         txt = pg.TextItem(text="", color="#9ec2ff", anchor=(0, 1))
         plot.addItem(txt)
-        return {"plot": plot, "glow": glow, "line": line, "ema_alert": ema_alert, "ema_calm": ema_calm, "peak_line": peak_line, "last": last, "max": vmax, "min": vmin, "text": txt, "endpoint": endpoint, "canonical_window_s": int(canonical_window_s)}
+        return {"plot": plot, "glow": glow, "line": line, "smooth_line": smooth_line, "ema_alert": ema_alert, "ema_calm": ema_calm, "last_value_line": last_value_line, "last": last, "max": vmax, "min": vmin, "cross_up": cross_up, "cross_down": cross_down, "slope_break": slope_break, "text": txt, "endpoint": endpoint, "canonical_window_s": int(canonical_window_s)}
 
     def _sync_window_combos(self):
         self.cmb_min.setCurrentText(f"{int(VENTANA_MINUTOS)}m")
@@ -1127,11 +1083,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.view = view
         self.refresh(force=True)
 
-    def _toggle_pause(self):
-        self.paused = not self.paused
-        self.btn_pause.setText(f"PAUSA: {'ON' if self.paused else 'OFF'}")
-        self.refresh(force=True)
-
     def _reset_view(self):
         self._auto_range_guard = True
         self.p_main.enableAutoRange(); self.p_min.enableAutoRange(); self.p_hour.enableAutoRange(); self.p_day.enableAutoRange()
@@ -1159,85 +1110,33 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
     def _toggle_markers(self):
         self.markers_enabled = not self.markers_enabled
-        self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
+        self.btn_markers.setText(f"MÁX/MÍN: {'ON' if self.markers_enabled else 'OFF'}")
 
-    def _set_manual_resume_button_state(self, protection_active: bool):
-        if not protection_active:
-            self.btn_manual_resume.setVisible(False)
-            self.btn_manual_resume.setEnabled(False)
-            self.btn_manual_resume.setText("CONTINUAR MANUALMENTE")
-            return
-        self.btn_manual_resume.setVisible(True)
-        if self.manual_resume_pending:
-            self.btn_manual_resume.setEnabled(False)
-            self.btn_manual_resume.setText("REANUDACIÓN MANUAL ENVIADA...")
+    def _toggle_last_value_line(self):
+        self.show_last_value_line = not self.show_last_value_line
+        self.btn_last_line.setText(f"ÚLTIMA LÍNEA: {'ON' if self.show_last_value_line else 'OFF'}")
+
+    def _toggle_breaks(self):
+        self.show_breaks = not self.show_breaks
+        self.btn_breaks.setText(f"QUIEBRES: {'ON' if self.show_breaks else 'OFF'}")
+
+    def _toggle_ema_fast(self):
+        self.show_ema_fast = not self.show_ema_fast
+        self.btn_ema_fast.setText(f"EMA 8: {'ON' if self.show_ema_fast else 'OFF'}")
+
+    def _toggle_ema_slow(self):
+        self.show_ema_slow = not self.show_ema_slow
+        self.btn_ema_slow.setText(f"EMA 26: {'ON' if self.show_ema_slow else 'OFF'}")
+
+    def _on_smooth_changed(self, text: str):
+        t = str(text or "").upper()
+        if "LEVE" in t:
+            self.smoothing_mode = "LEVE"
+        elif "MEDIO" in t:
+            self.smoothing_mode = "MEDIO"
         else:
-            self.btn_manual_resume.setEnabled(True)
-            self.btn_manual_resume.setText("CONTINUAR MANUALMENTE")
-
-    def _request_force_resume_protection(self):
-        if self.manual_resume_pending:
-            return
-        ans = QtWidgets.QMessageBox.question(
-            self,
-            "Confirmar reanudación manual",
-            "¿Deseas forzar la reanudación del maestro?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
-            QtWidgets.QMessageBox.Cancel,
-        )
-        if ans != QtWidgets.QMessageBox.Yes:
-            return
-        now_ts = float(time.time())
-        request_id = f"force-resume-{int(now_ts * 1000)}"
-        payload = {
-            "action": "force_resume_protection",
-            "request_id": str(request_id),
-            "ts": float(now_ts),
-            "source": "monitor_saldo_pro",
-            "ui_context": "manual_button",
-        }
-        try:
-            os.makedirs(os.path.dirname(PROTECTION_RESET_REQUEST_PATH) or ".", exist_ok=True)
-            tmp = f"{PROTECTION_RESET_REQUEST_PATH}.tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except Exception:
-                    pass
-            os.replace(tmp, PROTECTION_RESET_REQUEST_PATH)
-            self.manual_resume_pending = True
-            self.manual_resume_request_id = str(request_id)
-            self.manual_resume_sent_ts = now_ts
-            self.manual_resume_last_ack_ok = False
-            self.manual_resume_last_error = ""
-            self._set_manual_resume_button_state(protection_active=True)
-            self.lbl_warn.setText("Reanudación manual enviada al maestro...")
-        except Exception as e:
-            self.manual_resume_last_error = f"Error enviando solicitud: {e}"
-            self.lbl_warn.setText(self.manual_resume_last_error)
-
-    def _render_protection_panel(self, pstate: dict):
-        active = bool((pstate or {}).get("active", False))
-        if not active:
-            self.lbl_protection_banner.setVisible(False)
-            self.lbl_protection_detail.setVisible(False)
-            return
-        mode = str((pstate or {}).get("mode") or "--").upper()
-        reason = str((pstate or {}).get("reason") or "--")
-        dd = float((pstate or {}).get("drawdown_pct") or 0.0)
-        left = int((pstate or {}).get("time_left_s") or 0)
-        status = str((pstate or {}).get("release_status") or "WAIT_MIN_TIME")
-        streak = int((pstate or {}).get("release_ok_streak") or 0)
-        score = int((pstate or {}).get("release_score") or 0)
-        self.lbl_protection_banner.setText(f"🚨 PROTECCIÓN ACTIVA | {mode}")
-        self.lbl_protection_detail.setText(
-            f"⏳ {_fmt_countdown(left)}  |  DD={dd:.2f}%  |  Estado={status}  |  Confirmación={streak}/3  |  Score={score}/4\n"
-            f"Motivo: {reason}"
-        )
-        self.lbl_protection_banner.setVisible(True)
-        self.lbl_protection_detail.setVisible(True)
+            self.smoothing_mode = "OFF"
+        self.refresh(force=True)
 
     def _init_crosshair(self):
         self.cross_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#6688aa88"))
@@ -1321,8 +1220,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
             self.view = "ALL"; self.refresh(force=True)
         elif k == QtCore.Qt.Key_F:
             self.showNormal() if self.isFullScreen() else self.showFullScreen()
-        elif k == QtCore.Qt.Key_P:
-            self._toggle_pause()
         elif k == QtCore.Qt.Key_R:
             self._reset_view()
         elif k == QtCore.Qt.Key_E:
@@ -1377,19 +1274,24 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
     def _update_plot_state(self, state: Dict[str, object], s: pd.DataFrame) -> Tuple[str, float, float]:
         plot = state["plot"]
-        glow = state["glow"]; line = state["line"]; last = state["last"]; vmax = state["max"]; vmin = state["min"]; txt = state["text"]
-        ema_alert_line = state["ema_alert"]; ema_calm_line = state["ema_calm"]; peak_line = state["peak_line"]
+        glow = state["glow"]; line = state["line"]; smooth_line = state["smooth_line"]; last = state["last"]; vmax = state["max"]; vmin = state["min"]; txt = state["text"]
+        ema_alert_line = state["ema_alert"]; ema_calm_line = state["ema_calm"]; last_value_line = state["last_value_line"]
+        cross_up = state["cross_up"]; cross_down = state["cross_down"]; slope_break = state["slope_break"]
         endpoint = state.get("endpoint", "#9ef7d8")
         s = _sanitize_series_for_plot(s)
         if s.empty:
             glow.setData([], [])
             line.setData([], [])
+            smooth_line.setData([], [])
             ema_alert_line.setData([], [])
             ema_calm_line.setData([], [])
             last.setData([], [])
             vmax.setData([], [])
             vmin.setData([], [])
-            peak_line.setVisible(False)
+            cross_up.setData([], [])
+            cross_down.setData([], [])
+            slope_break.setData([], [])
+            last_value_line.setVisible(False)
             txt.setText("Sin puntos")
             y0, y1, scale_info = self._resolve_y_range(None)
             auto_apply = bool(self._force_autorange_once or (self.follow_latest and not self.manual_view_active))
@@ -1401,31 +1303,56 @@ class DashboardWindow(QtWidgets.QMainWindow):
 
         x = (s["timestamp"].astype("int64") / 1e9).to_numpy(dtype=float)
         y = s["equity"].to_numpy(dtype=float)
+        smooth_y = y.copy()
+        if len(y) >= 5 and self.smoothing_mode in ("LEVE", "MEDIO"):
+            win = 5 if self.smoothing_mode == "LEVE" else 9
+            smooth_y = pd.Series(y).rolling(window=win, min_periods=1, center=True).mean().to_numpy(dtype=float)
 
         if len(x) >= MIN_POINTS_FOR_LINE:
             glow.setData(x, y)
             line.setData(x, y)
+            smooth_line.setData(x, smooth_y) if self.smoothing_mode != "OFF" else smooth_line.setData([], [])
             txt.setText("")
         else:
             glow.setData([], [])
             line.setData([], [])
+            smooth_line.setData([], [])
             txt.setText("1 punto: esperando más histórico")
 
         if len(y) >= 8:
             ema_alert = pd.Series(y).ewm(span=8, adjust=False).mean().to_numpy(dtype=float)
             ema_calm = pd.Series(y).ewm(span=26, adjust=False).mean().to_numpy(dtype=float)
-            ema_alert_line.setData(x, ema_alert)
-            ema_calm_line.setData(x, ema_calm)
+            ema_alert_line.setData(x, ema_alert) if self.show_ema_fast else ema_alert_line.setData([], [])
+            ema_calm_line.setData(x, ema_calm) if self.show_ema_slow else ema_calm_line.setData([], [])
+            if self.show_breaks:
+                cross = np.sign(ema_alert - ema_calm)
+                cross_shift = np.roll(cross, 1)
+                cross_shift[0] = 0
+                up_idx = np.where((cross > 0) & (cross_shift <= 0))[0]
+                dn_idx = np.where((cross < 0) & (cross_shift >= 0))[0]
+                cross_up.setData(x[up_idx], y[up_idx] if len(up_idx) else [])
+                cross_down.setData(x[dn_idx], y[dn_idx] if len(dn_idx) else [])
+                dy = np.gradient(smooth_y)
+                ddy = np.gradient(dy)
+                thr = np.nanstd(ddy) * 1.25 if np.isfinite(np.nanstd(ddy)) else 0.0
+                sb_idx = np.where(np.abs(ddy) > max(1e-9, thr))[0]
+                slope_break.setData(x[sb_idx], y[sb_idx] if len(sb_idx) else [])
+            else:
+                cross_up.setData([], [])
+                cross_down.setData([], [])
+                slope_break.setData([], [])
         else:
             ema_alert_line.setData([], [])
             ema_calm_line.setData([], [])
+            cross_up.setData([], [])
+            cross_down.setData([], [])
+            slope_break.setData([], [])
 
-        try:
-            peak_val = float(np.nanmax(y))
-            peak_line.setPos(peak_val)
-            peak_line.setVisible(True)
-        except Exception:
-            peak_line.setVisible(False)
+        if self.show_last_value_line and len(y) >= 1:
+            last_value_line.setPos(float(y[-1]))
+            last_value_line.setVisible(True)
+        else:
+            last_value_line.setVisible(False)
 
         marker_size = 8 if len(x) == 1 else 4
         try:
@@ -1436,10 +1363,15 @@ class DashboardWindow(QtWidgets.QMainWindow):
             last.setData([x[-1]], [y[-1]], symbolSize=marker_size)
         else:
             last.setData([], [])
-        if self.markers_enabled and SHOW_EXTREME_MARKERS and len(x) >= 8:
-            imax = int(np.argmax(y)); imin = int(np.argmin(y))
-            vmax.setData([x[imax]], [y[imax]])
-            vmin.setData([x[imin]], [y[imin]])
+        if self.markers_enabled and len(x) >= 5:
+            yy = smooth_y
+            prev = np.roll(yy, 1); nxt = np.roll(yy, -1)
+            peak_idx = np.where((yy > prev) & (yy > nxt))[0]
+            min_idx = np.where((yy < prev) & (yy < nxt))[0]
+            peak_idx = peak_idx[(peak_idx > 0) & (peak_idx < len(yy) - 1)]
+            min_idx = min_idx[(min_idx > 0) & (min_idx < len(yy) - 1)]
+            vmax.setData(x[peak_idx[-20:]], y[peak_idx[-20:]] if len(peak_idx) else [])
+            vmin.setData(x[min_idx[-20:]], y[min_idx[-20:]] if len(min_idx) else [])
         else:
             vmax.setData([], [])
             vmin.setData([], [])
@@ -1456,9 +1388,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
         return scale_info, y0, y1
 
     def refresh(self, force: bool = False):
-        if self.paused and not force:
-            self.refresh_skipped += 1
-            return
         if self.isMinimized() and not force:
             self.refresh_skipped += 1
             return
@@ -1494,12 +1423,8 @@ class DashboardWindow(QtWidgets.QMainWindow):
             else:
                 self.lbl_big.setText("--")
 
-            refresh_state = "PAUSADO" if self.paused else "ACTIVO"
             effective_last_update = snap.last_update if snap.last_update else self.last_good_last_update
-            last = effective_last_update.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z") if effective_last_update else "--"
-            self.lbl_refresh.setText(f"REFRESCO: {refresh_state}")
-            self.lbl_now.setText(f"HORA LOCAL: {snap.now.strftime('%H:%M:%S %Z')}")
-            self.lbl_last.setText(f"ÚLTIMA ACT: {last}")
+            last = effective_last_update.astimezone(DISPLAY_TZ).strftime("%H:%M:%S") if effective_last_update else "--"
 
             raw_src = snap.source.upper().strip()
             effective_src = raw_src if current_valid else ((self.last_good_source or raw_src).upper().strip() if self.last_good_source or raw_src else "--")
@@ -1522,47 +1447,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
             else:
                 self.lbl_source.setObjectName("BadgeNeutral"); self.lbl_big.setStyleSheet("color:#d8e7ff;")
             self.lbl_source.style().unpolish(self.lbl_source); self.lbl_source.style().polish(self.lbl_source)
-
-            protection_obj, _ = _read_json_if_exists(PROTECTION_HEALTH_STATE_PATH)
-            pstate = protection_obj or {}
-            now_ts = float(time.time())
-            p_active = bool(pstate.get("active", False))
-            p_updated = float(pstate.get("updated_ts") or 0.0)
-            p_until = float(pstate.get("until_ts") or 0.0)
-            p_left = int(pstate.get("time_left_s") or 0)
-            is_fresh = p_updated > 0.0 and (now_ts - p_updated) <= float(PROTECTION_STATE_MAX_AGE_S)
-            is_alive = p_until > now_ts and p_left > 0
-            protection_active = bool(p_active and is_fresh and is_alive)
-            if not protection_active:
-                pstate = dict(pstate)
-                pstate["active"] = False
-                pstate["time_left_s"] = 0
-            self._render_protection_panel(pstate)
-
-            ack_obj, _ = _read_json_if_exists(PROTECTION_RESET_ACK_PATH)
-            ack = ack_obj or {}
-            if self.manual_resume_pending and self.manual_resume_request_id:
-                ack_action = str(ack.get("action", "")).strip()
-                ack_req = str(ack.get("request_id", "")).strip()
-                if ack_action == "force_resume_protection" and ack_req == str(self.manual_resume_request_id):
-                    self.manual_resume_pending = False
-                    self.manual_resume_last_ack_ok = bool(ack.get("accepted", False))
-                    self.manual_resume_hold_until = float(ack.get("hold_until_ts") or 0.0)
-                    if self.manual_resume_last_ack_ok:
-                        self.lbl_warn.setText("REANUDACIÓN MANUAL ACEPTADA")
-                    else:
-                        reason = str(ack.get("reason") or "rechazada")
-                        self.manual_resume_last_error = reason
-                        self.lbl_warn.setText(f"REANUDACIÓN MANUAL RECHAZADA: {reason}")
-                elif not protection_active:
-                    self.manual_resume_pending = False
-                    self.lbl_warn.setText("Protección finalizada automáticamente")
-                elif (now_ts - float(self.manual_resume_sent_ts or 0.0)) > 10.0:
-                    self.manual_resume_pending = False
-                    self.manual_resume_last_error = "Sin respuesta del maestro"
-                    self.lbl_warn.setText("Sin respuesta del maestro")
-            self._set_manual_resume_button_state(protection_active)
-            self._last_protection_active = protection_active
 
             main_scale = "--"
             main_y0, main_y1 = 0.0, 0.0
@@ -1593,18 +1477,6 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 except Exception as plot_err:
                     snap.warnings.append(f"plot {key} con error: {plot_err}")
                     self._throttled_warn(f"plot:{key}", f"Error en gráfico {key}: {plot_err}")
-            self.lbl_scale.setText(f"ESCALA Y: {main_scale}")
-            if Y_SCALE_MODE == "manual":
-                ymin = float(min(Y_AXIS_MIN_USD, Y_AXIS_MAX_USD))
-                ymax = float(max(Y_AXIS_MIN_USD, Y_AXIS_MAX_USD))
-                if abs(ymin - 0.0) < 1e-9 and abs(ymax - 300.0) < 1e-9:
-                    self.lbl_scale_mode.setText("ESCALA: MANUAL 0..300 USD")
-                else:
-                    self.lbl_scale_mode.setText(f"ESCALA: MANUAL {ymin:,.0f}..{ymax:,.0f} USD")
-            elif Y_SCALE_MODE == "capital":
-                self.lbl_scale_mode.setText("ESCALA: CAPITAL (dinámica)")
-            else:
-                self.lbl_scale_mode.setText("ESCALA: AUTO")
             visible = _sanitize_series_for_plot(series_map["main"])
             if visible.empty and "main" in self._last_plot_series:
                 visible = self._last_plot_series["main"]
@@ -1614,10 +1486,9 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 last_v = float(visible["equity"].iloc[-1])
                 delta = last_v - first
                 pct = (delta / first * 100.0) if abs(first) > 1e-12 else 0.0
-                self.lbl_delta.setText(f"Δ VIS: {delta:+,.2f} USD ({pct:+.2f}%)")
+                compact_delta = f"{delta:+,.2f} USD ({pct:+.2f}%)"
             else:
-                self.lbl_delta.setText("Δ VIS: --")
-            self.lbl_samples.setText(f"MUESTRAS: {n_visible}")
+                compact_delta = "--"
             if n_visible >= 1:
                 min_v = float(visible["equity"].min())
                 max_v = float(visible["equity"].max())
@@ -1633,6 +1504,9 @@ class DashboardWindow(QtWidgets.QMainWindow):
                 self.lbl_stats.setText("STATS VIS: --")
             if self.rule_enabled and len(self.rule_points) == 2:
                 self._render_rule_stats()
+            self.lbl_meta_compact.setText(
+                f"{snap.now.strftime('%H:%M:%S %Z')} · última {last} · pts {n_visible} · Δvis {compact_delta}"
+            )
 
             last_good_age = "--"
             if self.last_good_last_update is not None:
