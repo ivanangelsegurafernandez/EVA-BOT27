@@ -1570,10 +1570,13 @@ protection_last_eval_ts = 0.0
 protection_last_new_low_ts = 0.0
 protection_resume_status = "IDLE"
 protection_rearm_blocked = False
+protection_rearm_blocked_until = 0.0
 protection_last_release_ts = 0.0
 protection_test_reset_hold_until_ts = 0.0
 protection_last_reset_request_id = ""
 protection_last_reset_request_ts = 0.0
+protection_last_force_resume_request_id = ""
+protection_last_force_resume_request_ts = 0.0
 protection_eval_from_ts = 0.0
 protection_reset_baseline_equity = 0.0
 protection_reset_baseline_peak = 0.0
@@ -16330,6 +16333,8 @@ def _write_protection_health_state(now_ts: float | None = None):
         "release_ok_streak": int(protection_release_ok_streak or 0),
         "release_score": int(protection_release_score or 0),
         "release_status": str(protection_resume_status or "IDLE"),
+        "rearm_blocked": bool(protection_rearm_blocked),
+        "rearm_blocked_until_ts": float(protection_rearm_blocked_until or 0.0),
         "no_new_lows_ok": bool(protection_no_new_lows_ok),
         "ema_turn_ok": bool(protection_ema_turn_ok),
         "dd_recovery_ok": bool(protection_dd_recovery_ok),
@@ -16380,10 +16385,11 @@ def _write_protection_reset_ack(
     hold_until_ts: float = 0.0,
     status: str = "ok",
     reason: str = "",
+    action: str = "reset_protection_test_ack",
 ):
     now_ts = float(now_ts if now_ts is not None else time.time())
     payload = {
-        "action": "reset_protection_test_ack",
+        "action": str(action or "reset_protection_test_ack"),
         "request_id": str(request_id or ""),
         "accepted": bool(accepted),
         "ts": float(now_ts),
@@ -16556,6 +16562,9 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
 
 def _consume_protection_reset_request(now_ts: float | None = None) -> bool:
     global protection_last_reset_request_id, protection_last_reset_request_ts
+    global protection_last_force_resume_request_id, protection_last_force_resume_request_ts
+    global protection_pause_active, protection_pause_reason, protection_pause_started_ts, protection_pause_until_ts
+    global protection_rearm_blocked, protection_rearm_blocked_until, protection_last_release_ts, protection_resume_status
     now_ts = float(now_ts if now_ts is not None else time.time())
     req_path = PROTECTION_RESET_REQUEST_PATH
     if not os.path.exists(req_path):
@@ -16570,9 +16579,71 @@ def _consume_protection_reset_request(now_ts: float | None = None) -> bool:
         os.remove(req_path)
     except Exception:
         pass
-    if str(req.get("action", "")).strip() != "reset_protection_test":
+    action = str(req.get("action", "")).strip()
+    if action not in ("reset_protection_test", "force_resume_protection"):
         return False
     req_id = str(req.get("request_id", "")).strip()
+    if action == "force_resume_protection":
+        if req_id and req_id == str(protection_last_force_resume_request_id or "").strip():
+            _write_protection_reset_ack(
+                req_id,
+                True,
+                now_ts=now_ts,
+                hold_until_ts=float(protection_rearm_blocked_until or 0.0),
+                status="ok",
+                action="force_resume_protection",
+                reason="duplicate_ignored",
+            )
+            return True
+        if not bool(protection_pause_active):
+            _write_protection_reset_ack(
+                req_id,
+                False,
+                now_ts=now_ts,
+                hold_until_ts=0.0,
+                status="error",
+                action="force_resume_protection",
+                reason="protection_not_active",
+            )
+            return True
+        try:
+            protection_pause_active = False
+            protection_pause_reason = ""
+            protection_pause_started_ts = 0.0
+            protection_pause_until_ts = 0.0
+            protection_resume_status = "MANUAL_OVERRIDE"
+            protection_rearm_blocked = True
+            protection_rearm_blocked_until = float(now_ts + float(PROTECTION_REARM_COOLDOWN_S))
+            protection_last_release_ts = float(now_ts)
+            protection_last_force_resume_request_id = req_id
+            protection_last_force_resume_request_ts = float(now_ts)
+            _write_protection_reset_ack(
+                req_id,
+                True,
+                now_ts=now_ts,
+                hold_until_ts=float(protection_rearm_blocked_until or 0.0),
+                status="ok",
+                action="force_resume_protection",
+                reason="manual_override_accepted",
+            )
+            _write_protection_health_state(now_ts)
+            try:
+                agregar_evento("PROTECCION_SALDO: REANUDACION MANUAL | override usuario")
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            _write_protection_reset_ack(
+                req_id,
+                False,
+                now_ts=now_ts,
+                hold_until_ts=0.0,
+                status="error",
+                action="force_resume_protection",
+                reason=f"exception:{type(e).__name__}",
+            )
+            return True
+
     if req_id and req_id == str(protection_last_reset_request_id or "").strip():
         _write_protection_reset_ack(
             req_id,
@@ -16610,7 +16681,7 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_release_score, protection_no_new_lows_ok, protection_ema_turn_ok, protection_dd_recovery_ok
     global protection_calm_band_ok, protection_vol_base, protection_drop_3m, protection_pct_drop_3m
     global protection_peak_ref, protection_worst_saldo, protection_worst_dd, protection_last_eval_ts
-    global protection_last_new_low_ts, protection_resume_status
+    global protection_last_new_low_ts, protection_resume_status, protection_rearm_blocked_until
     now_ts = float(now_ts if now_ts is not None else time.time())
     try:
         epoch_obj = _read_protection_epoch_state()
@@ -16717,9 +16788,15 @@ def _equity_protection_update(now_ts: float | None = None):
     if bool(protection_rearm_blocked):
         recovery_ok = bool(protection_ema_alerta >= protection_ema_calma or dd_now < 0.02)
         cooldown_ok = (now_ts - float(protection_last_release_ts or 0.0)) >= float(PROTECTION_REARM_COOLDOWN_S)
+        until_ok = now_ts >= float(protection_rearm_blocked_until or 0.0)
         if recovery_ok and cooldown_ok:
             protection_rearm_blocked = False
+            protection_rearm_blocked_until = 0.0
             _protection_diag_event_once("REARME_HABILITADO", "PROTECCION_SALDO: REARME HABILITADO | recuperación confirmada", now_ts)
+        elif until_ok and cooldown_ok:
+            protection_rearm_blocked = False
+            protection_rearm_blocked_until = 0.0
+            _protection_diag_event_once("REARME_TIMEOUT", "PROTECCION_SALDO: REARME HABILITADO | cooldown cumplido", now_ts)
         else:
             trigger_mode = ""
 
@@ -16796,6 +16873,7 @@ def _equity_protection_update(now_ts: float | None = None):
                 protection_pause_started_ts = 0.0
                 protection_pause_until_ts = 0.0
                 protection_rearm_blocked = True
+                protection_rearm_blocked_until = float(now_ts + float(PROTECTION_REARM_COOLDOWN_S))
                 protection_last_release_ts = now_ts
                 protection_resume_status = "RELEASED_CONFIRMED"
                 protection_mode = ""

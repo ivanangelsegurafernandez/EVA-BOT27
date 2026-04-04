@@ -66,6 +66,9 @@ CSV_PATTERN = "registro_enriquecido_fulll*.csv"
 SALDO_LIVE_FILE = "saldo_real_live.json"
 SALDO_LIVE_HISTORY_FILE = "saldo_real_live_history.jsonl"
 SALDO_SERIES_CSV_FILE = "saldo_real_series.csv"
+PROTECTION_HEALTH_STATE_FILE = "protection_health_state.json"
+PROTECTION_RESET_REQUEST_FILE = "protection_reset_request.json"
+PROTECTION_RESET_ACK_FILE = "protection_reset_ack.json"
 DISPLAY_TIMEZONE = "America/Lima"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SALDO_LIVE_SHARED_PATH = os.path.abspath(
@@ -85,6 +88,15 @@ def resolver_ruta_saldo_series() -> str:
 
 SALDO_SERIES_CSV_PATH = resolver_ruta_saldo_series()
 SALDO_LIVE_PATH = os.getenv("SALDO_LIVE_PATH", "").strip()
+PROTECTION_HEALTH_STATE_PATH = os.path.abspath(
+    os.getenv("PROTECTION_HEALTH_STATE_PATH", os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_HEALTH_STATE_FILE))
+)
+PROTECTION_RESET_REQUEST_PATH = os.path.abspath(
+    os.getenv("PROTECTION_RESET_REQUEST_PATH", os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_REQUEST_FILE))
+)
+PROTECTION_RESET_ACK_PATH = os.path.abspath(
+    os.getenv("PROTECTION_RESET_ACK_PATH", os.path.join(os.path.dirname(SALDO_LIVE_SHARED_PATH), PROTECTION_RESET_ACK_FILE))
+)
 
 MONITOR_VERSION = "v2026.03.31-r1"
 MONITOR_BUILD_ID = "MONITOR_SALDO_PRO_REAL_SERIES_GUARD"
@@ -150,6 +162,29 @@ def _fmt_local_ts(ts_obj) -> str:
     except Exception:
         return "--"
     return "--"
+
+
+def _fmt_countdown(seconds_left: int) -> str:
+    try:
+        s = max(0, int(seconds_left))
+        h, rem = divmod(s, 3600)
+        m, sec = divmod(rem, 60)
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{sec:02d}"
+        return f"{m:02d}:{sec:02d}"
+    except Exception:
+        return "00:00"
+
+
+def _read_json_if_exists(path: str) -> Tuple[Optional[dict], Optional[str]]:
+    try:
+        if not os.path.exists(path):
+            return None, None
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None, None
+    except Exception as e:
+        return None, str(e)
 
 
 def _sanitize_series_for_plot(s: pd.DataFrame) -> pd.DataFrame:
@@ -791,6 +826,13 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.rule_enabled = False
         self.markers_enabled = SHOW_LAST_MARKER
         self.rule_points: List[Tuple[float, float]] = []
+        self.manual_resume_pending = False
+        self.manual_resume_request_id = ""
+        self.manual_resume_sent_ts = 0.0
+        self.manual_resume_last_ack_ok = False
+        self.manual_resume_last_error = ""
+        self.manual_resume_hold_until = 0.0
+        self._last_protection_active = False
         self.setWindowTitle(f"Monitor Saldo Real Deriv {MONITOR_VERSION}")
         self.resize(1600, 900)
 
@@ -813,6 +855,24 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.lbl_big.setAlignment(QtCore.Qt.AlignCenter); self.lbl_big.setMinimumHeight(96)
         self.lbl_big.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         hl.addWidget(self.lbl_big)
+
+        self.lbl_protection_banner = QtWidgets.QLabel("")
+        self.lbl_protection_banner.setObjectName("ProtectionBanner")
+        self.lbl_protection_banner.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_protection_banner.setVisible(False)
+        hl.addWidget(self.lbl_protection_banner)
+
+        self.lbl_protection_detail = QtWidgets.QLabel("")
+        self.lbl_protection_detail.setObjectName("ProtectionDetail")
+        self.lbl_protection_detail.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_protection_detail.setVisible(False)
+        hl.addWidget(self.lbl_protection_detail)
+
+        self.btn_manual_resume = QtWidgets.QPushButton("CONTINUAR MANUALMENTE")
+        self.btn_manual_resume.setObjectName("ManualResumeButton")
+        self.btn_manual_resume.setMinimumWidth(260)
+        self.btn_manual_resume.setVisible(False)
+        hl.addWidget(self.btn_manual_resume, 0, QtCore.Qt.AlignCenter)
 
         meta = QtWidgets.QHBoxLayout(); meta.setSpacing(6)
         self.lbl_refresh = QtWidgets.QLabel("REFRESCO: ACTIVO"); self.lbl_refresh.setObjectName("MetaBox")
@@ -910,6 +970,12 @@ class DashboardWindow(QtWidgets.QMainWindow):
             #BadgeBad { font-size: 13px; color: #390000; background: #ff9c9c; border: 1px solid #ffb8b8; border-radius: 13px; padding: 4px 11px; font-weight: 850; }
             #Warn { font-size: 10px; color: #ffc374; font-weight: 520; }
             #Help { font-size: 8px; color: #6b84a6; }
+            #ProtectionBanner { font-size: 34px; color: #fff3f3; background:#8f1223; border:3px solid #ff4b66; border-radius:12px; padding:10px 14px; font-weight:950; }
+            #ProtectionDetail { font-size: 20px; color: #ffeaea; background:#4f131d; border:1px solid #f06f86; border-radius:10px; padding:8px 12px; font-weight:800; }
+            #ManualResumeButton { font-size: 14px; font-weight: 900; color: #ffffff; background: #1f5f2a; border: 2px solid #78d98d; border-radius: 10px; padding: 8px 14px; }
+            #ManualResumeButton:hover { background: #2f7c3b; border: 2px solid #a2efb3; }
+            #ManualResumeButton:pressed { background: #174a20; }
+            #ManualResumeButton:disabled { color: #e3e3e3; background: #4f4f4f; border: 2px solid #888888; }
             """
         )
         pg.setConfigOptions(antialias=True, background="#0b0f14", foreground="#d9e2f2")
@@ -924,6 +990,7 @@ class DashboardWindow(QtWidgets.QMainWindow):
         self.btn_pause.clicked.connect(self._toggle_pause)
         self.btn_reset.clicked.connect(self._reset_view)
         self.btn_export.clicked.connect(self._export_visible_csv)
+        self.btn_manual_resume.clicked.connect(self._request_force_resume_protection)
         self.btn_rule.clicked.connect(self._toggle_rule_mode)
         self.btn_markers.clicked.connect(self._toggle_markers)
         self.btn_freeze.clicked.connect(self._toggle_freeze)
@@ -1092,6 +1159,84 @@ class DashboardWindow(QtWidgets.QMainWindow):
     def _toggle_markers(self):
         self.markers_enabled = not self.markers_enabled
         self.btn_markers.setText(f"MARCADORES: {'ON' if self.markers_enabled else 'OFF'}")
+
+    def _set_manual_resume_button_state(self, protection_active: bool):
+        if not protection_active:
+            self.btn_manual_resume.setVisible(False)
+            self.btn_manual_resume.setEnabled(False)
+            self.btn_manual_resume.setText("CONTINUAR MANUALMENTE")
+            return
+        self.btn_manual_resume.setVisible(True)
+        if self.manual_resume_pending:
+            self.btn_manual_resume.setEnabled(False)
+            self.btn_manual_resume.setText("REANUDACIÓN MANUAL ENVIADA...")
+        else:
+            self.btn_manual_resume.setEnabled(True)
+            self.btn_manual_resume.setText("CONTINUAR MANUALMENTE")
+
+    def _request_force_resume_protection(self):
+        if self.manual_resume_pending:
+            return
+        ans = QtWidgets.QMessageBox.question(
+            self,
+            "Confirmar reanudación manual",
+            "¿Deseas forzar la reanudación del maestro?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        )
+        if ans != QtWidgets.QMessageBox.Yes:
+            return
+        now_ts = float(time.time())
+        request_id = f"force-resume-{int(now_ts * 1000)}"
+        payload = {
+            "action": "force_resume_protection",
+            "request_id": str(request_id),
+            "ts": float(now_ts),
+            "source": "monitor_saldo_pro",
+            "ui_context": "manual_button",
+        }
+        try:
+            os.makedirs(os.path.dirname(PROTECTION_RESET_REQUEST_PATH) or ".", exist_ok=True)
+            tmp = f"{PROTECTION_RESET_REQUEST_PATH}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, PROTECTION_RESET_REQUEST_PATH)
+            self.manual_resume_pending = True
+            self.manual_resume_request_id = str(request_id)
+            self.manual_resume_sent_ts = now_ts
+            self.manual_resume_last_ack_ok = False
+            self.manual_resume_last_error = ""
+            self._set_manual_resume_button_state(protection_active=True)
+            self.lbl_warn.setText("Reanudación manual enviada al maestro...")
+        except Exception as e:
+            self.manual_resume_last_error = f"Error enviando solicitud: {e}"
+            self.lbl_warn.setText(self.manual_resume_last_error)
+
+    def _render_protection_panel(self, pstate: dict):
+        active = bool((pstate or {}).get("active", False))
+        if not active:
+            self.lbl_protection_banner.setVisible(False)
+            self.lbl_protection_detail.setVisible(False)
+            return
+        mode = str((pstate or {}).get("mode") or "--").upper()
+        reason = str((pstate or {}).get("reason") or "--")
+        dd = float((pstate or {}).get("drawdown_pct") or 0.0)
+        left = int((pstate or {}).get("time_left_s") or 0)
+        status = str((pstate or {}).get("release_status") or "WAIT_MIN_TIME")
+        streak = int((pstate or {}).get("release_ok_streak") or 0)
+        score = int((pstate or {}).get("release_score") or 0)
+        self.lbl_protection_banner.setText(f"🚨 PROTECCIÓN ACTIVA | {mode}")
+        self.lbl_protection_detail.setText(
+            f"⏳ {_fmt_countdown(left)}  |  DD={dd:.2f}%  |  Estado={status}  |  Confirmación={streak}/3  |  Score={score}/4\n"
+            f"Motivo: {reason}"
+        )
+        self.lbl_protection_banner.setVisible(True)
+        self.lbl_protection_detail.setVisible(True)
 
     def _init_crosshair(self):
         self.cross_v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#6688aa88"))
@@ -1376,6 +1521,38 @@ class DashboardWindow(QtWidgets.QMainWindow):
             else:
                 self.lbl_source.setObjectName("BadgeNeutral"); self.lbl_big.setStyleSheet("color:#d8e7ff;")
             self.lbl_source.style().unpolish(self.lbl_source); self.lbl_source.style().polish(self.lbl_source)
+
+            protection_obj, _ = _read_json_if_exists(PROTECTION_HEALTH_STATE_PATH)
+            pstate = protection_obj or {}
+            protection_active = bool(pstate.get("active", False))
+            self._render_protection_panel(pstate)
+
+            ack_obj, _ = _read_json_if_exists(PROTECTION_RESET_ACK_PATH)
+            ack = ack_obj or {}
+            now_ts = float(time.time())
+            if self.manual_resume_pending and self.manual_resume_request_id:
+                ack_action = str(ack.get("action", "")).strip()
+                ack_req = str(ack.get("request_id", "")).strip()
+                if ack_action == "force_resume_protection" and ack_req == str(self.manual_resume_request_id):
+                    self.manual_resume_pending = False
+                    self.manual_resume_last_ack_ok = bool(ack.get("accepted", False))
+                    self.manual_resume_hold_until = float(ack.get("hold_until_ts") or 0.0)
+                    if self.manual_resume_last_ack_ok:
+                        self.lbl_warn.setText("REANUDACIÓN MANUAL ACEPTADA")
+                    else:
+                        reason = str(ack.get("reason") or "rechazada")
+                        self.manual_resume_last_error = reason
+                        self.lbl_warn.setText(f"REANUDACIÓN MANUAL RECHAZADA: {reason}")
+                elif not protection_active:
+                    self.manual_resume_pending = False
+                    self.lbl_warn.setText("Protección finalizada automáticamente")
+                elif (now_ts - float(self.manual_resume_sent_ts or 0.0)) > 10.0:
+                    self.manual_resume_pending = False
+                    self.manual_resume_last_error = "Sin respuesta del maestro"
+                    self.lbl_warn.setText("Sin respuesta del maestro")
+            self._set_manual_resume_button_state(protection_active)
+            self._last_protection_active = protection_active
+
             main_scale = "--"
             main_y0, main_y1 = 0.0, 0.0
             series_map = {
