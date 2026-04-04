@@ -1574,7 +1574,7 @@ async def check_token_and_reconnect(ws, current_token):
                     elif str(src or "").upper() in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
                         estado_bot["ciclo_forzado"] = None
                         if _print_once("lxv-token-real-sin-orden", ttl=10):
-                            print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
+                            print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida | ciclo_forzado=None")
                     elif estado_bot.get("ciclo_forzado"):
                         print(Fore.YELLOW + f"Sin orden fresca: preservo ciclo retenido C{int(estado_bot.get('ciclo_forzado'))}.")
                     else:
