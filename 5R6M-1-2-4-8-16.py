@@ -1465,6 +1465,13 @@ PROTECTION_PAUSE_SECONDS = 30 * 60
 PROTECTION_LOG_COOLDOWN_S = 30.0
 PROTECTION_REARM_COOLDOWN_S = 90.0
 PROTECTION_REARM_DD_RELEASE_MARGIN_PCT = 0.50
+PROTECTION_SHOCK_MIN_S = 20 * 60
+PROTECTION_TREND_MIN_S = 30 * 60
+PROTECTION_EXTENSION_S = 10 * 60
+PROTECTION_RESAMPLE_RULE = "1min"
+PROTECTION_MIN_POINTS = 20
+PROTECTION_NO_NEW_LOWS_WINDOW_S = 10 * 60
+PROTECTION_NO_NEW_LOWS_STALE_S = 5 * 60
 PROTECTION_TEST_RESET_HOLD_S = 120.0
 PROTECTION_POST_RESET_MIN_SAMPLES = 20
 PROTECTION_POST_RESET_MIN_SECONDS = 120.0
@@ -1544,11 +1551,32 @@ protection_last_peak_equity = 0.0
 protection_last_drawdown_pct = 0.0
 protection_ema_alerta = 0.0
 protection_ema_calma = 0.0
+protection_mode = ""
+protection_release_ok_streak = 0
+protection_pause_min_seconds = float(PROTECTION_TREND_MIN_S)
+protection_pause_extended_count = 0
+protection_release_score = 0
+protection_no_new_lows_ok = False
+protection_ema_turn_ok = False
+protection_dd_recovery_ok = False
+protection_calm_band_ok = False
+protection_vol_base = 0.0
+protection_drop_3m = 0.0
+protection_pct_drop_3m = 0.0
+protection_peak_ref = 0.0
+protection_worst_saldo = 0.0
+protection_worst_dd = 0.0
+protection_last_eval_ts = 0.0
+protection_last_new_low_ts = 0.0
+protection_resume_status = "IDLE"
 protection_rearm_blocked = False
+protection_rearm_blocked_until = 0.0
 protection_last_release_ts = 0.0
 protection_test_reset_hold_until_ts = 0.0
 protection_last_reset_request_id = ""
 protection_last_reset_request_ts = 0.0
+protection_last_force_resume_request_id = ""
+protection_last_force_resume_request_ts = 0.0
 protection_eval_from_ts = 0.0
 protection_reset_baseline_equity = 0.0
 protection_reset_baseline_peak = 0.0
@@ -15904,6 +15932,39 @@ def _persistir_saldo_series_csv(payload: dict, now_utc: datetime, event_type: st
         "event_type": str(event_type),
     }
 
+    backup_path = os.path.join(os.path.dirname(csv_path) or ".", "saldo_real_series_backup_mixto.csv")
+    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+        try:
+            with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+                header = next(csv.reader(f), [])
+            header = [str(h).strip() for h in (header or [])]
+            if header != cols:
+                try:
+                    shutil.copy2(csv_path, backup_path)
+                except Exception:
+                    pass
+                with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=cols)
+                    writer.writeheader()
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                try:
+                    agregar_evento("PROTECCION_SALDO: CSV mixto detectado | backup saldo_real_series_backup_mixto.csv | header oficial regenerado")
+                except Exception:
+                    pass
+        except Exception as e:
+            now_log = float(time.time())
+            if (now_log - float(PROTECTION_CSV_WRITE_WARN_LAST_TS or 0.0)) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
+                PROTECTION_CSV_WRITE_WARN_LAST_TS = now_log
+                try:
+                    agregar_evento(f"PROTECCION_SALDO: CSV_HEADER_WARNING | read_error={type(e).__name__}")
+                except Exception:
+                    pass
+            return
+
     last_ts = ""
     last_saldo = None
     if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
@@ -15924,44 +15985,9 @@ def _persistir_saldo_series_csv(payload: dict, now_utc: datetime, event_type: st
         return
 
     write_header = (not os.path.exists(csv_path)) or os.path.getsize(csv_path) <= 0
-    write_cols = list(cols)
-    if not write_header:
-        try:
-            with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
-                reader = csv.reader(f)
-                header = next(reader, [])
-            header = [str(h).strip() for h in (header or []) if str(h).strip()]
-            if header:
-                has_saldo_real = "saldo_real" in header
-                has_equity = "equity" in header
-                if has_saldo_real and (not has_equity):
-                    write_cols = [c for c in cols if c != "equity"]
-                    row.pop("equity", None)
-                elif has_saldo_real and has_equity:
-                    write_cols = list(cols)
-                else:
-                    now_log = float(time.time())
-                    if (now_log - float(PROTECTION_CSV_WRITE_WARN_LAST_TS or 0.0)) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
-                        PROTECTION_CSV_WRITE_WARN_LAST_TS = now_log
-                        try:
-                            agregar_evento(
-                                f"PROTECCION_SALDO: CSV_HEADER_WARNING | schema={','.join(header) if header else 'vacio'}"
-                            )
-                        except Exception:
-                            pass
-                    return
-        except Exception as e:
-            now_log = float(time.time())
-            if (now_log - float(PROTECTION_CSV_WRITE_WARN_LAST_TS or 0.0)) >= float(PROTECTION_DIAG_LOG_COOLDOWN_S):
-                PROTECTION_CSV_WRITE_WARN_LAST_TS = now_log
-                try:
-                    agregar_evento(f"PROTECCION_SALDO: CSV_HEADER_WARNING | read_error={type(e).__name__}")
-                except Exception:
-                    pass
-            return
     try:
         with open(csv_path, "a", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=write_cols)
+            writer = csv.DictWriter(f, fieldnames=cols)
             if write_header:
                 writer.writeheader()
             writer.writerow(row)
@@ -16059,6 +16085,60 @@ def _persistir_saldo_live():
             pass
 
 
+def _load_protection_series_resampled() -> tuple[pd.DataFrame, str, str]:
+    try:
+        try:
+            df = pd.read_csv(SALDO_SERIES_CSV_PATH, encoding="utf-8", on_bad_lines="skip")
+        except TypeError:
+            df = pd.read_csv(SALDO_SERIES_CSV_PATH, encoding="utf-8")
+    except Exception as e:
+        return pd.DataFrame(columns=["ts", "saldo_real", "equity"]), "", f"READ_ERROR | {type(e).__name__}"
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["ts", "saldo_real", "equity"]), "", "CSV_EMPTY_OR_INVALID | dataframe vacio"
+
+    if "saldo_real" not in df.columns:
+        return pd.DataFrame(columns=["ts", "saldo_real", "equity"]), "", "CSV_SCHEMA_ERROR | falta saldo_real"
+
+    work = df.copy()
+    work["saldo_real"] = pd.to_numeric(work.get("saldo_real"), errors="coerce")
+    if "equity" in work.columns:
+        work["equity"] = pd.to_numeric(work.get("equity"), errors="coerce")
+    else:
+        work["equity"] = float("nan")
+    epoch_series = pd.to_numeric(work.get("epoch"), errors="coerce") if "epoch" in work.columns else pd.Series(float("nan"), index=work.index)
+    ts_epoch = pd.to_datetime(epoch_series, unit="s", errors="coerce", utc=True)
+    ts_utc = pd.to_datetime(work.get("ts_utc"), errors="coerce", utc=True) if "ts_utc" in work.columns else pd.Series(pd.NaT, index=work.index)
+    ts_lima = pd.to_datetime(work.get("ts_lima"), errors="coerce", utc=False) if "ts_lima" in work.columns else pd.Series(pd.NaT, index=work.index)
+    try:
+        ts_lima = ts_lima.dt.tz_localize("America/Lima", ambiguous="NaT", nonexistent="NaT").dt.tz_convert("UTC")
+    except Exception:
+        ts_lima = pd.Series(pd.NaT, index=work.index)
+    ts = ts_utc.where(ts_utc.notna(), ts_epoch)
+    ts = ts.where(ts.notna(), ts_lima)
+    work["ts"] = ts
+    work = work.dropna(subset=["ts", "saldo_real"]).copy()
+    if work.empty:
+        return pd.DataFrame(columns=["ts", "saldo_real", "equity"]), "", "CSV_EMPTY_OR_INVALID | sin serie numérica válida"
+    work = work.sort_values("ts")
+    work = work.drop_duplicates(subset=["ts"], keep="last")
+    work = work[(work["saldo_real"] > 0)]
+    if work.empty:
+        return pd.DataFrame(columns=["ts", "saldo_real", "equity"]), "", "CSV_EMPTY_OR_INVALID | sin serie válida tras limpieza"
+    source_col = "saldo_real"
+
+    rs = (
+        work.set_index("ts")[["saldo_real", "equity"]]
+        .resample(PROTECTION_RESAMPLE_RULE)
+        .last()
+        .ffill(limit=3)
+        .dropna(subset=["saldo_real"])
+        .reset_index()
+    )
+    if rs.empty:
+        return pd.DataFrame(columns=["ts", "saldo_real", "equity"]), source_col, "DATA_INSUFFICIENT | remuestreo vacío"
+    return rs, source_col, ""
+
+
 def _equity_protection_time_left_s(now_ts: float | None = None) -> int:
     try:
         now_ts = float(now_ts if now_ts is not None else time.time())
@@ -16068,25 +16148,7 @@ def _equity_protection_time_left_s(now_ts: float | None = None) -> int:
 
 
 def _equity_protection_is_active(now_ts: float | None = None) -> bool:
-    global protection_pause_active
-    global protection_pause_reason, protection_pause_started_ts, protection_pause_until_ts
-    global protection_rearm_blocked, protection_last_release_ts
-    now_ts = float(now_ts if now_ts is not None else time.time())
-    if not bool(protection_pause_active):
-        return False
-    if now_ts < float(protection_pause_until_ts or 0.0):
-        return True
-    protection_pause_active = False
-    protection_pause_reason = ""
-    protection_pause_started_ts = 0.0
-    protection_pause_until_ts = 0.0
-    protection_rearm_blocked = True
-    protection_last_release_ts = now_ts
-    try:
-        agregar_evento("PROTECCION_SALDO: FINALIZADA | maestro reanudado | rearme bloqueado hasta recuperación")
-    except Exception:
-        pass
-    return False
+    return bool(protection_pause_active)
 
 
 def _equity_protection_should_pause() -> bool:
@@ -16255,13 +16317,33 @@ def _write_protection_health_state(now_ts: float | None = None):
         pass
     payload = {
         "active": active_now,
+        "mode": str(protection_mode or ""),
         "reason": str(protection_pause_reason or "") if active_now else "",
         "started_ts": float(protection_pause_started_ts or 0.0) if active_now else 0.0,
         "until_ts": float(protection_pause_until_ts or 0.0) if active_now else 0.0,
+        "min_pause_s": float(protection_pause_min_seconds or 0.0),
+        "extended_count": int(protection_pause_extended_count or 0),
         "time_left_s": int(time_left_s),
         "drawdown_pct": float(protection_last_drawdown_pct or 0.0),
         "equity_now": float(SALDO_LAST_VALID_VALUE) if SALDO_LAST_VALID_VALUE is not None else None,
         "peak_equity": float(protection_last_peak_equity or 0.0),
+        "prot_peak_ref": float(protection_peak_ref or 0.0),
+        "prot_worst_saldo": float(protection_worst_saldo or 0.0),
+        "prot_worst_dd": float(protection_worst_dd or 0.0),
+        "release_ok_streak": int(protection_release_ok_streak or 0),
+        "release_score": int(protection_release_score or 0),
+        "release_status": str(protection_resume_status or "IDLE"),
+        "rearm_blocked": bool(protection_rearm_blocked),
+        "rearm_blocked_until_ts": float(protection_rearm_blocked_until or 0.0),
+        "no_new_lows_ok": bool(protection_no_new_lows_ok),
+        "ema_turn_ok": bool(protection_ema_turn_ok),
+        "dd_recovery_ok": bool(protection_dd_recovery_ok),
+        "calm_band_ok": bool(protection_calm_band_ok),
+        "protection_last_eval_ts": float(protection_last_eval_ts or 0.0),
+        "protection_last_new_low_ts": float(protection_last_new_low_ts or 0.0),
+        "vol_base": float(protection_vol_base or 0.0),
+        "drop_3m": float(protection_drop_3m or 0.0),
+        "pct_drop_3m": float(protection_pct_drop_3m or 0.0),
         "ema_alerta": float(protection_ema_alerta or 0.0),
         "ema_calma": float(protection_ema_calma or 0.0),
         "text_banner": "Deteccion caida-Proteccion de Saldo",
@@ -16303,10 +16385,11 @@ def _write_protection_reset_ack(
     hold_until_ts: float = 0.0,
     status: str = "ok",
     reason: str = "",
+    action: str = "reset_protection_test_ack",
 ):
     now_ts = float(now_ts if now_ts is not None else time.time())
     payload = {
-        "action": "reset_protection_test_ack",
+        "action": str(action or "reset_protection_test_ack"),
         "request_id": str(request_id or ""),
         "accepted": bool(accepted),
         "ts": float(now_ts),
@@ -16479,6 +16562,9 @@ def _reset_equity_protection_for_test(now_ts: float | None = None, request_id: s
 
 def _consume_protection_reset_request(now_ts: float | None = None) -> bool:
     global protection_last_reset_request_id, protection_last_reset_request_ts
+    global protection_last_force_resume_request_id, protection_last_force_resume_request_ts
+    global protection_pause_active, protection_pause_reason, protection_pause_started_ts, protection_pause_until_ts
+    global protection_rearm_blocked, protection_rearm_blocked_until, protection_last_release_ts, protection_resume_status
     now_ts = float(now_ts if now_ts is not None else time.time())
     req_path = PROTECTION_RESET_REQUEST_PATH
     if not os.path.exists(req_path):
@@ -16493,9 +16579,71 @@ def _consume_protection_reset_request(now_ts: float | None = None) -> bool:
         os.remove(req_path)
     except Exception:
         pass
-    if str(req.get("action", "")).strip() != "reset_protection_test":
+    action = str(req.get("action", "")).strip()
+    if action not in ("reset_protection_test", "force_resume_protection"):
         return False
     req_id = str(req.get("request_id", "")).strip()
+    if action == "force_resume_protection":
+        if req_id and req_id == str(protection_last_force_resume_request_id or "").strip():
+            _write_protection_reset_ack(
+                req_id,
+                True,
+                now_ts=now_ts,
+                hold_until_ts=float(protection_rearm_blocked_until or 0.0),
+                status="ok",
+                action="force_resume_protection",
+                reason="duplicate_ignored",
+            )
+            return True
+        if not bool(protection_pause_active):
+            _write_protection_reset_ack(
+                req_id,
+                False,
+                now_ts=now_ts,
+                hold_until_ts=0.0,
+                status="error",
+                action="force_resume_protection",
+                reason="protection_not_active",
+            )
+            return True
+        try:
+            protection_pause_active = False
+            protection_pause_reason = ""
+            protection_pause_started_ts = 0.0
+            protection_pause_until_ts = 0.0
+            protection_resume_status = "MANUAL_OVERRIDE"
+            protection_rearm_blocked = True
+            protection_rearm_blocked_until = float(now_ts + float(PROTECTION_REARM_COOLDOWN_S))
+            protection_last_release_ts = float(now_ts)
+            protection_last_force_resume_request_id = req_id
+            protection_last_force_resume_request_ts = float(now_ts)
+            _write_protection_reset_ack(
+                req_id,
+                True,
+                now_ts=now_ts,
+                hold_until_ts=float(protection_rearm_blocked_until or 0.0),
+                status="ok",
+                action="force_resume_protection",
+                reason="manual_override_accepted",
+            )
+            _write_protection_health_state(now_ts)
+            try:
+                agregar_evento("PROTECCION_SALDO: REANUDACION MANUAL | override usuario")
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            _write_protection_reset_ack(
+                req_id,
+                False,
+                now_ts=now_ts,
+                hold_until_ts=0.0,
+                status="error",
+                action="force_resume_protection",
+                reason=f"exception:{type(e).__name__}",
+            )
+            return True
+
     if req_id and req_id == str(protection_last_reset_request_id or "").strip():
         _write_protection_reset_ack(
             req_id,
@@ -16529,6 +16677,11 @@ def _equity_protection_update(now_ts: float | None = None):
     global protection_incident_id, protection_incident_reason, protection_incident_anchor_peak
     global protection_incident_anchor_ts, protection_incident_lock_active, protection_incident_last_drawdown
     global PROTECTION_LAST_ACTIVE_LOG_TS
+    global protection_mode, protection_release_ok_streak, protection_pause_min_seconds, protection_pause_extended_count
+    global protection_release_score, protection_no_new_lows_ok, protection_ema_turn_ok, protection_dd_recovery_ok
+    global protection_calm_band_ok, protection_vol_base, protection_drop_3m, protection_pct_drop_3m
+    global protection_peak_ref, protection_worst_saldo, protection_worst_dd, protection_last_eval_ts
+    global protection_last_new_low_ts, protection_resume_status, protection_rearm_blocked_until
     now_ts = float(now_ts if now_ts is not None else time.time())
     try:
         epoch_obj = _read_protection_epoch_state()
@@ -16568,228 +16721,146 @@ def _equity_protection_update(now_ts: float | None = None):
         )
         _write_protection_health_state(now_ts)
         return
-    structure_trigger = False
-    structure_reason = ""
     _set_protection_diag(status="ok", reason="", source_column="", series_len=0)
-    try:
-        df = pd.read_csv(SALDO_SERIES_CSV_PATH, encoding="utf-8")
-        if df is None or df.empty:
-            _set_protection_diag(status="error", reason="CSV_EMPTY_OR_INVALID | dataframe vacio", source_column="", series_len=0)
-            _protection_diag_event_once(
-                "CSV_EMPTY_OR_INVALID",
-                "PROTECCION_SALDO: CSV_EMPTY_OR_INVALID | sin serie numérica válida",
-                now_ts,
-            )
-            _equity_protection_is_active(now_ts)
-            _write_protection_health_state(now_ts)
-            return
-        equity_col = ""
-        if "equity" in df.columns:
-            equity_col = "equity"
-        elif "saldo_real" in df.columns:
-            equity_col = "saldo_real"
-        else:
-            _set_protection_diag(
-                status="error",
-                reason="CSV_SCHEMA_ERROR | faltan equity/saldo_real",
-                source_column="",
-                series_len=0,
-            )
-            _protection_diag_event_once(
-                "CSV_SCHEMA_ERROR",
-                "PROTECCION_SALDO: CSV_SCHEMA_ERROR | faltan equity/saldo_real",
-                now_ts,
-            )
-            _equity_protection_is_active(now_ts)
-            _write_protection_health_state(now_ts)
-            return
-        df_eval = df.copy()
-        post_reset_ts_series = None
-        if float(protection_eval_from_ts or 0.0) > 0.0:
-            try:
-                ts_series = pd.Series([float("nan")] * len(df_eval), index=df_eval.index, dtype="float64")
-                if "epoch" in df_eval.columns:
-                    ts_series = pd.to_numeric(df_eval["epoch"], errors="coerce")
-                if "ts_utc" in df_eval.columns:
-                    ts_utc_dt = pd.to_datetime(df_eval["ts_utc"], errors="coerce", utc=True)
-                    ts_utc_epoch = pd.to_numeric(ts_utc_dt.astype("int64"), errors="coerce") / 1e9
-                    ts_series = ts_series.where(ts_series.notna(), ts_utc_epoch)
-                post_reset_ts_series = ts_series
-            except Exception:
-                post_reset_ts_series = None
-            if post_reset_ts_series is None:
-                protection_post_reset_samples = 0
-                protection_post_reset_span_s = 0.0
-                protection_pause_active = False
-                protection_pause_reason = ""
-                protection_pause_started_ts = 0.0
-                protection_pause_until_ts = 0.0
-                protection_last_drawdown_pct = 0.0
-                protection_ema_alerta = 0.0
-                protection_ema_calma = 0.0
-                _set_protection_diag(status="ok", reason="POST_RESET_WARMUP", source_column=equity_col, series_len=0)
-                _write_protection_health_state(now_ts)
-                return
-            try:
-                mask_post = post_reset_ts_series >= float(protection_eval_from_ts or 0.0)
-                df_eval = df_eval.loc[mask_post.fillna(False)].copy()
-            except Exception:
-                df_eval = df_eval.iloc[0:0].copy()
-        eq = pd.to_numeric(df_eval[equity_col], errors="coerce").dropna()
-        eq_len = int(len(eq))
-        if float(protection_eval_from_ts or 0.0) > 0.0:
-            protection_post_reset_samples = int(eq_len)
-            span_s = 0.0
-            try:
-                if post_reset_ts_series is not None and len(df_eval) > 0:
-                    ts_post = pd.to_numeric(post_reset_ts_series.loc[df_eval.index], errors="coerce").dropna()
-                    if len(ts_post) >= 2:
-                        span_s = float(max(0.0, float(ts_post.iloc[-1]) - float(ts_post.iloc[0])))
-            except Exception:
-                span_s = 0.0
-            protection_post_reset_span_s = float(span_s)
-        else:
-            protection_post_reset_samples = int(eq_len)
-            protection_post_reset_span_s = 0.0
-        _set_protection_diag(status="ok", reason="", source_column=equity_col, series_len=eq_len)
-        if eq.empty:
-            if float(protection_eval_from_ts or 0.0) > 0.0:
-                protection_pause_active = False
-                protection_pause_reason = ""
-                protection_pause_started_ts = 0.0
-                protection_pause_until_ts = 0.0
-                protection_last_drawdown_pct = 0.0
-                protection_ema_alerta = 0.0
-                protection_ema_calma = 0.0
-                _set_protection_diag(status="ok", reason="POST_RESET_WARMUP", source_column=equity_col, series_len=0)
-                _write_protection_health_state(now_ts)
-                return
-            _set_protection_diag(
-                status="error",
-                reason="CSV_EMPTY_OR_INVALID | sin serie numérica válida",
-                source_column=equity_col,
-                series_len=0,
-            )
-            _protection_diag_event_once(
-                "CSV_EMPTY_OR_INVALID",
-                "PROTECCION_SALDO: CSV_EMPTY_OR_INVALID | sin serie numérica válida",
-                now_ts,
-            )
-            _equity_protection_is_active(now_ts)
-            _write_protection_health_state(now_ts)
-            return
-        if float(protection_eval_from_ts or 0.0) > 0.0:
-            warmup_samples_ok = int(eq_len) >= int(PROTECTION_POST_RESET_MIN_SAMPLES)
-            warmup_time_ok = float(protection_post_reset_span_s or 0.0) >= float(PROTECTION_POST_RESET_MIN_SECONDS)
-            if not (warmup_samples_ok and warmup_time_ok):
-                protection_pause_active = False
-                protection_pause_reason = ""
-                protection_pause_started_ts = 0.0
-                protection_pause_until_ts = 0.0
-                protection_last_drawdown_pct = 0.0
-                protection_ema_alerta = 0.0
-                protection_ema_calma = 0.0
-                _set_protection_diag(status="ok", reason="POST_RESET_WARMUP", source_column=equity_col, series_len=eq_len)
-                _write_protection_health_state(now_ts)
-                return
-        if eq_len < 20:
-            _set_protection_diag(
-                status="warning",
-                reason=f"CSV_SHORT_SERIES | muestras={eq_len} (<20)",
-                source_column=equity_col,
-                series_len=eq_len,
-            )
-            _protection_diag_event_once(
-                "CSV_SHORT_SERIES",
-                f"PROTECCION_SALDO: CSV_SHORT_SERIES | muestras={eq_len} (<20)",
-                now_ts,
-            )
-            _equity_protection_is_active(now_ts)
-            _write_protection_health_state(now_ts)
-            return
-        try:
-            structure_trigger, structure_reason = _equity_structure_break_signal([float(v) for v in eq.tolist()])
-        except Exception:
-            structure_trigger, structure_reason = False, ""
-        protection_ema_alerta = float(eq.ewm(span=int(EMA_ALERTA_SPAN), adjust=False).mean().iloc[-1])
-        protection_ema_calma = float(eq.ewm(span=int(EMA_CALMA_SPAN), adjust=False).mean().iloc[-1])
-        peak = float(eq.cummax().iloc[-1])
-        if float(protection_eval_from_ts or 0.0) > 0.0:
-            peak = float(max(float(peak), float(protection_reset_baseline_peak or 0.0)))
-        now_eq = float(eq.iloc[-1])
-        protection_last_peak_equity = peak
-        if abs(peak) > 1e-12:
-            protection_last_drawdown_pct = float(((now_eq - peak) / peak) * 100.0)
-        else:
-            protection_last_drawdown_pct = 0.0
-        protection_incident_last_drawdown = float(protection_last_drawdown_pct or 0.0)
-    except Exception as e:
-        _set_protection_diag(status="error", reason=f"READ_ERROR | {type(e).__name__}", source_column="", series_len=0)
-        _protection_diag_event_once(
-            "READ_ERROR",
-            f"PROTECCION_SALDO: READ_ERROR | {type(e).__name__}",
-            now_ts,
-        )
-        _equity_protection_is_active(now_ts)
+    rs, source_col, load_err = _load_protection_series_resampled()
+    if load_err:
+        _set_protection_diag(status="warning", reason=f"DATA_INSUFFICIENT | {load_err}", source_column=source_col, series_len=0)
+        if not protection_pause_active:
+            protection_resume_status = "DATA_INSUFFICIENT"
         _write_protection_health_state(now_ts)
         return
+    eq = pd.to_numeric(rs["saldo_real"], errors="coerce").dropna()
+    eq_len = int(len(eq))
+    if eq_len < int(PROTECTION_MIN_POINTS):
+        _set_protection_diag(status="warning", reason=f"DATA_INSUFFICIENT | muestras={eq_len}", source_column=source_col, series_len=eq_len)
+        if not protection_pause_active:
+            protection_resume_status = "DATA_INSUFFICIENT"
+        _write_protection_health_state(now_ts)
+        return
+    _set_protection_diag(status="ok", reason="", source_column=source_col, series_len=eq_len)
 
-    active_now = _equity_protection_is_active(now_ts)
-    ema_trigger = bool(_equity_protection_should_pause())
-    raw_trigger = bool(ema_trigger)
-    incident_reason = str("EMA_ALERTA" if ema_trigger else "")
-    candidate_incident_id = _build_equity_protection_incident_id(
-        reason=incident_reason,
-        anchor_peak=float(protection_last_peak_equity or 0.0),
-        drawdown_pct=float(protection_last_drawdown_pct or 0.0),
+    now_eq = float(eq.iloc[-1])
+    ts_series = pd.to_datetime(rs["ts"], errors="coerce", utc=True)
+    ts_epoch = pd.to_numeric(ts_series.astype("int64"), errors="coerce") / 1e9
+    if float(protection_eval_from_ts or 0.0) <= 0.0:
+        protection_eval_from_ts = float(now_ts)
+        protection_reset_baseline_equity = float(now_eq)
+        protection_reset_baseline_peak = float(now_eq)
+        protection_post_reset_samples = 0
+        protection_post_reset_span_s = 0.0
+        protection_pause_active = False
+        protection_pause_reason = ""
+        protection_pause_started_ts = 0.0
+        protection_pause_until_ts = 0.0
+        protection_resume_status = "BOOT_WARMUP"
+        _set_protection_diag(status="ok", reason="BOOT_WARMUP", source_column=source_col, series_len=eq_len)
+        _write_protection_health_state(now_ts)
+        return
+    try:
+        mask_post = ts_epoch >= float(protection_eval_from_ts or 0.0)
+        eq_post = pd.to_numeric(rs.loc[mask_post.fillna(False), "saldo_real"], errors="coerce").dropna()
+        ts_post = pd.to_numeric(ts_epoch.loc[mask_post.fillna(False)], errors="coerce").dropna()
+    except Exception:
+        eq_post = pd.Series(dtype="float64")
+        ts_post = pd.Series(dtype="float64")
+    protection_post_reset_samples = int(len(eq_post))
+    if len(ts_post) >= 2:
+        protection_post_reset_span_s = float(max(0.0, float(ts_post.iloc[-1]) - float(ts_post.iloc[0])))
+    else:
+        protection_post_reset_span_s = 0.0
+    warmup_samples_ok = int(protection_post_reset_samples) >= int(PROTECTION_POST_RESET_MIN_SAMPLES)
+    warmup_time_ok = float(protection_post_reset_span_s or 0.0) >= float(PROTECTION_POST_RESET_MIN_SECONDS)
+    if not (warmup_samples_ok and warmup_time_ok):
+        protection_pause_active = False
+        protection_pause_reason = ""
+        protection_pause_started_ts = 0.0
+        protection_pause_until_ts = 0.0
+        protection_resume_status = "BOOT_WARMUP"
+        _set_protection_diag(status="ok", reason="BOOT_WARMUP", source_column=source_col, series_len=int(protection_post_reset_samples))
+        _write_protection_health_state(now_ts)
+        return
+    eq_eval = eq_post if len(eq_post) >= 2 else eq
+    now_eq = float(eq_eval.iloc[-1])
+    ema_short = eq_eval.ewm(span=int(EMA_ALERTA_SPAN), adjust=False).mean()
+    ema_long = eq_eval.ewm(span=int(EMA_CALMA_SPAN), adjust=False).mean()
+    protection_ema_alerta = float(ema_short.iloc[-1])
+    protection_ema_calma = float(ema_long.iloc[-1])
+
+    diffs = eq_eval.diff().abs().dropna()
+    vol_base = float(diffs.tail(120).median()) if not diffs.empty else 0.0
+    vol_base = max(0.01, vol_base)
+    protection_vol_base = float(vol_base)
+
+    n3 = min(len(eq_eval), 4)
+    ref_3m = float(eq_eval.iloc[-n3]) if n3 > 0 else now_eq
+    drop_3m = max(0.0, float(ref_3m - now_eq))
+    pct_drop_3m = (drop_3m / max(1e-9, ref_3m)) if ref_3m > 0 else 0.0
+    protection_drop_3m = float(drop_3m)
+    protection_pct_drop_3m = float(pct_drop_3m)
+
+    peak_ref = float(eq_eval.tail(30).max())
+    protection_peak_ref = float(peak_ref)
+    protection_last_peak_equity = float(peak_ref)
+    dd_now = ((peak_ref - now_eq) / peak_ref) if peak_ref > 1e-9 else 0.0
+    protection_last_drawdown_pct = float(-dd_now * 100.0)
+    protection_incident_last_drawdown = float(protection_last_drawdown_pct)
+
+    short_slope = float(ema_short.iloc[-1] - ema_short.iloc[max(0, len(ema_short) - 4)])
+    long_slope = float(ema_long.iloc[-1] - ema_long.iloc[max(0, len(ema_long) - 4)])
+    recent = eq_eval.tail(10)
+    new_lows_repeated = bool(len(recent) >= 6 and float(recent.iloc[-1]) <= float(recent.min()) + 1e-9)
+    shock_trigger = bool(
+        drop_3m >= max(3.0 * vol_base, 0.018 * max(now_eq, 1.0))
+        and protection_ema_alerta < protection_ema_calma
     )
-    if bool(protection_incident_lock_active):
-        if _equity_protection_incident_can_clear(structure_trigger=structure_trigger):
-            protection_incident_lock_active = False
-        elif raw_trigger and (not _equity_protection_incident_is_new(candidate_incident_id, structure_trigger=structure_trigger, now_ts=now_ts)):
-            raw_trigger = False
-            _set_protection_diag(
-                status="ok",
-                reason="INCIDENT_LOCK_ACTIVE",
-                source_column=str(PROTECTION_SOURCE_COLUMN or ""),
-                series_len=int(PROTECTION_SERIES_LEN or 0),
-            )
-    if bool(active_now) and str(PROTECTION_DIAG_REASON or "") == "INCIDENT_LOCK_ACTIVE":
-        _set_protection_diag(
-            status="ok",
-            reason="",
-            source_column=str(PROTECTION_SOURCE_COLUMN or ""),
-            series_len=int(PROTECTION_SERIES_LEN or 0),
-        )
+    trend_trigger = bool(
+        dd_now >= 0.035
+        and protection_ema_alerta < protection_ema_calma
+        and long_slope < 0.0
+        and new_lows_repeated
+    )
+    trigger_mode = "shock" if shock_trigger else ("trend" if trend_trigger else "")
+    trigger_reason = ""
+    if trigger_mode == "shock":
+        trigger_reason = f"SHOCK drop_3m={drop_3m:,.2f} ({pct_drop_3m*100.0:.2f}%)"
+    elif trigger_mode == "trend":
+        trigger_reason = f"TREND dd={dd_now*100.0:.2f}% slope={long_slope:,.4f}"
+
     if bool(protection_rearm_blocked):
-        recovery_ok = _equity_protection_recovery_ok(structure_trigger=structure_trigger)
+        recovery_ok = bool(protection_ema_alerta >= protection_ema_calma or dd_now < 0.02)
         cooldown_ok = (now_ts - float(protection_last_release_ts or 0.0)) >= float(PROTECTION_REARM_COOLDOWN_S)
+        until_ok = now_ts >= float(protection_rearm_blocked_until or 0.0)
         if recovery_ok and cooldown_ok:
             protection_rearm_blocked = False
-            try:
-                agregar_evento("PROTECCION_SALDO: REARME HABILITADO | recuperación confirmada")
-            except Exception:
-                pass
+            protection_rearm_blocked_until = 0.0
+            _protection_diag_event_once("REARME_HABILITADO", "PROTECCION_SALDO: REARME HABILITADO | recuperación confirmada", now_ts)
+        elif until_ok and cooldown_ok:
+            protection_rearm_blocked = False
+            protection_rearm_blocked_until = 0.0
+            _protection_diag_event_once("REARME_TIMEOUT", "PROTECCION_SALDO: REARME HABILITADO | cooldown cumplido", now_ts)
         else:
-            raw_trigger = False
-    if bool(active_now) and bool(raw_trigger):
-        _protection_diag_event_once(
-            "TRIGGER_IGNORADO_PAUSA_ACTIVA",
-            "PROTECCION_SALDO: trigger ignorado | pausa ya activa",
-            now_ts,
-        )
-        raw_trigger = False
-    if (not active_now) and raw_trigger:
+            trigger_mode = ""
+
+    if (not protection_pause_active) and trigger_mode:
         protection_pause_active = True
-        protection_pause_reason = str("EMA_ALERTA<EMA_CALMA y drawdown umbral")
+        protection_mode = str(trigger_mode)
+        protection_pause_reason = str(trigger_reason or trigger_mode.upper())
         protection_pause_started_ts = now_ts
-        protection_pause_until_ts = now_ts + float(PROTECTION_PAUSE_SECONDS)
+        protection_pause_min_seconds = float(PROTECTION_SHOCK_MIN_S if trigger_mode == "shock" else PROTECTION_TREND_MIN_S)
+        protection_pause_until_ts = now_ts + float(protection_pause_min_seconds)
+        protection_pause_extended_count = 0
         protection_pause_last_trigger_ts = now_ts
         protection_last_trigger_ts = now_ts
-        protection_incident_reason = str(incident_reason or protection_pause_reason or "unknown")
-        protection_incident_anchor_peak = float(protection_last_peak_equity or 0.0)
+        protection_release_ok_streak = 0
+        protection_release_score = 0
+        protection_peak_ref = float(peak_ref)
+        protection_worst_saldo = float(now_eq)
+        protection_worst_dd = float(dd_now)
+        protection_last_new_low_ts = now_ts
+        protection_resume_status = "WAIT_MIN_TIME"
+        protection_incident_reason = str(protection_pause_reason)
+        protection_incident_anchor_peak = float(peak_ref)
         protection_incident_anchor_ts = now_ts
-        protection_incident_last_drawdown = float(protection_last_drawdown_pct or 0.0)
         protection_incident_id = _build_equity_protection_incident_id(
             reason=protection_incident_reason,
             anchor_peak=protection_incident_anchor_peak,
@@ -16797,29 +16868,79 @@ def _equity_protection_update(now_ts: float | None = None):
         )
         protection_incident_lock_active = True
         try:
-                agregar_evento(
-                    f"PROTECCION_SALDO: ACTIVADA | reason={str(protection_pause_reason)} | "
-                    f"dd={float(protection_last_drawdown_pct):.1f}% | pausa=30m"
-                )
+            mins = int(round(float(protection_pause_min_seconds) / 60.0))
+            agregar_evento(f"PROTECCION_SALDO: ACTIVADA | mode={trigger_mode.upper()} | min_pause={mins}m | reason={protection_pause_reason}")
         except Exception:
             pass
-        active_now = True
-    elif (not active_now) and bool(structure_trigger):
-        _protection_diag_event_once(
-            "STRUCTURE_TRIGGER_IGNORED",
-            f"PROTECCION_SALDO: STRUCTURE_TRIGGER_IGNORED | reason={str(structure_reason or '--')}",
-            now_ts,
-        )
 
-    if active_now:
-        if (now_ts - float(PROTECTION_LAST_ACTIVE_LOG_TS or 0.0)) >= float(PROTECTION_LOG_COOLDOWN_S):
-            PROTECTION_LAST_ACTIVE_LOG_TS = now_ts
-            try:
-                agregar_evento(
-                    f"PROTECCION_SALDO: ACTIVE_WINDOW vigente | left={_fmt_protection_countdown(_equity_protection_time_left_s(now_ts))}"
+    if protection_pause_active:
+        protection_last_eval_ts = now_ts
+        protection_worst_saldo = float(min(float(protection_worst_saldo or now_eq), now_eq))
+        protection_worst_dd = float(max(float(protection_worst_dd or 0.0), dd_now))
+        if now_eq <= float(protection_worst_saldo or now_eq) + 1e-9:
+            protection_last_new_low_ts = now_ts
+            protection_release_ok_streak = 0
+        if now_ts < float(protection_pause_until_ts or 0.0):
+            protection_resume_status = "WAIT_MIN_TIME"
+        else:
+            margin_stab = max(0.3 * vol_base, 0.002 * max(now_eq, 1.0))
+            last_10 = eq_eval.tail(10)
+            min_10 = float(last_10.min()) if len(last_10) > 0 else now_eq
+            min_idx = last_10.idxmin() if len(last_10) > 0 else eq_eval.index[-1]
+            min_pos = eq_eval.index.get_loc(min_idx)
+            min_age_samples = max(0, len(eq_eval) - 1 - int(min_pos))
+            min_age_s = float(min_age_samples * 60.0)
+            no_new_lows = bool(min_age_s >= float(PROTECTION_NO_NEW_LOWS_STALE_S) and now_eq >= (float(protection_worst_saldo or min_10) + margin_stab))
+            ema_prev = float(ema_short.iloc[max(0, len(ema_short) - 4)])
+            ema_slope = float(ema_short.iloc[-1] - ema_prev)
+            ema_turn_ok = bool(ema_slope >= max(-0.05 * vol_base, -0.01 * max(vol_base, 1.0)))
+            dd_recovery_ok = bool(dd_now <= float(protection_worst_dd or dd_now) * 0.70)
+            calm_band = float(ema_long.iloc[-1] - 0.5 * vol_base)
+            calm_band_ok = bool(now_eq >= calm_band)
+            release_score = int(no_new_lows) + int(ema_turn_ok) + int(dd_recovery_ok) + int(calm_band_ok)
+            protection_no_new_lows_ok = bool(no_new_lows)
+            protection_ema_turn_ok = bool(ema_turn_ok)
+            protection_dd_recovery_ok = bool(dd_recovery_ok)
+            protection_calm_band_ok = bool(calm_band_ok)
+            protection_release_score = int(release_score)
+            protection_resume_status = "EVALUATING_RELEASE"
+            if release_score >= 3:
+                protection_release_ok_streak = int(protection_release_ok_streak or 0) + 1
+            else:
+                protection_release_ok_streak = 0
+            if int(protection_release_ok_streak) >= 3:
+                protection_pause_active = False
+                protection_pause_reason = ""
+                protection_pause_started_ts = 0.0
+                protection_pause_until_ts = 0.0
+                protection_rearm_blocked = True
+                protection_rearm_blocked_until = float(now_ts + float(PROTECTION_REARM_COOLDOWN_S))
+                protection_last_release_ts = now_ts
+                protection_resume_status = "RELEASED_CONFIRMED"
+                protection_mode = ""
+                try:
+                    agregar_evento("PROTECCION_SALDO: FINALIZADA | salida confirmada por estabilidad")
+                except Exception:
+                    pass
+            elif now_ts >= float(protection_pause_until_ts or 0.0):
+                protection_pause_until_ts = now_ts + float(PROTECTION_EXTENSION_S)
+                protection_pause_extended_count = int(protection_pause_extended_count or 0) + 1
+                protection_resume_status = "EXTENDED_WEAK_TREND"
+                _protection_diag_event_once(
+                    "PROTECTION_EXTENDED",
+                    "PROTECCION_SALDO: protección extendida 10m | tendencia sigue débil",
+                    now_ts,
                 )
-            except Exception:
-                pass
+
+    if protection_pause_active and (now_ts - float(PROTECTION_LAST_ACTIVE_LOG_TS or 0.0)) >= float(PROTECTION_LOG_COOLDOWN_S):
+        PROTECTION_LAST_ACTIVE_LOG_TS = now_ts
+        mode_txt = str(protection_mode or "trend").upper()
+        try:
+            agregar_evento(
+                f"PROTECCION_SALDO: ACTIVA | {mode_txt} | left={_fmt_protection_countdown(_equity_protection_time_left_s(now_ts))} | rel={int(protection_release_ok_streak or 0)}/3"
+            )
+        except Exception:
+            pass
 
     _write_protection_health_state(now_ts)
 
