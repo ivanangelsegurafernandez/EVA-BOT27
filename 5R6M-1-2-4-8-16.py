@@ -15223,7 +15223,7 @@ def _rankear_x_localmente(red_bots: list[str], cols: list[dict], estado: dict | 
 
 
 
-def _trade_key_lxb_sync(row: dict) -> str:
+def _trade_key_lxv_sync(row: dict) -> str:
     rid = str((row or {}).get("ia_decision_id", "") or "").strip()
     if rid:
         return rid
@@ -15237,7 +15237,7 @@ def _trade_key_lxb_sync(row: dict) -> str:
 
 
 def _extraer_rondas_cerradas_bot(bot: str, max_rounds: int = 120) -> dict:
-    """Extrae rondas ordinales cerradas (fuente de verdad LXB_SYNC) desde CSV enriquecido."""
+    """Extrae rondas ordinales cerradas (fuente de verdad LXV_SYNC) desde CSV enriquecido."""
     out = {"bot": str(bot), "rounds": [], "pending_open": False, "total_closed": 0}
     ruta = f"registro_enriquecido_{bot}.csv"
     if not os.path.exists(ruta):
@@ -15249,7 +15249,7 @@ def _extraer_rondas_cerradas_bot(bot: str, max_rounds: int = 120) -> dict:
             reader = csv.DictReader(fh)
             for raw in reader:
                 row = canonicalizar_campos_bot_maestro(dict(raw or {}))
-                key = _trade_key_lxb_sync(row)
+                key = _trade_key_lxv_sync(row)
                 if not key:
                     continue
                 cur = rec.get(key, {"has_pre": False, "close": None})
@@ -15302,7 +15302,7 @@ def _extraer_rondas_cerradas_bot(bot: str, max_rounds: int = 120) -> dict:
     return out
 
 
-def _construir_columna_lxb_sincronizada(estado: dict, bots: list[str], max_rounds: int = 120) -> dict:
+def _construir_columna_lxv_sincronizada(estado: dict, bots: list[str], max_rounds: int = 120) -> dict:
     """Construye la última columna N cerrada y común entre bots (sin offsets)."""
     bot_list = [str(b) for b in list(bots or []) if str(b).strip()]
     if not bot_list:
@@ -15358,7 +15358,7 @@ def _peso_probabilistico_bot(bot: str, estado: dict | None = None) -> float:
     return float((35.0 * prob_ia_oper) + (25.0 * ia_score_hibrido) + (15.0 * ia_evidence_wr) + (0.6 * min(20.0, max(0.0, ia_evidence_n))) + (8.0 * payout))
 
 
-def _resolver_lxb_sincronizado(candidatos: list, estado: dict, bot_names: list[str], emitir_log: bool = True) -> dict:
+def _resolver_lxv_sincronizado(candidatos: list, estado: dict, bot_names: list[str], emitir_log: bool = True) -> dict:
     out = {
         "triggered": False, "selected_bot": None, "selected_case": None, "selected_score": 0.0,
         "reason": "estructura_insuficiente", "valids": 0, "greens": 0, "reds": 0,
@@ -15366,19 +15366,19 @@ def _resolver_lxb_sincronizado(candidatos: list, estado: dict, bot_names: list[s
     }
     try:
         bots = [str(b) for b in list(bot_names or []) if str(b).strip()]
-        sync = _construir_columna_lxb_sincronizada(estado if isinstance(estado, dict) else {}, bots, max_rounds=120)
+        sync = _construir_columna_lxv_sincronizada(estado if isinstance(estado, dict) else {}, bots, max_rounds=120)
         out["round"] = int(sync.get("round", 0) or 0)
         out["missing_bots"] = list(sync.get("missing_bots", []) or [])
         out["pending_bots"] = list(sync.get("pending_bots", []) or [])
         if sync.get("reason") == "pendiente_abierta":
             out["reason"] = "pendiente_abierta"
             if emitir_log:
-                agregar_evento(f"LXB_SYNC_SKIP: ronda={int(out['round'] or 0)} | motivo=pendiente_abierta")
+                agregar_evento(f"LXV_SYNC_SKIP: ronda={int(out['round'] or 0)} | motivo=pendiente_abierta")
             return out
         if not bool(sync.get("ready", False)):
             out["reason"] = "round_incompleta"
             if emitir_log:
-                agregar_evento(f"LXB_SYNC_WAIT: ronda={int((out['round'] or 0) + 1)} | faltan_bots={','.join(out['missing_bots']) or '-'}")
+                agregar_evento(f"LXV_SYNC_WAIT: ronda={int((out['round'] or 0) + 1)} | faltan_bots={','.join(out['missing_bots']) or '-'}")
             return out
 
         valids = int(sync.get("total_validos", 0) or 0)
@@ -15390,7 +15390,7 @@ def _resolver_lxb_sincronizado(candidatos: list, estado: dict, bot_names: list[s
 
         out.update({"valids": valids, "greens": greens, "reds": reds, "red_bots": red_bots})
         if emitir_log:
-            agregar_evento(f"LXB_SYNC_READY: ronda={int(out['round'])} | greens={greens} | reds={reds}")
+            agregar_evento(f"LXV_SYNC_READY: ronda={int(out['round'])} | greens={greens} | reds={reds}")
 
         if valids != n_bots:
             out["reason"] = "validos_incompletos"
@@ -15415,17 +15415,31 @@ def _resolver_lxb_sincronizado(candidatos: list, estado: dict, bot_names: list[s
         if emitir_log:
             if out.get("triggered"):
                 agregar_evento(
-                    f"LXB_SYNC_REAL: SI | ronda={int(out['round'])} | bot={out.get('selected_bot')} | case={out.get('selected_case')}"
+                    f"LXV_SYNC_REAL: SI | ronda={int(out['round'])} | bot={out.get('selected_bot')} | case={out.get('selected_case')}"
                 )
             else:
-                agregar_evento(f"LXB_SYNC_REAL: NO | ronda={int(out['round'])} | motivo={out.get('reason')}")
+                agregar_evento(f"LXV_SYNC_REAL: NO | ronda={int(out['round'])} | motivo={out.get('reason')}")
         return out
     except Exception:
         out["reason"] = "estructura_insuficiente"
         if emitir_log:
-            agregar_evento(f"LXB_SYNC_REAL: NO | ronda={int(out.get('round', 0) or 0)} | motivo=estructura_insuficiente")
+            agregar_evento(f"LXV_SYNC_REAL: NO | ronda={int(out.get('round', 0) or 0)} | motivo=estructura_insuficiente")
         return out
 
+
+
+
+# Compat temporal (naming previo LXB)
+def _trade_key_lxb_sync(row: dict) -> str:
+    return _trade_key_lxv_sync(row)
+
+
+def _construir_columna_lxb_sincronizada(estado: dict, bots: list[str], max_rounds: int = 120) -> dict:
+    return _construir_columna_lxv_sincronizada(estado, bots, max_rounds=max_rounds)
+
+
+def _resolver_lxb_sincronizado(candidatos: list, estado: dict, bot_names: list[str], emitir_log: bool = True) -> dict:
+    return _resolver_lxv_sincronizado(candidatos, estado, bot_names, emitir_log=emitir_log)
 
 def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[str], emitir_log: bool = True) -> dict:
     """LOGICA_VERDE_X_PONDERADA: promover a REAL con mínimo 4 verdes + 1/2 X."""
@@ -18113,11 +18127,11 @@ async def main():
 
                         if candidatos:
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
-                        logica_unica_real = _resolver_lxb_sincronizado(candidatos, estado_bots, BOT_NAMES, emitir_log=True)
+                        logica_unica_real = _resolver_lxv_sincronizado(candidatos, estado_bots, BOT_NAMES, emitir_log=True)
                         lxv_permite_real_nuevo = bool(logica_unica_real.get("triggered", False))
                         selected_bot_operativo = ""
                         selected_prob_operativo = 0.0
-                        real_source_operativo = "LXB_SINCRONIZADO"
+                        real_source_operativo = "LXV_SINCRONIZADO"
                         if lxv_permite_real_nuevo:
                             selected_bot = str(logica_unica_real.get("selected_bot") or "").strip()
                             rec = next((c for c in list(candidatos or []) if str(c[1]) == selected_bot), None)
@@ -18189,17 +18203,17 @@ async def main():
 
                         if lxv_permite_real_nuevo and selected_bot_operativo:
                             agregar_evento(
-                                f"LXB_SYNC_REAL: SI | bot={selected_bot_operativo} | greens={int(logica_unica_real.get('greens', 0) or 0)} "
+                                f"LXV_SYNC_REAL: SI | bot={selected_bot_operativo} | greens={int(logica_unica_real.get('greens', 0) or 0)} "
                                 f"| reds={int(logica_unica_real.get('reds', 0) or 0)} | case={str(logica_unica_real.get('selected_case') or '--')} "
-                                f"| ronda={int(logica_unica_real.get('round', 0) or 0)} | score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} | source=LXB_SYNC | "
-                                f"decision_final=REAL_OK por LXB_SYNC"
+                                f"| ronda={int(logica_unica_real.get('round', 0) or 0)} | score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} | source=LXV_SYNC | "
+                                f"decision_final=REAL_OK por LXV_SYNC"
                             )
-                            agregar_evento(f"LXB_SYNC_CANDIDATE_READY: columna sincronizada -> candidato REAL {selected_bot_operativo}")
+                            agregar_evento(f"LXV_SYNC_CANDIDATE_READY: columna sincronizada -> candidato REAL {selected_bot_operativo}")
                             if veto_flags_info:
                                 agregar_evento("LXV_INFO: " + " | ".join(veto_flags_info[:6]))
                         elif not lxv_permite_real_nuevo:
                             agregar_evento(
-                                f"LXB_SYNC_REAL: NO | motivo_estructural={str(logica_unica_real.get('reason') or 'estructura_insuficiente')} "
+                                f"LXV_SYNC_REAL: NO | motivo_estructural={str(logica_unica_real.get('reason') or 'estructura_insuficiente')} "
                                 f"| round={int(logica_unica_real.get('round', 0) or 0)}"
                             )
 
