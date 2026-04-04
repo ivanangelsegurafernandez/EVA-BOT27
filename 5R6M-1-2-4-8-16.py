@@ -15159,10 +15159,11 @@ def _perfil_comun_flex_eval(bot: str) -> dict:
         return out
 
 
-def _rankear_x_localmente(red_bots: list[str], cols: list[dict]) -> list[dict]:
-    """Ranking estructural local (solo matriz/columna inmediata) para resolver caso 2X."""
+def _rankear_x_localmente(red_bots: list[str], cols: list[dict], estado: dict | None = None) -> list[dict]:
+    """Ranking local para caso 2X: estructura + ponderación operativa disponible."""
     out = []
     columnas = list(cols or [])
+    estado_bots = estado if isinstance(estado, dict) else {}
     for bot in list(red_bots or []):
         b = str(bot)
         marks = [str((col or {}).get("cells", {}).get(b) or "") for col in columnas[:6]]
@@ -15178,23 +15179,44 @@ def _rankear_x_localmente(red_bots: list[str], cols: list[dict]) -> list[dict]:
                 racha_roja_previa += 1
             else:
                 break
-        score = (
+        score_local = (
             (100 if prev_1 == "G" else 0)
             + (20 * int(verdes_recientes))
             + (5 if prev_2 == "G" else 0)
             - (12 * int(racha_roja_previa))
             - (3 * int(rojas_recientes))
         )
+        st = estado_bots.get(b, {}) if isinstance(estado_bots.get(b, {}), dict) else {}
+        prob_ia_oper = float(st.get("prob_ia_oper", st.get("prob_ia", 0.0)) or 0.0)
+        ia_score_hibrido = float(st.get("ia_score_hibrido", 0.0) or 0.0)
+        ia_evidence_wr = float(st.get("ia_evidence_wr", 0.0) or 0.0)
+        ia_evidence_n = float(st.get("ia_evidence_n", 0.0) or 0.0)
+        payout = float(st.get("payout", 0.0) or 0.0)
+        score_operativo = (
+            (35.0 * prob_ia_oper)
+            + (25.0 * ia_score_hibrido)
+            + (15.0 * ia_evidence_wr)
+            + (0.6 * min(20.0, max(0.0, ia_evidence_n)))
+            + (8.0 * payout)
+        )
+        score_final_hibrido = float(score_local) + float(score_operativo)
         out.append({
             "bot": b,
-            "score_local": float(score),
+            "score_local": float(score_local),
+            "score_operativo": float(score_operativo),
+            "score_final_hibrido": float(score_final_hibrido),
             "prev_1": prev_1,
             "prev_2": prev_2,
             "verdes_recientes": int(verdes_recientes),
             "rojas_recientes": int(rojas_recientes),
             "racha_roja_previa": int(racha_roja_previa),
+            "prob_ia_oper": float(prob_ia_oper),
+            "ia_score_hibrido": float(ia_score_hibrido),
+            "ia_evidence_wr": float(ia_evidence_wr),
+            "ia_evidence_n": float(ia_evidence_n),
+            "payout": float(payout),
         })
-    out.sort(key=lambda r: (-float(r.get("score_local", 0.0) or 0.0), str(r.get("bot", ""))))
+    out.sort(key=lambda r: (-float(r.get("score_final_hibrido", 0.0) or 0.0), str(r.get("bot", ""))))
     return out
 
 
@@ -15204,74 +15226,114 @@ def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[
         "triggered": False,
         "selected_bot": None,
         "selected_case": None,
+        "selected_offset": None,
+        "selected_score": 0.0,
         "reason": "estructura_insuficiente",
         "valids": 0,
         "greens": 0,
         "reds": 0,
         "red_bots": [],
         "ranking_debug": [],
+        "reasons_by_offset": {},
+        "candidates_considered": [],
     }
     try:
         bots = list(bot_names or [])
         cols = _construir_matriz_resultados_columnas(estado if isinstance(estado, dict) else {}, bots, window=40)
         if not cols:
-            out["reason"] = "estructura_insuficiente"
+            out["reason"] = "sin_columnas"
             return out
-        col = dict(cols[0] or {})
-        valids = int(col.get("total_validos", 0) or 0)
-        greens = int(col.get("total_verdes", 0) or 0)
-        reds = int(col.get("total_rojos", 0) or 0)
-        out["valids"] = int(valids)
-        out["greens"] = int(greens)
-        out["reds"] = int(reds)
+        reasons_by_offset = {}
+        candidates_ok = []
+        max_offsets = min(4, len(cols))
+        for offset in range(max_offsets):
+            col = dict(cols[offset] or {})
+            valids = int(col.get("total_validos", 0) or 0)
+            greens = int(col.get("total_verdes", 0) or 0)
+            reds = int(col.get("total_rojos", 0) or 0)
+            cells = dict(col.get("cells", {}) or {})
+            red_bots = [str(b) for b, m in cells.items() if str(b) in bots and m == "R"]
+            motivo = "ok"
+            if valids < 4:
+                motivo = "validos_insuficientes"
+            elif greens < 4:
+                motivo = "menos_de_4_verdes"
+            elif reds == 0:
+                motivo = "sin_rojos"
+            elif reds > 2:
+                motivo = "mas_de_2_X"
+            elif reds not in (1, 2):
+                motivo = "estructura_insuficiente"
+            elif len(red_bots) != reds:
+                motivo = "inconsistencia_rojos"
+            if motivo != "ok":
+                reasons_by_offset[offset] = motivo
+                continue
 
-        if greens < 4:
-            out["reason"] = "menos_de_4_verdes"
-            return out
-        if reds > 2:
-            out["reason"] = "mas_de_2_X"
-            return out
-        if reds == 0:
-            out["reason"] = "sin_rojos"
-            return out
-        if reds not in (1, 2):
-            out["reason"] = "estructura_insuficiente"
+            offset_score = 100.0 - (float(offset) * 12.0)
+            if reds == 1:
+                selected_bot = str(red_bots[0]) if red_bots else ""
+                selected_case = "1X"
+                ranking = []
+                base_score = 120.0
+                motivo = "ok_1x"
+            else:
+                ranking = _rankear_x_localmente(red_bots, cols[offset:], estado)
+                if not ranking:
+                    reasons_by_offset[offset] = "sin_candidato_local"
+                    continue
+                selected_bot = str(ranking[0].get("bot") or "")
+                selected_case = "2X"
+                base_score = float(ranking[0].get("score_final_hibrido", ranking[0].get("score_local", 0.0)) or 0.0)
+                motivo = "ok_2x"
+            candidate_score = float(offset_score) + float(base_score)
+            reasons_by_offset[offset] = motivo
+            candidates_ok.append({
+                "offset": int(offset),
+                "selected_bot": selected_bot,
+                "selected_case": selected_case,
+                "selected_score": float(candidate_score),
+                "reason": motivo,
+                "valids": int(valids),
+                "greens": int(greens),
+                "reds": int(reds),
+                "red_bots": list(red_bots),
+                "ranking_debug": list(ranking),
+            })
+
+        out["reasons_by_offset"] = dict(reasons_by_offset)
+        out["candidates_considered"] = list(candidates_ok)
+        if not candidates_ok:
+            out["reason"] = str(reasons_by_offset.get(0) or "estructura_insuficiente")
             return out
 
-        cells = dict(col.get("cells", {}) or {})
-        red_bots = [str(b) for b, m in cells.items() if str(b) in bots and m == "R"]
-        out["red_bots"] = list(red_bots)
-        if len(red_bots) != reds:
-            out["reason"] = "estructura_insuficiente"
-            return out
-
-        if reds == 1:
-            out["triggered"] = True
-            out["selected_bot"] = str(red_bots[0])
-            out["selected_case"] = "1X"
-            out["reason"] = "4verdes_1X"
-        else:
-            ranking = _rankear_x_localmente(red_bots, cols)
-            if not ranking:
-                out["reason"] = "sin_candidato_local"
-                return out
-            out["ranking_debug"] = list(ranking)
-            out["triggered"] = True
-            out["selected_bot"] = str(ranking[0].get("bot") or "")
-            out["selected_case"] = "2X"
-            out["reason"] = "4verdes_2X_peso_local"
+        candidates_ok.sort(key=lambda c: (-float(c.get("selected_score", 0.0) or 0.0), int(c.get("offset", 999))))
+        best = dict(candidates_ok[0] or {})
+        out["triggered"] = True
+        out["selected_bot"] = str(best.get("selected_bot") or "")
+        out["selected_case"] = str(best.get("selected_case") or "")
+        out["selected_offset"] = int(best.get("offset", 0) or 0)
+        out["selected_score"] = float(best.get("selected_score", 0.0) or 0.0)
+        out["reason"] = "4verdes_1X" if out["selected_case"] == "1X" else "4verdes_2X_peso_hibrido"
+        out["valids"] = int(best.get("valids", 0) or 0)
+        out["greens"] = int(best.get("greens", 0) or 0)
+        out["reds"] = int(best.get("reds", 0) or 0)
+        out["red_bots"] = list(best.get("red_bots", []) or [])
+        out["ranking_debug"] = list(best.get("ranking_debug", []) or [])
 
         if bool(emitir_log):
             if bool(out.get("triggered")):
                 if str(out.get("selected_case", "")) == "1X":
                     agregar_evento(
                         f"LOGICA_VERDE_X_PONDERADA: caso=1X bot={out.get('selected_bot')} "
+                        f"offset={int(out.get('selected_offset', 0) or 0)} score={float(out.get('selected_score', 0.0) or 0.0):.2f} "
                         f"greens={out.get('greens')} reds={out.get('reds')}"
                     )
                 else:
                     agregar_evento(
                         f"LOGICA_VERDE_X_PONDERADA: caso=2X bot={out.get('selected_bot')} "
-                        f"greens={out.get('greens')} reds={out.get('reds')} motivo=peso_local"
+                        f"offset={int(out.get('selected_offset', 0) or 0)} score={float(out.get('selected_score', 0.0) or 0.0):.2f} "
+                        f"greens={out.get('greens')} reds={out.get('reds')} motivo=peso_hibrido"
                     )
             else:
                 agregar_evento(f"LOGICA_VERDE_X_PONDERADA: {out.get('reason', 'estructura_insuficiente')}")
@@ -17921,7 +17983,8 @@ async def main():
                         if lxv_permite_real_nuevo and selected_bot_operativo:
                             agregar_evento(
                                 f"LXV_REAL: SI | bot={selected_bot_operativo} | greens={int(logica_unica_real.get('greens', 0) or 0)} "
-                                f"| reds={int(logica_unica_real.get('reds', 0) or 0)} | source=LXV | "
+                                f"| reds={int(logica_unica_real.get('reds', 0) or 0)} | case={str(logica_unica_real.get('selected_case') or '--')} "
+                                f"| offset={int(logica_unica_real.get('selected_offset', 0) or 0)} | score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} | source=LXV | "
                                 f"decision_final=REAL_OK por LXV"
                             )
                             agregar_evento(f"LXV_CANDIDATE_READY: snapshot válido -> candidato REAL {selected_bot_operativo}")
@@ -17929,7 +17992,8 @@ async def main():
                                 agregar_evento("LXV_INFO: " + " | ".join(veto_flags_info[:6]))
                         elif not lxv_permite_real_nuevo:
                             agregar_evento(
-                                f"LXV_REAL: NO | motivo={str(logica_unica_real.get('reason') or 'estructura_insuficiente')}"
+                                f"LXV_REAL: NO | motivo_estructural={str(logica_unica_real.get('reason') or 'estructura_insuficiente')} "
+                                f"| reasons_by_offset={dict(logica_unica_real.get('reasons_by_offset') or {})}"
                             )
 
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
@@ -18002,16 +18066,22 @@ async def main():
                                     agregar_evento(
                                         f"AUTO_REAL: cancelado por owner REAL activo={owner_activo}"
                                     )
+                                    if lxv_permite_real_nuevo:
+                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=owner_real_ocupado")
                                 else:
                                     val = obtener_valor_saldo()
                                     if val is None:
                                         agregar_evento(
                                             f"AUTO_REAL: cancelado por saldo no disponible bot={mejor_bot} ciclo={ciclo_tag}"
                                         )
+                                        if lxv_permite_real_nuevo:
+                                            agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=proteccion_activa")
                                     elif float(val) < float(monto):
                                         agregar_evento(
                                             f"AUTO_REAL: cancelado por saldo insuficiente bot={mejor_bot} ciclo={ciclo_tag} saldo={float(val):.2f} monto={float(monto):.2f}"
                                         )
+                                        if lxv_permite_real_nuevo:
+                                            agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=saldo_insuficiente")
                                     else:
                                         estado_bots[mejor_bot]["ia_senal_pendiente"] = True
                                         estado_bots[mejor_bot]["ia_prob_senal"] = prob
@@ -18031,6 +18101,8 @@ async def main():
                                             agregar_evento(
                                                 f"AUTO_REAL: escribir_orden_real devolvió False bot={mejor_bot} ciclo={ciclo_tag}"
                                             )
+                                            if lxv_permite_real_nuevo:
+                                                agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=write_real_failed")
                         else:
                             max_prob = max((_prob_ia_operativa_bot(bot, default=0.0) for bot in BOT_NAMES if estado_bots[bot]["ia_ready"]), default=0)
                             if max_prob < umbral_ia_real:
