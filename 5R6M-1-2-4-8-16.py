@@ -18706,13 +18706,11 @@ async def main():
                             if not mejor_bot:
                                 if lxv_core_route_active:
                                     agregar_evento("LXV_CORE_REAL_BLOCKED_HARD bot=-- motivo=selected_bot_invalido")
-                                    agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=selected_bot_invalido")
                                 else:
                                     agregar_evento("LXV_EXEC_BLOCKED: motivo=selected_bot_invalido")
                             elif not isinstance(lxv_sync_order_payload, dict):
                                 if lxv_core_route_active:
                                     agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=payload_incompleto")
-                                    agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=payload_incompleto")
                                 else:
                                     agregar_evento("LXV_EXEC_BLOCKED: motivo=payload_incompleto")
                             else:
@@ -18725,19 +18723,16 @@ async def main():
                                 if owner_activo and owner_activo != mejor_bot:
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=owner_real_ocupado")
-                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=owner_real_ocupado")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=owner_real_ocupado")
                                 elif _equity_protection_is_active(time.time()):
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=proteccion_saldo")
-                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=proteccion_saldo")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=proteccion_saldo")
                                 elif _bot_blocked_by_bg_close(mejor_bot):
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=bg_close")
-                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=bg_close")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=bg_close")
                                 else:
@@ -18748,16 +18743,11 @@ async def main():
                                     if ok_real:
                                         try:
                                             globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
-                                            globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = str(extra_payload.get("snapshot_id", "") or "")
                                             globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
                                             globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
                                             globals()["LAST_LXV_SYNC_TS"] = float(time.time())
                                         except Exception:
                                             pass
-                                        agregar_evento(
-                                            f"LXV_CORE_SNAPSHOT_CONSUMED round={int(extra_payload.get('round_lxv', 0) or 0)} "
-                                            f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} bot={mejor_bot}"
-                                        )
                                         estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                         estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                         activo_real = mejor_bot
