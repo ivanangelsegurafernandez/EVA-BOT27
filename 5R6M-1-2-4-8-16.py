@@ -2608,29 +2608,35 @@ BARRIER_ACK_TIMEOUT_S = 45
 BARRIER_STRICT_MODE = True
 BARRIER_ALLOW_TEMP_EXCLUDE = False
 
+
 def _ensure_dir(p):
     try:
         os.makedirs(p, exist_ok=True)
     except Exception as e:
         print(f"⚠️ Falló creación de dir {p}: {e}")
 
+
 def _atomic_write(path: str, text: str):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
-        f.flush(); os.fsync(f.fileno())
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+
 
 def path_orden(bot: str) -> str:
     _ensure_dir(ORDEN_DIR)
     return os.path.join(ORDEN_DIR, f"{bot}.json")
 
+
 def _sync_round_ack_path(bot: str, round_id: int) -> str:
     _ensure_dir(SYNC_ROUND_DIR)
     rid = max(1, int(round_id or 1))
     d = os.path.join(SYNC_ROUND_DIR, f"round_{rid}")
     _ensure_dir(d)
     return os.path.join(d, f"{bot}.json")
+
 
 def leer_barrier_state() -> dict:
     try:
@@ -2648,15 +2654,15 @@ def leer_barrier_state() -> dict:
             }
         with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
 
 def escribir_barrier_state_atomic(state: dict):
     _ensure_dir(SYNC_ROUND_DIR)
     _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
+
 
 def leer_ack_ronda_bot(bot: str, round_id: int) -> dict | None:
     p = _sync_round_ack_path(bot, round_id)
@@ -2668,6 +2674,7 @@ def leer_ack_ronda_bot(bot: str, round_id: int) -> dict | None:
         return d if isinstance(d, dict) else None
     except Exception:
         return None
+
 
 def barrier_round_pendiente(round_id: int) -> list[str]:
     pending = []
@@ -2685,9 +2692,11 @@ def barrier_round_pendiente(round_id: int) -> list[str]:
             pending.append(str(b))
     return pending
 
+
 def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
     pending = barrier_round_pendiente(round_id)
     return (len(pending) == 0), pending
+
 
 def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
     st = leer_barrier_state() or {}
@@ -2704,6 +2713,8 @@ def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_rea
     }
     out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
     escribir_barrier_state_atomic(out)
+
+    # Limpieza de rondas antiguas para que no crezca infinito sync_round/
     try:
         keep_from = max(1, int(current_round) - 2)
         for name in os.listdir(SYNC_ROUND_DIR):
@@ -2732,9 +2743,11 @@ def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_rea
     except Exception:
         pass
 
+
 def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str]:
     common_round = int((logica_unica_real or {}).get("round", 0) or 0)
     barrier_round = int((st_bar or {}).get("current_round", 0) or 0)
+
     if common_round > 0:
         ok_common, pend_common = barrier_round_completa(common_round)
         if ok_common:
@@ -2744,711 +2757,12 @@ def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_n
         if common_round > barrier_round > 0:
             agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
             return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
+
     if barrier_round > 0:
         ok_bar, pend_bar = barrier_round_completa(barrier_round)
         return int(barrier_round), bool(ok_bar), list(pend_bar or []), ("ok" if ok_bar else "acks_incompletos")
+
     return 1, False, list(bot_names or []), "acks_incompletos"
-
-def _sync_round_ack_path(bot: str, round_id: int) -> str:
-    _ensure_dir(SYNC_ROUND_DIR)
-    rid = max(1, int(round_id or 1))
-    d = os.path.join(SYNC_ROUND_DIR, f"round_{rid}")
-    _ensure_dir(d)
-    return os.path.join(d, f"{bot}.json")
-
-def leer_barrier_state() -> dict:
-    try:
-        if not os.path.exists(BARRIER_STATE_FILE):
-            return {
-                "barrier_enabled": bool(BARRIER_ENABLED),
-                "current_round": 1,
-                "release_round": 1,
-                "all_closed": False,
-                "pending_bots": list(BOT_NAMES),
-                "last_evaluated_round": 0,
-                "selected_bot": "",
-                "lxv_ready": False,
-                "ts": float(time.time()),
-            }
-        with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except Exception:
-        return {}
-
-def escribir_barrier_state_atomic(state: dict):
-    _ensure_dir(SYNC_ROUND_DIR)
-    _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
-
-def leer_ack_ronda_bot(bot: str, round_id: int) -> dict | None:
-    p = _sync_round_ack_path(bot, round_id)
-    try:
-        if not os.path.exists(p):
-            return None
-        with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f) or {}
-        return d if isinstance(d, dict) else None
-    except Exception:
-        return None
-
-def barrier_round_pendiente(round_id: int) -> list[str]:
-    pending = []
-    now = float(time.time())
-    for b in BOT_NAMES:
-        ack = leer_ack_ronda_bot(b, round_id) or {}
-        ack_round = int(ack.get("round_id", 0) or 0)
-        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
-        ack_pending = bool(ack.get("pending_open", False))
-        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
-        if ack_round != int(round_id) or not ack_ok or ack_pending:
-            pending.append(str(b))
-            continue
-        if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
-            pending.append(str(b))
-    return pending
-
-def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
-    pending = barrier_round_pendiente(round_id)
-    return (len(pending) == 0), pending
-
-def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
-    st = leer_barrier_state() or {}
-    out = {
-        "barrier_enabled": bool(BARRIER_ENABLED),
-        "current_round": int(current_round),
-        "release_round": int(current_round) + 1,
-        "all_closed": True,
-        "pending_bots": [],
-        "last_evaluated_round": int(current_round),
-        "selected_bot": str(selected_bot or ""),
-        "lxv_ready": bool(lxv_ready),
-        "ts": float(time.time()),
-    }
-    out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
-    escribir_barrier_state_atomic(out)
-    try:
-        keep_from = max(1, int(current_round) - 2)
-        for name in os.listdir(SYNC_ROUND_DIR):
-            if not str(name).startswith("round_"):
-                continue
-            dpath = os.path.join(SYNC_ROUND_DIR, str(name))
-            if not os.path.isdir(dpath):
-                continue
-            try:
-                rid = int(str(name).split("_", 1)[1])
-            except Exception:
-                continue
-            if int(rid) >= int(keep_from):
-                continue
-            for fn in os.listdir(dpath):
-                fp = os.path.join(dpath, fn)
-                if os.path.isfile(fp):
-                    try:
-                        os.remove(fp)
-                    except Exception:
-                        pass
-            try:
-                os.rmdir(dpath)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str]:
-    common_round = int((logica_unica_real or {}).get("round", 0) or 0)
-    barrier_round = int((st_bar or {}).get("current_round", 0) or 0)
-    if common_round > 0:
-        ok_common, pend_common = barrier_round_completa(common_round)
-        if ok_common:
-            if barrier_round > 0 and common_round != barrier_round:
-                agregar_evento(f"BARRIER_PROMOTE: from_round={barrier_round} to_round={common_round} motivo=common_round_ready")
-            return int(common_round), True, [], "common_round_ready"
-        if common_round > barrier_round > 0:
-            agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
-    if barrier_round > 0:
-        ok_bar, pend_bar = barrier_round_completa(barrier_round)
-        return int(barrier_round), bool(ok_bar), list(pend_bar or []), ("ok" if ok_bar else "acks_incompletos")
-    return 1, False, list(bot_names or []), "acks_incompletos"
-
-def _sync_round_ack_path(bot: str, round_id: int) -> str:
-    _ensure_dir(SYNC_ROUND_DIR)
-    rid = max(1, int(round_id or 1))
-    d = os.path.join(SYNC_ROUND_DIR, f"round_{rid}")
-    _ensure_dir(d)
-    return os.path.join(d, f"{bot}.json")
-
-def leer_barrier_state() -> dict:
-    try:
-        if not os.path.exists(BARRIER_STATE_FILE):
-            return {
-                "barrier_enabled": bool(BARRIER_ENABLED),
-                "current_round": 1,
-                "release_round": 1,
-                "all_closed": False,
-                "pending_bots": list(BOT_NAMES),
-                "last_evaluated_round": 0,
-                "selected_bot": "",
-                "lxv_ready": False,
-                "ts": float(time.time()),
-            }
-        with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except Exception:
-        return {}
-
-def escribir_barrier_state_atomic(state: dict):
-    _ensure_dir(SYNC_ROUND_DIR)
-    _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
-
-def leer_ack_ronda_bot(bot: str, round_id: int) -> dict | None:
-    p = _sync_round_ack_path(bot, round_id)
-    try:
-        if not os.path.exists(p):
-            return None
-        with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f) or {}
-        return d if isinstance(d, dict) else None
-    except Exception:
-        return None
-
-def barrier_round_pendiente(round_id: int) -> list[str]:
-    pending = []
-    now = float(time.time())
-    for b in BOT_NAMES:
-        ack = leer_ack_ronda_bot(b, round_id) or {}
-        ack_round = int(ack.get("round_id", 0) or 0)
-        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
-        ack_pending = bool(ack.get("pending_open", False))
-        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
-        if ack_round != int(round_id) or not ack_ok or ack_pending:
-            pending.append(str(b))
-            continue
-        if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
-            pending.append(str(b))
-    return pending
-
-def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
-    pending = barrier_round_pendiente(round_id)
-    return (len(pending) == 0), pending
-
-def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
-    st = leer_barrier_state() or {}
-    out = {
-        "barrier_enabled": bool(BARRIER_ENABLED),
-        "current_round": int(current_round),
-        "release_round": int(current_round) + 1,
-        "all_closed": True,
-        "pending_bots": [],
-        "last_evaluated_round": int(current_round),
-        "selected_bot": str(selected_bot or ""),
-        "lxv_ready": bool(lxv_ready),
-        "ts": float(time.time()),
-    }
-    out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
-    escribir_barrier_state_atomic(out)
-    try:
-        keep_from = max(1, int(current_round) - 2)
-        for name in os.listdir(SYNC_ROUND_DIR):
-            if not str(name).startswith("round_"):
-                continue
-            dpath = os.path.join(SYNC_ROUND_DIR, str(name))
-            if not os.path.isdir(dpath):
-                continue
-            try:
-                rid = int(str(name).split("_", 1)[1])
-            except Exception:
-                continue
-            if int(rid) >= int(keep_from):
-                continue
-            for fn in os.listdir(dpath):
-                fp = os.path.join(dpath, fn)
-                if os.path.isfile(fp):
-                    try:
-                        os.remove(fp)
-                    except Exception:
-                        pass
-            try:
-                os.rmdir(dpath)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str]:
-    common_round = int((logica_unica_real or {}).get("round", 0) or 0)
-    barrier_round = int((st_bar or {}).get("current_round", 0) or 0)
-    if common_round > 0:
-        ok_common, pend_common = barrier_round_completa(common_round)
-        if ok_common:
-            if barrier_round > 0 and common_round != barrier_round:
-                agregar_evento(f"BARRIER_PROMOTE: from_round={barrier_round} to_round={common_round} motivo=common_round_ready")
-            return int(common_round), True, [], "common_round_ready"
-        if common_round > barrier_round > 0:
-            agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
-    if barrier_round > 0:
-        ok_bar, pend_bar = barrier_round_completa(barrier_round)
-        return int(barrier_round), bool(ok_bar), list(pend_bar or []), ("ok" if ok_bar else "acks_incompletos")
-    return 1, False, list(bot_names or []), "acks_incompletos"
-
-def _sync_round_ack_path(bot: str) -> str:
-    _ensure_dir(SYNC_ROUND_DIR)
-    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
-
-def leer_barrier_state() -> dict:
-    try:
-        if not os.path.exists(BARRIER_STATE_FILE):
-            return {
-                "barrier_enabled": bool(BARRIER_ENABLED),
-                "current_round": 1,
-                "release_round": 1,
-                "all_closed": False,
-                "pending_bots": list(BOT_NAMES),
-                "last_evaluated_round": 0,
-                "selected_bot": "",
-                "lxv_ready": False,
-                "ts": float(time.time()),
-            }
-        with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except Exception:
-        return {}
-
-def escribir_barrier_state_atomic(state: dict):
-    _ensure_dir(SYNC_ROUND_DIR)
-    _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
-
-def leer_ack_ronda_bot(bot: str) -> dict | None:
-    p = _sync_round_ack_path(bot)
-    try:
-        if not os.path.exists(p):
-            return None
-        with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f) or {}
-        return d if isinstance(d, dict) else None
-    except Exception:
-        return None
-
-def barrier_round_pendiente(round_id: int) -> list[str]:
-    pending = []
-    now = float(time.time())
-    for b in BOT_NAMES:
-        ack = leer_ack_ronda_bot(b) or {}
-        ack_round = int(ack.get("round_id", 0) or 0)
-        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
-        ack_pending = bool(ack.get("pending_open", False))
-        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
-        if ack_round != int(round_id) or not ack_ok or ack_pending:
-            pending.append(str(b))
-            continue
-        if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
-            pending.append(str(b))
-    return pending
-
-def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
-    pending = barrier_round_pendiente(round_id)
-    return (len(pending) == 0), pending
-
-def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
-    st = leer_barrier_state() or {}
-    out = {
-        "barrier_enabled": bool(BARRIER_ENABLED),
-        "current_round": int(current_round),
-        "release_round": int(current_round) + 1,
-        "all_closed": True,
-        "pending_bots": [],
-        "last_evaluated_round": int(current_round),
-        "selected_bot": str(selected_bot or ""),
-        "lxv_ready": bool(lxv_ready),
-        "ts": float(time.time()),
-    }
-    out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
-    escribir_barrier_state_atomic(out)
-
-def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str]:
-    common_round = int((logica_unica_real or {}).get("round", 0) or 0)
-    barrier_round = int((st_bar or {}).get("current_round", 0) or 0)
-    if common_round > 0:
-        ok_common, pend_common = barrier_round_completa(common_round)
-        if ok_common:
-            if barrier_round > 0 and common_round != barrier_round:
-                agregar_evento(f"BARRIER_PROMOTE: from_round={barrier_round} to_round={common_round} motivo=common_round_ready")
-            return int(common_round), True, [], "common_round_ready"
-        if common_round > barrier_round > 0:
-            agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
-    if barrier_round > 0:
-        ok_bar, pend_bar = barrier_round_completa(barrier_round)
-        return int(barrier_round), bool(ok_bar), list(pend_bar or []), ("ok" if ok_bar else "acks_incompletos")
-    return 1, False, list(bot_names or []), "acks_incompletos"
-
-def _sync_round_ack_path(bot: str) -> str:
-    _ensure_dir(SYNC_ROUND_DIR)
-    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
-
-def leer_barrier_state() -> dict:
-    try:
-        if not os.path.exists(BARRIER_STATE_FILE):
-            return {
-                "barrier_enabled": bool(BARRIER_ENABLED),
-                "current_round": 1,
-                "release_round": 1,
-                "all_closed": False,
-                "pending_bots": list(BOT_NAMES),
-                "last_evaluated_round": 0,
-                "selected_bot": "",
-                "lxv_ready": False,
-                "ts": float(time.time()),
-            }
-        with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except Exception:
-        return {}
-
-def escribir_barrier_state_atomic(state: dict):
-    _ensure_dir(SYNC_ROUND_DIR)
-    _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
-
-def leer_ack_ronda_bot(bot: str) -> dict | None:
-    p = _sync_round_ack_path(bot)
-    try:
-        if not os.path.exists(p):
-            return None
-        with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f) or {}
-        return d if isinstance(d, dict) else None
-    except Exception:
-        return None
-
-def barrier_round_pendiente(round_id: int) -> list[str]:
-    pending = []
-    now = float(time.time())
-    for b in BOT_NAMES:
-        ack = leer_ack_ronda_bot(b) or {}
-        ack_round = int(ack.get("round_id", 0) or 0)
-        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
-        ack_pending = bool(ack.get("pending_open", False))
-        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
-        if ack_round != int(round_id) or not ack_ok or ack_pending:
-            pending.append(str(b))
-            continue
-        if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
-            pending.append(str(b))
-    return pending
-
-def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
-    pending = barrier_round_pendiente(round_id)
-    return (len(pending) == 0), pending
-
-def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
-    st = leer_barrier_state() or {}
-    out = {
-        "barrier_enabled": bool(BARRIER_ENABLED),
-        "current_round": int(current_round),
-        "release_round": int(current_round) + 1,
-        "all_closed": True,
-        "pending_bots": [],
-        "last_evaluated_round": int(current_round),
-        "selected_bot": str(selected_bot or ""),
-        "lxv_ready": bool(lxv_ready),
-        "ts": float(time.time()),
-    }
-    out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
-    escribir_barrier_state_atomic(out)
-
-def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str]:
-    common_round = int((logica_unica_real or {}).get("round", 0) or 0)
-    barrier_round = int((st_bar or {}).get("current_round", 0) or 0)
-    if common_round > 0:
-        ok_common, pend_common = barrier_round_completa(common_round)
-        if ok_common:
-            if barrier_round > 0 and common_round != barrier_round:
-                agregar_evento(f"BARRIER_PROMOTE: from_round={barrier_round} to_round={common_round} motivo=common_round_ready")
-            return int(common_round), True, [], "common_round_ready"
-        if common_round > barrier_round > 0:
-            agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
-    if barrier_round > 0:
-        ok_bar, pend_bar = barrier_round_completa(barrier_round)
-        return int(barrier_round), bool(ok_bar), list(pend_bar or []), ("ok" if ok_bar else "acks_incompletos")
-    return 1, False, list(bot_names or []), "acks_incompletos"
-
-def _sync_round_ack_path(bot: str) -> str:
-    _ensure_dir(SYNC_ROUND_DIR)
-    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
-
-def leer_barrier_state() -> dict:
-    try:
-        if not os.path.exists(BARRIER_STATE_FILE):
-            return {
-                "barrier_enabled": bool(BARRIER_ENABLED),
-                "current_round": 1,
-                "release_round": 1,
-                "all_closed": False,
-                "pending_bots": list(BOT_NAMES),
-                "last_evaluated_round": 0,
-                "selected_bot": "",
-                "lxv_ready": False,
-                "ts": float(time.time()),
-            }
-        with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except Exception:
-        return {}
-
-def escribir_barrier_state_atomic(state: dict):
-    _ensure_dir(SYNC_ROUND_DIR)
-    _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
-
-def leer_ack_ronda_bot(bot: str) -> dict | None:
-    p = _sync_round_ack_path(bot)
-    try:
-        if not os.path.exists(p):
-            return None
-        with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f) or {}
-        return d if isinstance(d, dict) else None
-    except Exception:
-        return None
-
-def barrier_round_pendiente(round_id: int) -> list[str]:
-    pending = []
-    now = float(time.time())
-    for b in BOT_NAMES:
-        ack = leer_ack_ronda_bot(b) or {}
-        ack_round = int(ack.get("round_id", 0) or 0)
-        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
-        ack_pending = bool(ack.get("pending_open", False))
-        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
-        if ack_round != int(round_id) or not ack_ok or ack_pending:
-            pending.append(str(b))
-            continue
-        if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
-            pending.append(str(b))
-    return pending
-
-def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
-    pending = barrier_round_pendiente(round_id)
-    return (len(pending) == 0), pending
-
-def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
-    st = leer_barrier_state() or {}
-    out = {
-        "barrier_enabled": bool(BARRIER_ENABLED),
-        "current_round": int(current_round),
-        "release_round": int(current_round) + 1,
-        "all_closed": True,
-        "pending_bots": [],
-        "last_evaluated_round": int(current_round),
-        "selected_bot": str(selected_bot or ""),
-        "lxv_ready": bool(lxv_ready),
-        "ts": float(time.time()),
-    }
-    out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
-    escribir_barrier_state_atomic(out)
-
-def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str]:
-    common_round = int((logica_unica_real or {}).get("round", 0) or 0)
-    barrier_round = int((st_bar or {}).get("current_round", 0) or 0)
-    if common_round > 0:
-        ok_common, pend_common = barrier_round_completa(common_round)
-        if ok_common:
-            if barrier_round > 0 and common_round != barrier_round:
-                agregar_evento(f"BARRIER_PROMOTE: from_round={barrier_round} to_round={common_round} motivo=common_round_ready")
-            return int(common_round), True, [], "common_round_ready"
-        if common_round > barrier_round > 0:
-            agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
-    if barrier_round > 0:
-        ok_bar, pend_bar = barrier_round_completa(barrier_round)
-        return int(barrier_round), bool(ok_bar), list(pend_bar or []), ("ok" if ok_bar else "acks_incompletos")
-    return 1, False, list(bot_names or []), "acks_incompletos"
-
-def _sync_round_ack_path(bot: str) -> str:
-    _ensure_dir(SYNC_ROUND_DIR)
-    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
-
-def leer_barrier_state() -> dict:
-    try:
-        if not os.path.exists(BARRIER_STATE_FILE):
-            return {
-                "barrier_enabled": bool(BARRIER_ENABLED),
-                "current_round": 1,
-                "release_round": 1,
-                "all_closed": False,
-                "pending_bots": list(BOT_NAMES),
-                "last_evaluated_round": 0,
-                "selected_bot": "",
-                "lxv_ready": False,
-                "ts": float(time.time()),
-            }
-        with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except Exception:
-        return {}
-
-def escribir_barrier_state_atomic(state: dict):
-    _ensure_dir(SYNC_ROUND_DIR)
-    _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
-
-def leer_ack_ronda_bot(bot: str) -> dict | None:
-    p = _sync_round_ack_path(bot)
-    try:
-        if not os.path.exists(p):
-            return None
-        with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f) or {}
-        return d if isinstance(d, dict) else None
-    except Exception:
-        return None
-
-def barrier_round_pendiente(round_id: int) -> list[str]:
-    pending = []
-    now = float(time.time())
-    for b in BOT_NAMES:
-        ack = leer_ack_ronda_bot(b) or {}
-        ack_round = int(ack.get("round_id", 0) or 0)
-        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
-        ack_pending = bool(ack.get("pending_open", False))
-        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
-        if ack_round != int(round_id) or not ack_ok or ack_pending:
-            pending.append(str(b))
-            continue
-        if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
-            pending.append(str(b))
-    return pending
-
-def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
-    pending = barrier_round_pendiente(round_id)
-    return (len(pending) == 0), pending
-
-def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
-    st = leer_barrier_state() or {}
-    out = {
-        "barrier_enabled": bool(BARRIER_ENABLED),
-        "current_round": int(current_round),
-        "release_round": int(current_round) + 1,
-        "all_closed": True,
-        "pending_bots": [],
-        "last_evaluated_round": int(current_round),
-        "selected_bot": str(selected_bot or ""),
-        "lxv_ready": bool(lxv_ready),
-        "ts": float(time.time()),
-    }
-    out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
-    escribir_barrier_state_atomic(out)
-
-def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str]:
-    common_round = int((logica_unica_real or {}).get("round", 0) or 0)
-    barrier_round = int((st_bar or {}).get("current_round", 0) or 0)
-    if common_round > 0:
-        ok_common, pend_common = barrier_round_completa(common_round)
-        if ok_common:
-            if barrier_round > 0 and common_round != barrier_round:
-                agregar_evento(f"BARRIER_PROMOTE: from_round={barrier_round} to_round={common_round} motivo=common_round_ready")
-            return int(common_round), True, [], "common_round_ready"
-        if common_round > barrier_round > 0:
-            agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
-    if barrier_round > 0:
-        ok_bar, pend_bar = barrier_round_completa(barrier_round)
-        return int(barrier_round), bool(ok_bar), list(pend_bar or []), ("ok" if ok_bar else "acks_incompletos")
-    return 1, False, list(bot_names or []), "acks_incompletos"
-
-def _sync_round_ack_path(bot: str) -> str:
-    _ensure_dir(SYNC_ROUND_DIR)
-    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
-
-def leer_barrier_state() -> dict:
-    try:
-        if not os.path.exists(BARRIER_STATE_FILE):
-            return {
-                "barrier_enabled": bool(BARRIER_ENABLED),
-                "current_round": 1,
-                "release_round": 1,
-                "all_closed": False,
-                "pending_bots": list(BOT_NAMES),
-                "last_evaluated_round": 0,
-                "selected_bot": "",
-                "lxv_ready": False,
-                "ts": float(time.time()),
-            }
-        with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f) or {}
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except Exception:
-        return {}
-
-def escribir_barrier_state_atomic(state: dict):
-    _ensure_dir(SYNC_ROUND_DIR)
-    _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
-
-def leer_ack_ronda_bot(bot: str) -> dict | None:
-    p = _sync_round_ack_path(bot)
-    try:
-        if not os.path.exists(p):
-            return None
-        with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f) or {}
-        return d if isinstance(d, dict) else None
-    except Exception:
-        return None
-
-def barrier_round_pendiente(round_id: int) -> list[str]:
-    pending = []
-    now = float(time.time())
-    for b in BOT_NAMES:
-        ack = leer_ack_ronda_bot(b) or {}
-        ack_round = int(ack.get("round_id", 0) or 0)
-        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
-        ack_pending = bool(ack.get("pending_open", False))
-        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
-        if ack_round != int(round_id) or not ack_ok or ack_pending:
-            pending.append(str(b))
-            continue
-        if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
-            pending.append(str(b))
-    return pending
-
-def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
-    pending = barrier_round_pendiente(round_id)
-    return (len(pending) == 0), pending
-
-def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
-    st = leer_barrier_state() or {}
-    out = {
-        "barrier_enabled": bool(BARRIER_ENABLED),
-        "current_round": int(current_round),
-        "release_round": int(current_round) + 1,
-        "all_closed": True,
-        "pending_bots": [],
-        "last_evaluated_round": int(current_round),
-        "selected_bot": str(selected_bot or ""),
-        "lxv_ready": bool(lxv_ready),
-        "ts": float(time.time()),
-    }
-    out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
-    escribir_barrier_state_atomic(out)
 
 # === PATCH: REAL INMEDIATO EN HUD AL EMITIR ORDEN (sin esperar compra) ===
 # Objetivo:
