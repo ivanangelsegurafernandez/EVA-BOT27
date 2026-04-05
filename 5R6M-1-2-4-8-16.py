@@ -15468,11 +15468,66 @@ def _extraer_rondas_cerradas_bot(bot: str, max_rounds: int = 120) -> dict:
 
 
 def _construir_columna_lxv_sincronizada(estado: dict, bots: list[str], max_rounds: int = 120) -> dict:
-    """Construye la última columna N cerrada y común entre bots (sin offsets)."""
+    """Construye columna LXV estrictamente sincronizada por round_id (ACK), con fallback ordinal."""
     bot_list = [str(b) for b in list(bots or []) if str(b).strip()]
     if not bot_list:
         return {"ready": False, "reason": "sin_bots", "round": 0, "cells": {}, "missing_bots": []}
 
+    # 1) Fuente primaria: ACK de barrera por round_id (misma foto lógica para todos).
+    try:
+        st_bar = leer_barrier_state() or {}
+        round_id = int(st_bar.get("current_round", 0) or 0)
+    except Exception:
+        st_bar, round_id = {}, 0
+
+    if round_id > 0:
+        cells = {}
+        valids = greens = reds = 0
+        red_bots = []
+        missing_bots = []
+        pending_bots = []
+        for b in bot_list:
+            ack = leer_ack_ronda_bot(str(b), round_id) or {}
+            ack_round = int(ack.get("round_id", 0) or 0)
+            ack_status = str(ack.get("status", "")).strip().upper()
+            ack_pending = bool(ack.get("pending_open", False))
+            ack_defined = bool(ack.get("resultado_definido", False))
+            res_norm = str(ack.get("resultado_norm", ack.get("resultado", "")) or "").strip().upper()
+            mark = None
+            if ack_round == round_id and ack_status == "CERRADO" and (not ack_pending) and ack_defined:
+                if res_norm in ("GANANCIA", "WIN", "G"):
+                    mark = "G"
+                elif res_norm in ("PERDIDA", "PÉRDIDA", "LOSS", "R", "X"):
+                    mark = "R"
+            cells[b] = mark
+            if ack_pending:
+                pending_bots.append(str(b))
+            if mark is None:
+                missing_bots.append(str(b))
+            elif mark == "G":
+                greens += 1
+                valids += 1
+            elif mark == "R":
+                reds += 1
+                valids += 1
+                red_bots.append(str(b))
+
+        if valids > 0:
+            return {
+                "ready": bool(valids == len(bot_list)),
+                "reason": "ok" if valids == len(bot_list) else "round_incompleta",
+                "round": int(round_id),
+                "cells": cells,
+                "total_validos": int(valids),
+                "total_verdes": int(greens),
+                "total_rojos": int(reds),
+                "red_bots": red_bots,
+                "missing_bots": missing_bots,
+                "pending_bots": pending_bots,
+                "data": {},
+            }
+
+    # 2) Fallback legado: columna ordinal cerrada común (solo si no hay ACK utilizable).
     data = {b: _extraer_rondas_cerradas_bot(b, max_rounds=max_rounds) for b in bot_list}
     pending_bots = [b for b, d in data.items() if bool(d.get("pending_open", False))]
     if pending_bots:

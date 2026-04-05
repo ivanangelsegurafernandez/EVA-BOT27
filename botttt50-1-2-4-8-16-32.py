@@ -2206,41 +2206,50 @@ async def mostrar_saldos():
     saldo_demo = saldo_demo_last
     saldo_real = saldo_real_last
 
-    # DEMO
-    try:
-        async with websockets.connect(DERIV_WS_URL, **WS_KW) as ws:  # BLOQUE 1.2
-            await authorize_ws(ws, TOKEN_DEMO, tries=2, timeout=6.0)
-            data = await api_call(ws, {"balance": 1}, expect_msg_type="balance")
-            b = data.get("balance", {}).get("balance")
-            if b is not None:
-                saldo_demo = float(b)
-                saldo_demo_last = saldo_demo
-                saldo_demo_last_ts = float(time.time())
-            else:
-                if _print_once("saldo-demo-empty", ttl=REFRESCO_SALDO):
-                    print(Fore.YELLOW + "Balance DEMO no disponible, usando último valor válido.")
-    except Exception as e:
-        if _print_once("saldo-demo-error", ttl=REFRESCO_SALDO):
-            print(Fore.YELLOW + Style.BRIGHT + f"[WARN] saldo DEMO: {type(e).__name__}: {e!r}")
-            print(Fore.YELLOW + "Balance DEMO no disponible, usando último valor válido.")
+    async def _consultar_saldo_con_reintentos(token: str, etiqueta: str, cache_val, cache_ts: float):
+        tries = 4
+        last_exc = None
+        for intento in range(1, tries + 1):
+            try:
+                async with websockets.connect(DERIV_WS_URL, **WS_KW) as ws:  # BLOQUE 1.2
+                    timeout_auth = 6.0 + (1.5 * max(0, intento - 1))
+                    timeout_balance = 7.0 + (1.5 * max(0, intento - 1))
+                    await authorize_ws(ws, token, tries=2, timeout=timeout_auth)
+                    data = await api_call(ws, {"balance": 1}, expect_msg_type="balance", timeout=timeout_balance)
+                    b = data.get("balance", {}).get("balance")
+                    if b is not None:
+                        return float(b), float(time.time()), None
+                    last_exc = RuntimeError("balance_missing")
+            except Exception as e:
+                last_exc = e
+                if (intento < tries) and _es_error_transitorio_ws(e):
+                    espera = min(4.5, 0.7 * intento + random.uniform(0.0, 0.5))
+                    if _print_once(f"saldo-{etiqueta.lower()}-retry-{intento}", ttl=2):
+                        print(Fore.YELLOW + f"WS/NET inestable en saldo {etiqueta} ({type(e).__name__}). Reintento {intento}/{tries} en {espera:.1f}s...")
+                    await asyncio.sleep(espera)
+                    continue
+                break
+        return cache_val, cache_ts, last_exc
 
-    # REAL
-    try:
-        async with websockets.connect(DERIV_WS_URL, **WS_KW) as ws:  # BLOQUE 1.2
-            await authorize_ws(ws, TOKEN_REAL, tries=2, timeout=6.0)
-            data = await api_call(ws, {"balance": 1}, expect_msg_type="balance")
-            b = data.get("balance", {}).get("balance")
-            if b is not None:
-                saldo_real = float(b)
-                saldo_real_last = saldo_real
-                saldo_real_last_ts = float(time.time())
-            else:
-                if _print_once("saldo-real-empty", ttl=REFRESCO_SALDO):
-                    print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
-    except Exception as e:
-        if _print_once("saldo-real-error", ttl=REFRESCO_SALDO):
-            print(Fore.YELLOW + Style.BRIGHT + f"[WARN] saldo REAL: {type(e).__name__}: {e!r}")
-            print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
+    saldo_demo, saldo_demo_ts_new, err_demo = await _consultar_saldo_con_reintentos(TOKEN_DEMO, "DEMO", saldo_demo_last, saldo_demo_last_ts)
+    if isinstance(saldo_demo, (int, float)):
+        saldo_demo_last = float(saldo_demo)
+        saldo_demo_last_ts = float(saldo_demo_ts_new or time.time())
+    elif err_demo is None and _print_once("saldo-demo-empty", ttl=REFRESCO_SALDO):
+        print(Fore.YELLOW + "Balance DEMO no disponible, usando último valor válido.")
+    elif err_demo is not None and _print_once("saldo-demo-error", ttl=REFRESCO_SALDO):
+        print(Fore.YELLOW + Style.BRIGHT + f"[WARN] saldo DEMO: {type(err_demo).__name__}: {err_demo!r}")
+        print(Fore.YELLOW + "Balance DEMO no disponible, usando último valor válido.")
+
+    saldo_real, saldo_real_ts_new, err_real = await _consultar_saldo_con_reintentos(TOKEN_REAL, "REAL", saldo_real_last, saldo_real_last_ts)
+    if isinstance(saldo_real, (int, float)):
+        saldo_real_last = float(saldo_real)
+        saldo_real_last_ts = float(saldo_real_ts_new or time.time())
+    elif err_real is None and _print_once("saldo-real-empty", ttl=REFRESCO_SALDO):
+        print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
+    elif err_real is not None and _print_once("saldo-real-error", ttl=REFRESCO_SALDO):
+        print(Fore.YELLOW + Style.BRIGHT + f"[WARN] saldo REAL: {type(err_real).__name__}: {err_real!r}")
+        print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
 
     print(Fore.LIGHTBLUE_EX + Style.BRIGHT + _fmt_saldo("Saldo cuenta DEMO", saldo_demo, saldo_demo_last_ts))
     print(Fore.YELLOW + Style.BRIGHT + _fmt_saldo("Saldo cuenta REAL", saldo_real, saldo_real_last_ts))
