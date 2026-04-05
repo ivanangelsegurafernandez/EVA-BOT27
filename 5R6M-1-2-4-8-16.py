@@ -15625,11 +15625,128 @@ def _resolver_lxb_sincronizado(candidatos: list, estado: dict, bot_names: list[s
     return _resolver_lxv_sincronizado(candidatos, estado, bot_names, emitir_log=emitir_log)
 
 def _resolver_logica_unica_real(candidatos: list, estado: dict, bot_names: list[str], emitir_log: bool = True) -> dict:
-    """
-    Compat legacy: la lógica única REAL ahora ES LXV sincronizada.
-    No se permiten offsets ni mezcla de columnas N/N+1.
-    """
-    return _resolver_lxv_sincronizado(candidatos, estado, bot_names, emitir_log=emitir_log)
+    """LOGICA_VERDE_X_PONDERADA: promover a REAL con mínimo 4 verdes + 1/2 X."""
+    out = {
+        "triggered": False,
+        "selected_bot": None,
+        "selected_case": None,
+        "selected_offset": None,
+        "selected_score": 0.0,
+        "reason": "estructura_insuficiente",
+        "valids": 0,
+        "greens": 0,
+        "reds": 0,
+        "red_bots": [],
+        "ranking_debug": [],
+        "reasons_by_offset": {},
+        "candidates_considered": [],
+    }
+    try:
+        bots = list(bot_names or [])
+        cols = _construir_matriz_resultados_columnas(estado if isinstance(estado, dict) else {}, bots, window=40)
+        if not cols:
+            out["reason"] = "sin_columnas"
+            return out
+        reasons_by_offset = {}
+        candidates_ok = []
+        max_offsets = min(4, len(cols))
+        for offset in range(max_offsets):
+            col = dict(cols[offset] or {})
+            valids = int(col.get("total_validos", 0) or 0)
+            greens = int(col.get("total_verdes", 0) or 0)
+            reds = int(col.get("total_rojos", 0) or 0)
+            cells = dict(col.get("cells", {}) or {})
+            red_bots = [str(b) for b, m in cells.items() if str(b) in bots and m == "R"]
+            motivo = "ok"
+            if valids < 4:
+                motivo = "validos_insuficientes"
+            elif greens < 4:
+                motivo = "menos_de_4_verdes"
+            elif reds == 0:
+                motivo = "sin_rojos"
+            elif reds > 2:
+                motivo = "mas_de_2_X"
+            elif reds not in (1, 2):
+                motivo = "estructura_insuficiente"
+            elif len(red_bots) != reds:
+                motivo = "inconsistencia_rojos"
+            if motivo != "ok":
+                reasons_by_offset[offset] = motivo
+                continue
+
+            offset_score = 100.0 - (float(offset) * 12.0)
+            if reds == 1:
+                selected_bot = str(red_bots[0]) if red_bots else ""
+                selected_case = "1X"
+                ranking = []
+                base_score = 120.0
+                motivo = "ok_1x"
+            else:
+                ranking = _rankear_x_localmente(red_bots, cols[offset:], estado)
+                if not ranking:
+                    reasons_by_offset[offset] = "sin_candidato_local"
+                    continue
+                selected_bot = str(ranking[0].get("bot") or "")
+                selected_case = "2X"
+                base_score = float(ranking[0].get("score_final_hibrido", ranking[0].get("score_local", 0.0)) or 0.0)
+                motivo = "ok_2x"
+            candidate_score = float(offset_score) + float(base_score)
+            reasons_by_offset[offset] = motivo
+            candidates_ok.append({
+                "offset": int(offset),
+                "selected_bot": selected_bot,
+                "selected_case": selected_case,
+                "selected_score": float(candidate_score),
+                "reason": motivo,
+                "valids": int(valids),
+                "greens": int(greens),
+                "reds": int(reds),
+                "red_bots": list(red_bots),
+                "ranking_debug": list(ranking),
+            })
+
+        out["reasons_by_offset"] = dict(reasons_by_offset)
+        out["candidates_considered"] = list(candidates_ok)
+        if not candidates_ok:
+            out["reason"] = str(reasons_by_offset.get(0) or "estructura_insuficiente")
+            return out
+
+        candidates_ok.sort(key=lambda c: (-float(c.get("selected_score", 0.0) or 0.0), int(c.get("offset", 999))))
+        best = dict(candidates_ok[0] or {})
+        out["triggered"] = True
+        out["selected_bot"] = str(best.get("selected_bot") or "")
+        out["selected_case"] = str(best.get("selected_case") or "")
+        out["selected_offset"] = int(best.get("offset", 0) or 0)
+        out["selected_score"] = float(best.get("selected_score", 0.0) or 0.0)
+        out["reason"] = "4verdes_1X" if out["selected_case"] == "1X" else "4verdes_2X_peso_hibrido"
+        out["valids"] = int(best.get("valids", 0) or 0)
+        out["greens"] = int(best.get("greens", 0) or 0)
+        out["reds"] = int(best.get("reds", 0) or 0)
+        out["red_bots"] = list(best.get("red_bots", []) or [])
+        out["ranking_debug"] = list(best.get("ranking_debug", []) or [])
+
+        if bool(emitir_log):
+            if bool(out.get("triggered")):
+                if str(out.get("selected_case", "")) == "1X":
+                    agregar_evento(
+                        f"LOGICA_VERDE_X_PONDERADA: caso=1X bot={out.get('selected_bot')} "
+                        f"offset={int(out.get('selected_offset', 0) or 0)} score={float(out.get('selected_score', 0.0) or 0.0):.2f} "
+                        f"greens={out.get('greens')} reds={out.get('reds')}"
+                    )
+                else:
+                    agregar_evento(
+                        f"LOGICA_VERDE_X_PONDERADA: caso=2X bot={out.get('selected_bot')} "
+                        f"offset={int(out.get('selected_offset', 0) or 0)} score={float(out.get('selected_score', 0.0) or 0.0):.2f} "
+                        f"greens={out.get('greens')} reds={out.get('reds')} motivo=peso_hibrido"
+                    )
+            else:
+                agregar_evento(f"LOGICA_VERDE_X_PONDERADA: {out.get('reason', 'estructura_insuficiente')}")
+        return out
+    except Exception:
+        out["reason"] = "estructura_insuficiente"
+        if bool(emitir_log):
+            agregar_evento("LOGICA_VERDE_X_PONDERADA: estructura_insuficiente")
+        return out
 
 
 
@@ -18217,7 +18334,7 @@ async def main():
                                     else:
                                         agregar_evento(f"BARRIER_HOLD: round={canon_round} motivo={canon_reason}")
                                     for bp in pending_round[:2]:
-                                        ack_bp = leer_ack_ronda_bot(bp, canon_round) or {}
+                                        ack_bp = leer_ack_ronda_bot(bp) or {}
                                         if not ack_bp:
                                             agregar_evento(f"BARRIER_ACK_INVALID: bot={bp} round={canon_round} motivo=ack_ausente")
                                         elif int(ack_bp.get("round_id", 0) or 0) != int(canon_round):
