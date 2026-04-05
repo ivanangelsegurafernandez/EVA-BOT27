@@ -573,8 +573,12 @@ def validar_permiso_buy_lxv_sync(bot: str, ciclo: int, token_actual, owner_ok: b
     if (time.time() - ts) > lim:
         return False, "ttl_vencido", data
     if str(estado_bot.get("last_lxv_snapshot_consumed", "") or "") == snapshot_id:
+        if _print_once(f"lxv-skip-consumed-{round_lxv}-{snapshot_id}", ttl=8):
+            print(Fore.YELLOW + f"LXV_SYNC_SKIP_CONSUMED_REAL bot={bot} round={int(round_lxv)} snapshot={snapshot_id}")
         return False, "snapshot_ya_consumido", data
     if int(round_lxv) <= int(estado_bot.get("last_lxv_round_consumed", 0) or 0):
+        if _print_once(f"lxv-skip-consumed-round-{round_lxv}", ttl=8):
+            print(Fore.YELLOW + f"LXV_SYNC_SKIP_CONSUMED_REAL bot={bot} round={int(round_lxv)} snapshot={snapshot_id}")
         return False, "ronda_ya_consumida", data
     if _lxv_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
         return False, "pendiente_abierta_local", data
@@ -2876,6 +2880,12 @@ async def ejecutar_panel():
                     if not ok_lxv_buy:
                         if _print_once(f"lxv-buy-abort-{motivo_lxv_buy}", ttl=10):
                             print(Fore.YELLOW + f"LXV_SYNC_ABORT: {motivo_lxv_buy}")
+                        if isinstance(data_lxv_buy, dict):
+                            snap_retry = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+                            round_retry = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                            if snap_retry and motivo_lxv_buy not in {"snapshot_ya_consumido", "ronda_ya_consumida"}:
+                                if _print_once(f"lxv-retry-allowed-{round_retry}-{snap_retry}-{motivo_lxv_buy}", ttl=8):
+                                    print(Fore.YELLOW + f"LXV_SYNC_RETRY_ALLOWED bot={NOMBRE_BOT} round={int(round_retry)} snapshot={snap_retry} motivo={motivo_lxv_buy}")
                         await asyncio.sleep(0.8)
                         continue
 
@@ -2913,6 +2923,10 @@ async def ejecutar_panel():
                     try:
                         estado_bot["last_lxv_snapshot_consumed"] = str(data_lxv_buy.get("snapshot_id", "") or "")
                         estado_bot["last_lxv_round_consumed"] = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                        snap_ok = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+                        round_ok = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                        if snap_ok and _print_once(f"lxv-consumed-real-{round_ok}-{snap_ok}", ttl=8):
+                            print(Fore.YELLOW + f"LXV_SYNC_CONSUMED_REAL bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok}")
                     except Exception:
                         pass
 
