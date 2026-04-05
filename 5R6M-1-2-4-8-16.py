@@ -2777,17 +2777,9 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
     round_id = int(st_bar.get("current_round", 1) or 1)
     release_round = int(st_bar.get("release_round", max(1, round_id)) or max(1, round_id))
     round_open_ts = float(st_bar.get("round_open_ts", 0.0) or 0.0)
-    scan_window_s = float(st_bar.get("scan_window_s", 45.0) or 45.0)
-    round_deadline_ts = float(st_bar.get("round_deadline_ts", 0.0) or 0.0)
-    round_token = str(st_bar.get("round_token", "") or "")
     if round_open_ts <= 0.0:
         round_open_ts = now
-        if round_deadline_ts <= 0.0:
-            round_deadline_ts = float(round_open_ts + scan_window_s)
-        if not round_token:
-            round_token = f"rnd-{int(round_id)}-{int(round_open_ts)}"
         agregar_evento(f"LXV_CORE_ROUND_OPEN round={int(round_id)}")
-        agregar_evento(f"LXV_ROUND_CONTEXT_OPEN round={int(round_id)} token={round_token} deadline={int(round_deadline_ts)}")
     pending = barrier_round_pendiente(int(round_id))
     for b in [str(x) for x in bot_names if str(x) not in set(pending)]:
         agregar_evento(f"LXV_CORE_ACK_OK bot={b} round={int(round_id)}")
@@ -2801,16 +2793,7 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
 
     state = "ROUND_WAIT_ACK" if (pending and not timeout_hit) else "ROUND_EVAL_LXV"
     if state == "ROUND_EVAL_LXV":
-        agregar_evento(f"LXV_ROUND_ALL_CLOSED round={int(round_id)} cerrados={int(len(bot_names) - len(pending))}/{int(len(bot_names))}")
-        agregar_evento(
-            f"LXV_ROUND_EVAL round={int(round_id)} candidates={int((logica_unica_real or {}).get('valids', 0) or 0)} "
-            f"no_setup={int((logica_unica_real or {}).get('no_setup', 0) or 0)}"
-        )
         next_round = int(round_id) + 1
-        next_open_ts = now
-        next_scan_window = float(scan_window_s)
-        next_deadline = float(next_open_ts + next_scan_window)
-        next_token = f"rnd-{int(next_round)}-{int(next_open_ts)}"
         out = {
             "barrier_enabled": bool(BARRIER_ENABLED),
             "current_round": int(next_round),
@@ -2821,18 +2804,11 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
             "selected_bot": "",
             "lxv_ready": False,
             "round_state": "ROUND_RELEASE_NEXT",
-            "round_open_ts": float(next_open_ts),
-            "round_deadline_ts": float(next_deadline),
-            "round_token": str(next_token),
-            "scan_window_s": float(next_scan_window),
-            "cycle_id": int(ciclo_martingala_siguiente()),
-            "snapshot_id": str(next_token),
-            "lxv_core": True,
+            "round_open_ts": now,
             "ts": now,
         }
         escribir_barrier_state_atomic(out)
-        agregar_evento(f"LXV_CORE_RELEASE_NEXT round={int(round_id)} next={int(out['release_round'])}")
-        agregar_evento(f"LXV_ROUND_CONTEXT_OPEN round={int(next_round)} token={next_token} deadline={int(next_deadline)}")
+        agregar_evento(f"LXV_CORE_RELEASE_NEXT round={int(round_id)} new_release_round={int(out['release_round'])}")
     else:
         st_bar.update({
             "barrier_enabled": bool(BARRIER_ENABLED),
@@ -2842,12 +2818,6 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
             "all_closed": False,
             "round_state": "ROUND_WAIT_ACK",
             "round_open_ts": float(round_open_ts),
-            "round_deadline_ts": float(round_deadline_ts if round_deadline_ts > 0 else (round_open_ts + scan_window_s)),
-            "round_token": str(round_token or f"rnd-{int(round_id)}-{int(round_open_ts)}"),
-            "scan_window_s": float(scan_window_s),
-            "cycle_id": int(st_bar.get("cycle_id", ciclo_martingala_siguiente()) or ciclo_martingala_siguiente()),
-            "snapshot_id": str(st_bar.get("snapshot_id", round_token) or round_token),
-            "lxv_core": True,
             "ts": now,
         })
         escribir_barrier_state_atomic(st_bar)
@@ -15629,11 +15599,9 @@ def _construir_columna_lxv_sincronizada(estado: dict, bots: list[str], max_round
             "reason": "round_incompleta",
             "round": int(round_id if round_id > 0 else 1),
             "cells": {},
-            "total_closed": 0,
             "total_validos": 0,
             "total_verdes": 0,
             "total_rojos": 0,
-            "total_no_setup": 0,
             "red_bots": [],
             "missing_bots": bot_list,
             "pending_bots": [],
@@ -18489,8 +18457,7 @@ async def main():
                             f"LXV_CORE_COLUMN round={int(logica_unica_real.get('round', 0) or 0)} "
                             f"verdes={int(logica_unica_real.get('greens', 0) or 0)} "
                             f"rojos={int(logica_unica_real.get('reds', 0) or 0)} "
-                            f"validos={int(logica_unica_real.get('valids', 0) or 0)} "
-                            f"no_setup={int(logica_unica_real.get('no_setup', 0) or 0)}"
+                            f"validos={int(logica_unica_real.get('valids', 0) or 0)}"
                         )
                         barrier_ok = True
                         barrier_pending_round = []

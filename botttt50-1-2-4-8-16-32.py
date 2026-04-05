@@ -232,7 +232,6 @@ except Exception:
 SYNC_ROUND_DIR = "sync_round"
 BARRIER_ENABLED = True
 LXV_CORE_ENABLE = True
-LXV_SYNC_SCAN_WINDOW_S = 45
 
 def _barrier_state_path() -> str:
     return os.path.join(SYNC_ROUND_DIR, "barrier_state.json")
@@ -354,8 +353,6 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
             f.flush(); os.fsync(f.fileno())
         os.replace(tmp, p)
         estado_bot["last_round_ack"] = int(round_id)
-        if str(payload.get("resultado_norm", "")) == "NO_SETUP":
-            print(Fore.YELLOW + f"BOT_ACK_NO_SETUP bot={NOMBRE_BOT} round={int(round_id)}")
         if _print_once(f"bot-ack-write-{round_id}", ttl=5):
             print(Fore.YELLOW + f"BOT_ACK_WRITE bot={NOMBRE_BOT} round={int(round_id)} resultado={str(payload.get('resultado_norm','INDEFINIDO'))}")
     except Exception:
@@ -2463,26 +2460,6 @@ async def ejecutar_panel():
                 round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
                 if bool(LXV_CORE_ENABLE) and (not await esperar_permiso_barrier_siguiente_ronda(round_next)):
                     continue
-                ctx_round = None
-                if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED):
-                    ctx_round, motivo_ctx = latch_contexto_ronda(int(round_next))
-                    if not isinstance(ctx_round, dict):
-                        if _print_once(f"bot-wait-ctx-{round_next}-{motivo_ctx}", ttl=3):
-                            print(Fore.YELLOW + f"BOT_WAIT_CONTEXT bot={NOMBRE_BOT} round={int(round_next)} motivo={motivo_ctx}")
-                        await asyncio.sleep(0.30)
-                        continue
-                    ctx_id = f"{int(round_next)}|{str(ctx_round.get('round_token',''))}"
-                    if str(estado_bot.get("last_round_token_latched", "") or "") != ctx_id:
-                        estado_bot["last_round_token_latched"] = ctx_id
-                        print(Fore.YELLOW + f"BOT_ROUND_LATCH bot={NOMBRE_BOT} round={int(round_next)} token={str(ctx_round.get('round_token',''))}")
-                    if _print_once(f"bot-scan-window-open-{round_next}", ttl=3):
-                        print(Fore.YELLOW + f"BOT_SCAN_WINDOW_OPEN bot={NOMBRE_BOT} round={int(round_next)} deadline={int(float(ctx_round.get('round_deadline_ts', 0.0) or 0.0))}")
-                    if float(time.time()) >= float(ctx_round.get("round_deadline_ts", 0.0) or 0.0):
-                        print(Fore.YELLOW + f"BOT_SCAN_WINDOW_EXPIRED bot={NOMBRE_BOT} round={int(round_next)}")
-                        escribir_ack_cierre_ronda(int(round_next), "NO_SETUP", trade_uid=f"no_setup:{ctx_id}", epoch_ref=int(time.time()))
-                        estado_bot["last_round_token_consumed"] = ctx_id
-                        estado_bot["round_id_actual"] = int(round_next)
-                        continue
                 estado_bot["round_id_actual"] = int(round_next)
 
                 # ========= BUSCAR SEÑAL =========
