@@ -18706,45 +18706,33 @@ async def main():
                             if not mejor_bot:
                                 if lxv_core_route_active:
                                     agregar_evento("LXV_CORE_REAL_BLOCKED_HARD bot=-- motivo=selected_bot_invalido")
-                                    agregar_evento("LXV_AUDIT_MASTER_BLOCK bot=-- motivo=selected_bot_invalido")
-                                    agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=selected_bot_invalido")
                                 else:
                                     agregar_evento("LXV_EXEC_BLOCKED: motivo=selected_bot_invalido")
                             elif not isinstance(lxv_sync_order_payload, dict):
                                 if lxv_core_route_active:
                                     agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=payload_incompleto")
-                                    agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo=payload_incompleto")
-                                    agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=payload_incompleto")
                                 else:
                                     agregar_evento("LXV_EXEC_BLOCKED: motivo=payload_incompleto")
                             else:
                                 agregar_evento(
                                     f"LXV_EXEC_START: bot={mejor_bot} ciclo={ciclo_tag} round={round_tag} snapshot={snapshot_tag}"
                                 )
-                                if lxv_core_route_active:
-                                    agregar_evento(f"LXV_AUDIT_MASTER_ROUTE bot={mejor_bot} armed=1 exec_start=1 write_ok=0 activate_ok=0")
                                 owner_prev = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
                                 owner_mem = next((b for b in BOT_NAMES if estado_bots.get(b, {}).get('token') == "REAL"), None)
                                 owner_activo = owner_prev if owner_prev in BOT_NAMES else (owner_mem if owner_mem in BOT_NAMES else None)
                                 if owner_activo and owner_activo != mejor_bot:
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=owner_real_ocupado")
-                                        agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo=owner_real_ocupado")
-                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=owner_real_ocupado")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=owner_real_ocupado")
                                 elif _equity_protection_is_active(time.time()):
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=proteccion_saldo")
-                                        agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo=proteccion_saldo")
-                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=proteccion_saldo")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=proteccion_saldo")
                                 elif _bot_blocked_by_bg_close(mejor_bot):
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=bg_close")
-                                        agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo=bg_close")
-                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=bg_close")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=bg_close")
                                 else:
@@ -18755,16 +18743,11 @@ async def main():
                                     if ok_real:
                                         try:
                                             globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
-                                            globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = str(extra_payload.get("snapshot_id", "") or "")
                                             globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
                                             globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
                                             globals()["LAST_LXV_SYNC_TS"] = float(time.time())
                                         except Exception:
                                             pass
-                                        agregar_evento(
-                                            f"LXV_CORE_SNAPSHOT_CONSUMED round={int(extra_payload.get('round_lxv', 0) or 0)} "
-                                            f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} bot={mejor_bot}"
-                                        )
                                         estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                         estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                         activo_real = mejor_bot
@@ -18774,7 +18757,6 @@ async def main():
                                         )
                                         if lxv_core_route_active:
                                             agregar_evento(f"LXV_CORE_REAL_GO bot={mejor_bot} ciclo={ciclo_tag} round={round_tag}")
-                                            agregar_evento(f"LXV_AUDIT_MASTER_ROUTE bot={mejor_bot} armed=1 exec_start=1 write_ok=1 activate_ok=1")
                                         if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0:
                                             try:
                                                 escribir_barrier_release(int(barrier_round_id), selected_bot=str(mejor_bot), lxv_ready=True)
@@ -18788,7 +18770,6 @@ async def main():
                                         motivo_fail = str(globals().get("LAST_REAL_ORDER_FAIL_REASON", "") or "order_write_fail")
                                         if lxv_core_route_active:
                                             agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo={motivo_fail}")
-                                            agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo={motivo_fail}")
                                         else:
                                             agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
                         elif bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo):

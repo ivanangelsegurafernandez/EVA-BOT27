@@ -2877,11 +2877,6 @@ async def ejecutar_panel():
                         token_actual=current_token,
                         owner_ok=True,
                     )
-                    if isinstance(data_lxv_buy, dict):
-                        snap_audit = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
-                        round_audit = int(data_lxv_buy.get("round_lxv", 0) or 0)
-                        if snap_audit and _print_once(f"lxv-audit-pre-buy-{round_audit}-{snap_audit}", ttl=8):
-                            print(Fore.YELLOW + f"LXV_AUDIT_BOT_CONSUME_POINT stage=pre_buy bot={NOMBRE_BOT} round={int(round_audit)} snapshot={snap_audit}")
                     if not ok_lxv_buy:
                         if _print_once(f"lxv-buy-abort-{motivo_lxv_buy}", ttl=10):
                             print(Fore.YELLOW + f"LXV_SYNC_ABORT: {motivo_lxv_buy}")
@@ -2932,8 +2927,6 @@ async def ejecutar_panel():
                         round_ok = int(data_lxv_buy.get("round_lxv", 0) or 0)
                         if snap_ok and _print_once(f"lxv-consumed-real-{round_ok}-{snap_ok}", ttl=8):
                             print(Fore.YELLOW + f"LXV_SYNC_CONSUMED_REAL bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok}")
-                        if snap_ok and _print_once(f"lxv-audit-post-contract-{round_ok}-{snap_ok}", ttl=8):
-                            print(Fore.YELLOW + f"LXV_AUDIT_BOT_CONSUME_POINT stage=post_contract_id bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok}")
                     except Exception:
                         pass
 
