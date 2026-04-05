@@ -291,12 +291,16 @@ except Exception:
 
 SYNC_ROUND_DIR = "sync_round"
 BARRIER_ENABLED = True
+LXV_CORE_ENABLE = True
 
 def _barrier_state_path() -> str:
     return os.path.join(SYNC_ROUND_DIR, "barrier_state.json")
 
-def _barrier_ack_path(bot: str) -> str:
-    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
+def _barrier_ack_path(bot: str, round_id: int) -> str:
+    rid = max(1, int(round_id or 1))
+    d = os.path.join(SYNC_ROUND_DIR, f"round_{rid}")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{bot}.json")
 
 def leer_barrier_state() -> dict:
     try:
@@ -317,8 +321,8 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int) ->
         release_round = int(st.get("release_round", 1) or 1)
         if int(release_round) >= int(round_local_siguiente):
             return True
-        if _print_once(f"barrier-wait-{round_local_siguiente}-{release_round}", ttl=4):
-            print(Fore.YELLOW + f"BARRIER_WAIT_LOCAL: esperando round={int(round_local_siguiente)} release_round={int(release_round)}")
+        if _print_once(f"bot-wait-release-{round_local_siguiente}-{release_round}", ttl=6):
+            print(Fore.YELLOW + f"BOT_WAIT_RELEASE bot={NOMBRE_BOT} round={int(round_local_siguiente)} release_round={int(release_round)}")
         await asyncio.sleep(0.35)
     return True
 
@@ -364,15 +368,15 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
         return
     try:
         os.makedirs(SYNC_ROUND_DIR, exist_ok=True)
-        p = _barrier_ack_path(NOMBRE_BOT)
+        p = _barrier_ack_path(NOMBRE_BOT, int(round_id))
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
             f.flush(); os.fsync(f.fileno())
         os.replace(tmp, p)
         estado_bot["last_round_ack"] = int(round_id)
-        if _print_once(f"barrier-ack-{round_id}", ttl=5):
-            print(Fore.YELLOW + f"BARRIER_ACK_WRITE: round={int(round_id)} status=CERRADO resultado={str(resultado or '')} norm={str(payload.get('resultado_norm','INDEFINIDO'))}")
+        if _print_once(f"bot-ack-write-{round_id}", ttl=5):
+            print(Fore.YELLOW + f"BOT_ACK_WRITE bot={NOMBRE_BOT} round={int(round_id)} resultado={str(payload.get('resultado_norm','INDEFINIDO'))}")
     except Exception:
         pass
 
@@ -2552,6 +2556,11 @@ async def ejecutar_panel():
                         print(Fore.CYAN + Style.BRIGHT + "WS reabierto por salud. Retomando MISMO ciclo.")
                     await asyncio.sleep(0.6 + random.uniform(0.0, 0.5))
 
+                round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
+                if bool(LXV_CORE_ENABLE) and (not await esperar_permiso_barrier_siguiente_ronda(round_next)):
+                    continue
+                estado_bot["round_id_actual"] = int(round_next)
+
                 # ========= BUSCAR SEÑAL =========
                 symbol, direccion, rsi9, rsi14, sma5, sma20, breakout, cruce, condiciones, rsi_reversion, close_snapshot = await buscar_estrategia(ws, ciclo, current_token)
 
@@ -2686,10 +2695,6 @@ async def ejecutar_panel():
                 print(Fore.CYAN + Style.BRIGHT + f"[{symbol}] Martingala #{ciclo} - {direccion} - {monto} USD")
                 # === PRE-TRADE SNAPSHOT (para inferencia real del Maestro) ===
                 epoch_pre = None
-                round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
-                if not await esperar_permiso_barrier_siguiente_ronda(round_next):
-                    continue
-                estado_bot["round_id_actual"] = int(round_next)
                 now_pre = datetime.now(timezone.utc)
                 ts_pre = now_pre.isoformat()
                 trade_uid = _build_trade_uid(int(now_pre.timestamp()), symbol, direccion, ciclo, current_token, ts_iso=ts_pre)
