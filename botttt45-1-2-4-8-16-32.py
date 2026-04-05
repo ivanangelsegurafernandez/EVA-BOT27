@@ -367,44 +367,6 @@ async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
             wait_logged = True
         await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
 
-async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
-    if not (bool(LXV_SOFT_LEVEL_ENABLE) and bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED)):
-        return True
-    if int(round_cerrada or 0) <= 0:
-        return True
-    if _es_token_real(leer_token_desde_archivo()):
-        return True
-    st = leer_barrier_state()
-    if not isinstance(st, dict):
-        return True
-    if not bool(st.get("barrier_enabled", True)):
-        return True
-
-    round_target = int(round_cerrada) + 1
-    t0 = time.time()
-    wait_logged = False
-    while True:
-        st = leer_barrier_state()
-        if not isinstance(st, dict):
-            return True
-        if not bool(st.get("barrier_enabled", True)):
-            return True
-        release_round = int(st.get("release_round", 1) or 1)
-        current_round = int(st.get("current_round", 1) or 1)
-        waited = max(0.0, float(time.time() - t0))
-        if (release_round >= round_target) or (current_round >= round_target):
-            if waited >= 0.2 and _print_once(f"bot-soft-level-ok-{round_target}", ttl=2):
-                print(Fore.YELLOW + f"BOT_SOFT_LEVEL_OK bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
-            return True
-        if waited >= float(LXV_SOFT_LEVEL_MAX_WAIT_S):
-            if _print_once(f"bot-soft-level-timeout-{round_target}", ttl=2):
-                print(Fore.YELLOW + f"BOT_SOFT_LEVEL_TIMEOUT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
-            return False
-        if (not wait_logged) and _print_once(f"bot-soft-level-wait-{round_target}", ttl=2):
-            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_o_current")
-            wait_logged = True
-        await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
-
 def normalizar_resultado_cierre(resultado_raw) -> dict:
     txt = str(resultado_raw or "").strip().upper()
     if not txt:
@@ -456,33 +418,6 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
         estado_bot["last_round_ack"] = int(round_id)
         if _print_once(f"bot-ack-write-{round_id}", ttl=5):
             print(Fore.YELLOW + f"BOT_ACK_WRITE bot={NOMBRE_BOT} round={int(round_id)} resultado={str(payload.get('resultado_norm','INDEFINIDO'))}")
-    except Exception:
-        pass
-
-def escribir_ack_lxv_consumido(round_lxv: int, snapshot_id: str, contract_id=None):
-    if int(round_lxv or 0) <= 0:
-        return
-    snap = str(snapshot_id or "").strip()
-    if not snap:
-        return
-    try:
-        d = os.path.join(SYNC_ROUND_DIR, "lxv_consumed")
-        os.makedirs(d, exist_ok=True)
-        p = os.path.join(d, f"{NOMBRE_BOT}.json")
-        tmp = p + ".tmp"
-        payload = {
-            "bot": str(NOMBRE_BOT),
-            "round_lxv": int(round_lxv),
-            "snapshot_id": snap,
-            "contract_id": str(contract_id or ""),
-            "status": "consumed_real",
-            "ts": float(time.time()),
-        }
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, p)
     except Exception:
         pass
 
@@ -561,7 +496,7 @@ def leer_orden_real(bot: str):
     ttl = int(data.get("ttl", 120))
     quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
     src = str(data.get("src", "") or "").upper() or None
-    if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO", "LXV_CORE"}:
+    if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
         if _lxv_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
             if _print_once("lxv-sync-skip-pendiente", ttl=10):
                 print(Fore.YELLOW + "LXV_SYNC_SKIP: ronda=0 | motivo=pendiente_abierta")
@@ -612,7 +547,7 @@ def validar_permiso_buy_lxv_sync(bot: str, ciclo: int, token_actual, owner_ok: b
     if _es_token_real(token_actual) and not isinstance(data, dict):
         return False, "token_real_sin_orden_valida", None
     src = str((data or {}).get("src", "") or "").upper()
-    if src not in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO", "LXV_CORE"}:
+    if src not in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
         return True, "not_lxv_sync", None
     if not _es_token_real(token_actual):
         return False, "token_no_real", data

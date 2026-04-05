@@ -134,6 +134,7 @@ _sfx_load_all()
 NOMBRE_BOT = "fulll49"
 ARCHIVO_CSV = f"registro_enriquecido_{NOMBRE_BOT}.csv"
 ARCHIVO_TOKEN = "token_actual.txt"  # Fuente única de verdad (coincide con 5R6M)
+BG_CLOSE_GUARD_DIR = "bg_close_guard"
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 ACTIVOS = ["1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"]
 MARTINGALA_DEMO = [1, 2, 4, 8]
@@ -165,6 +166,8 @@ estado_bot = {
     "ciclo_actual": 1,
     "round_id_actual": 0,
     "last_round_ack": 0,
+    "last_lxv_snapshot_consumed": "",
+    "last_lxv_round_consumed": 0,
 }  # Added modo_manual and barra_activa
 racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de PÉRDIDAS
 
@@ -199,6 +202,66 @@ def commit_guard_clear():
     global last_real_contract_id, real_buy_commit_until
     last_real_contract_id = None
     real_buy_commit_until = 0.0
+
+def _bg_close_guard_path() -> str:
+    return os.path.join(BG_CLOSE_GUARD_DIR, f"{NOMBRE_BOT}.json")
+
+def _set_bg_close_pending(contract_id, reason: str):
+    now_ts = time.time()
+    guard = {
+        "bot": NOMBRE_BOT,
+        "bg_close_pending": True,
+        "contract_id": str(contract_id or ""),
+        "reason": str(reason or ""),
+        "ts_open": now_ts,
+        "ts_last_update": now_ts,
+    }
+    try:
+        os.makedirs(BG_CLOSE_GUARD_DIR, exist_ok=True)
+        path = _bg_close_guard_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(guard, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception as e:
+        if _print_once("bg-close-guard-set", ttl=20):
+            print(Fore.YELLOW + f"[WARN] bg_close_guard set: {type(e).__name__}: {e}")
+
+def _clear_bg_close_pending(contract_id=None):
+    now_ts = time.time()
+    guard = {
+        "bot": NOMBRE_BOT,
+        "bg_close_pending": False,
+        "contract_id": str(contract_id or ""),
+        "reason": "",
+        "ts_open": 0,
+        "ts_last_update": now_ts,
+    }
+    try:
+        os.makedirs(BG_CLOSE_GUARD_DIR, exist_ok=True)
+        path = _bg_close_guard_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(guard, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception as e:
+        if _print_once("bg-close-guard-clear", ttl=20):
+            print(Fore.YELLOW + f"[WARN] bg_close_guard clear: {type(e).__name__}: {e}")
+
+def _has_bg_close_pending() -> bool:
+    path = _bg_close_guard_path()
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f) or {}
+        return bool(data.get("bg_close_pending", False))
+    except Exception:
+        return False
 
 # >>> PATCH 1 — Helpers de orden de ciclo
 ORDEN_DIR = "orden_real"  # misma carpeta usada por el maestro
@@ -373,43 +436,79 @@ def _lxv_post_real_confirmed() -> bool:
     except Exception:
         return False
 
+
+def _lxv_sync_tiene_pendiente_abierta(archivo_csv: str) -> bool:
+    """True si hay operación PRE_TRADE/PENDIENTE sin cierre definitivo asociado."""
+    try:
+        rec = {}
+        with open(archivo_csv, "r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                key = _trade_key_from_row(row)
+                if not key:
+                    continue
+                st = str(row.get("trade_status", "") or "").strip().upper()
+                cur = rec.get(key, {"has_pre": False, "has_close": False})
+                if st in {"PRE_TRADE", "PENDIENTE", "OPEN", "ABIERTO"}:
+                    cur["has_pre"] = True
+                elif st == "CERRADO":
+                    cur["has_close"] = True
+                rec[key] = cur
+        return any(bool(v.get("has_pre")) and not bool(v.get("has_close")) for v in rec.values())
+    except Exception:
+        return False
+
+# Compat temporal (naming previo LXB)
+def _lxb_sync_tiene_pendiente_abierta(archivo_csv: str) -> bool:
+    return _lxv_sync_tiene_pendiente_abierta(archivo_csv)
+
+def leer_orden_real_full(bot: str):
+    """Lee JSON completo de orden_real de forma tolerante/atómica."""
+    ruta = os.path.join(ORDEN_DIR, f"{bot}.json")
+    tmp = ruta + ".tmp"
+    try:
+        if not os.path.exists(ruta):
+            return None
+        with open(ruta, "r", encoding="utf-8") as f, open(tmp, "w", encoding="utf-8") as t:
+            t.write(f.read())
+        with open(tmp, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        os.remove(tmp)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        return None
+
 def leer_orden_real(bot: str):
     """
     Devuelve (ciclo, ts, quiet, src) si existe orden fresca, o (None, None, 0, None) si no.
     """
-    ruta = os.path.join(ORDEN_DIR, f"{bot}.json")
-    tmp = ruta + ".tmp"
-    try:
-        if os.path.exists(ruta):
-            with open(ruta, "r", encoding="utf-8") as f, open(tmp, "w", encoding="utf-8") as t:
-                t.write(f.read())
-            with open(tmp, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            os.remove(tmp)
-            if data.get("bot") != bot:
-                return None, None, 0, None
-            cyc = int(data.get("ciclo", 1))
-            ts = float(data.get("ts", 0.0))
-            ttl = int(data.get("ttl", 120))
-            quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
-            src = str(data.get("src", "") or "").upper() or None
-            lim = max(30, min(ttl, 300))  # margen seguro
-            if time.time() - ts > lim:
-                if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO", "LXV_CORE"}:
-                    if _print_once("lxv-snapshot-exp-hard-block", ttl=15):
-                        print(Fore.YELLOW + "LXV_SYNC_ABORT: orden_vencida")
-                    return None, None, 0, src
-                if _print_once("lxv-snapshot-exp-pre-real", ttl=15):
-                    print(Fore.YELLOW + "LXV_REVALIDATE: snapshot vencido antes de activación REAL -> REAL cancelado")
-                return None, None, 0, None
-            return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
+    data = leer_orden_real_full(bot)
+    if not isinstance(data, dict):
         return None, None, 0, None
-    except Exception:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    if data.get("bot") != bot:
         return None, None, 0, None
-
-
+    cyc = int(data.get("ciclo", 1))
+    ts = float(data.get("ts", 0.0))
+    ttl = int(data.get("ttl", 120))
+    quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
+    src = str(data.get("src", "") or "").upper() or None
+    if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+        if _lxv_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
+            if _print_once("lxv-sync-skip-pendiente", ttl=10):
+                print(Fore.YELLOW + "LXV_SYNC_SKIP: ronda=0 | motivo=pendiente_abierta")
+            return None, None, 0, src
+    lim = max(30, min(ttl, 300))  # margen seguro
+    if time.time() - ts > lim:
+        if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+            if _print_once("lxv-snapshot-exp-hard-block", ttl=15):
+                print(Fore.YELLOW + "LXV_SYNC_ABORT: orden_vencida")
+            return None, None, 0, src
+        return None, None, 0, None
+    return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
 
 def _es_token_real(token_val) -> bool:
     return str(token_val or "").strip() == str(TOKEN_REAL).strip()
@@ -442,6 +541,52 @@ def _retener_ciclo_para_reinicio(ciclo_actual: int):
         return int(ciclo_forzado), "retenido"
     estado_bot["ciclo_forzado"] = int(ciclo_actual or 1)
     return int(estado_bot["ciclo_forzado"]), "actual"
+
+def validar_permiso_buy_lxv_sync(bot: str, ciclo: int, token_actual, owner_ok: bool = True):
+    data = leer_orden_real_full(bot)
+    if _es_token_real(token_actual) and not isinstance(data, dict):
+        return False, "token_real_sin_orden_valida", None
+    src = str((data or {}).get("src", "") or "").upper()
+    if src not in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+        return True, "not_lxv_sync", None
+    if not _es_token_real(token_actual):
+        return False, "token_no_real", data
+    if not bool(owner_ok and _is_real_owner_valid_now()):
+        return False, "owner_lock_invalido", data
+    if not isinstance(data, dict):
+        return False, "orden_ausente", None
+    if str(data.get("bot", "")).strip() != str(bot):
+        return False, "bot_mismatch", data
+    if str(data.get("selected_bot", "")).strip() != str(bot):
+        return False, "selected_bot_mismatch", data
+    round_lxv = int(data.get("round_lxv", 0) or 0)
+    snapshot_id = str(data.get("snapshot_id", "") or "").strip()
+    if round_lxv <= 0:
+        return False, "round_lxv_missing", data
+    if not snapshot_id:
+        return False, "snapshot_id_missing", data
+    if int(ciclo or 0) != int(data.get("ciclo", 0) or 0):
+        return False, "ciclo_mismatch", data
+    ts = float(data.get("ts", 0.0) or 0.0)
+    ttl = int(data.get("ttl", 120) or 120)
+    lim = max(30, min(ttl, 300))
+    if (time.time() - ts) > lim:
+        return False, "ttl_vencido", data
+    if str(estado_bot.get("last_lxv_snapshot_consumed", "") or "") == snapshot_id:
+        if _print_once(f"lxv-skip-consumed-{round_lxv}-{snapshot_id}", ttl=8):
+            print(Fore.YELLOW + f"LXV_SYNC_SKIP_CONSUMED_REAL bot={bot} round={int(round_lxv)} snapshot={snapshot_id}")
+        return False, "snapshot_ya_consumido", data
+    if int(round_lxv) <= int(estado_bot.get("last_lxv_round_consumed", 0) or 0):
+        if _print_once(f"lxv-skip-consumed-round-{round_lxv}", ttl=8):
+            print(Fore.YELLOW + f"LXV_SYNC_SKIP_CONSUMED_REAL bot={bot} round={int(round_lxv)} snapshot={snapshot_id}")
+        return False, "ronda_ya_consumida", data
+    if _lxv_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
+        return False, "pendiente_abierta_local", data
+    if _has_bg_close_pending():
+        return False, "bg_close_pending", data
+    if commit_guard_active():
+        return False, "commit_guard_activo", data
+    return True, "ok", data
 
 # <<< PATCH 1
 
@@ -554,6 +699,7 @@ CSV_HEADER = [
 ]
 CLOSE_SNAPSHOT_COLS = [f"close_{i}" for i in range(20)]
 CSV_HEADER = CSV_HEADER + CLOSE_SNAPSHOT_COLS
+CSV_HEADER.append("close_origin")
 # =============================================================================
 # CSV — helpers robustos (evita columnas corridas + asegura puntaje 0..1)
 # =============================================================================
@@ -1560,7 +1706,7 @@ async def check_token_and_reconnect(ws, current_token):
                     real_activado_en_bot = time.time()  # BLOQUE 5 and 2: Set activation time
                     real_activation_confirmed = True
                     if _print_once("lxv-activation-ok", ttl=10):
-                        print(Fore.YELLOW + f"LXV_ACTIVATION: snapshot válido -> REAL habilitado para {NOMBRE_BOT}")
+                        print(Fore.YELLOW + f"LXV_SYNC_ACTIVATION: orden válida -> REAL habilitado para {NOMBRE_BOT}")
                     # Lee la orden del maestro y deja seteado el ciclo para la siguiente vuelta
                     cyc, _, quiet, src = leer_orden_real(NOMBRE_BOT)  # BLOQUE 7: Relee fresh
                     if cyc:
@@ -1626,7 +1772,7 @@ async def check_token_and_reconnect(ws, current_token):
                 primer_ingreso_real = True
                 real_activation_confirmed = True
                 if _print_once("lxv-activation-ok", ttl=10):
-                    print(Fore.YELLOW + f"LXV_ACTIVATION: snapshot válido -> REAL habilitado para {NOMBRE_BOT}")
+                    print(Fore.YELLOW + f"LXV_SYNC_ACTIVATION: orden válida -> REAL habilitado para {NOMBRE_BOT}")
                 try:
                     real_activado_en_bot = time.time()
                 except Exception:
@@ -1789,6 +1935,7 @@ async def esperar_resultado(ws, contract_id, symbol, direccion, monto, rsi9, rsi
                 remaining = 60 - i
                 print(Fore.MAGENTA + Style.BRIGHT + "\nToken cambió: finalizo contrato en segundo plano y libero el ciclo.")
                 # No reutilizar 'ws' para evitar choques de recv: usa una conexión propia
+                _set_bg_close_pending(contract_id, reason="token_change_or_ws_cut")
                 asyncio.create_task(finalizar_contrato_bg(
                     contract_id, remaining, symbol, direccion, monto,
                     rsi9, rsi14, sma5, sma20, cruce, breakout, rsi_reversion,
@@ -2179,6 +2326,7 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
                 "epoch": int(epoch_val),
                 "ts": ts_val,
                 "ia_decision_id": trade_uid_final,
+                "close_origin": "BG_FINALIZE",
             }
             closes = _extract_close_snapshot(close_snapshot, n=20)
             _warn_close_snapshot_insuficiente(closes)
@@ -2204,6 +2352,7 @@ async def finalizar_contrato_bg(contract_id, remaining, symbol, direccion, monto
             _buffer_log(msg2)
         else:
             print(msg2)
+        _clear_bg_close_pending(contract_id=contract_id)
 
     except Exception as e:
         msg = Fore.YELLOW + f"finalizar_contrato_bg: {type(e).__name__}: {e!r}"
@@ -2720,6 +2869,26 @@ async def ejecutar_panel():
 
 # ==================== /VENTANA DE DECISIÓN IA ====================
 
+                data_lxv_buy = None
+                if modo_real:
+                    ok_lxv_buy, motivo_lxv_buy, data_lxv_buy = validar_permiso_buy_lxv_sync(
+                        NOMBRE_BOT,
+                        ciclo=int(ciclo),
+                        token_actual=current_token,
+                        owner_ok=True,
+                    )
+                    if not ok_lxv_buy:
+                        if _print_once(f"lxv-buy-abort-{motivo_lxv_buy}", ttl=10):
+                            print(Fore.YELLOW + f"LXV_SYNC_ABORT: {motivo_lxv_buy}")
+                        if isinstance(data_lxv_buy, dict):
+                            snap_retry = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+                            round_retry = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                            if snap_retry and motivo_lxv_buy not in {"snapshot_ya_consumido", "ronda_ya_consumida"}:
+                                if _print_once(f"lxv-retry-allowed-{round_retry}-{snap_retry}-{motivo_lxv_buy}", ttl=8):
+                                    print(Fore.YELLOW + f"LXV_SYNC_RETRY_ALLOWED bot={NOMBRE_BOT} round={int(round_retry)} snapshot={snap_retry} motivo={motivo_lxv_buy}")
+                        await asyncio.sleep(0.8)
+                        continue
+
                 try:
                     data_buy = await api_call(ws, {
                         "buy": 1,
@@ -2750,6 +2919,16 @@ async def ejecutar_panel():
                     raise
 
                 contract_id = data_buy["buy"]["contract_id"]
+                if isinstance(data_lxv_buy, dict):
+                    try:
+                        estado_bot["last_lxv_snapshot_consumed"] = str(data_lxv_buy.get("snapshot_id", "") or "")
+                        estado_bot["last_lxv_round_consumed"] = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                        snap_ok = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+                        round_ok = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                        if snap_ok and _print_once(f"lxv-consumed-real-{round_ok}-{snap_ok}", ttl=8):
+                            print(Fore.YELLOW + f"LXV_SYNC_CONSUMED_REAL bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok}")
+                    except Exception:
+                        pass
 
                 # ✅ Ciclo en progreso significa: YA hay contrato abierto
                 estado_bot["ciclo_en_progreso"] = True
