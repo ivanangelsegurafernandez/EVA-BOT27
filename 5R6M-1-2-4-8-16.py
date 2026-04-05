@@ -15541,7 +15541,7 @@ def _construir_columna_lxv_sincronizada(estado: dict, bots: list[str], max_round
 
     if round_id > 0:
         cells = {}
-        valids = greens = reds = 0
+        closed = valids = greens = reds = no_setup = 0
         red_bots = []
         missing_bots = []
         pending_bots = []
@@ -15554,10 +15554,13 @@ def _construir_columna_lxv_sincronizada(estado: dict, bots: list[str], max_round
             res_norm = str(ack.get("resultado_norm", ack.get("resultado", "")) or "").strip().upper()
             mark = None
             if ack_round == round_id and ack_status == "CERRADO" and (not ack_pending) and ack_defined:
+                closed += 1
                 if res_norm in ("GANANCIA", "WIN", "G"):
                     mark = "G"
                 elif res_norm in ("PERDIDA", "PÉRDIDA", "LOSS", "R", "X"):
                     mark = "R"
+                elif res_norm in ("NO_SETUP", "SIN_SETUP"):
+                    mark = "N"
             cells[b] = mark
             if ack_pending:
                 pending_bots.append(str(b))
@@ -15570,16 +15573,20 @@ def _construir_columna_lxv_sincronizada(estado: dict, bots: list[str], max_round
                 reds += 1
                 valids += 1
                 red_bots.append(str(b))
+            elif mark == "N":
+                no_setup += 1
 
-        if valids > 0:
+        if closed > 0:
             return {
-                "ready": bool(valids == len(bot_list)),
-                "reason": "ok" if valids == len(bot_list) else "round_incompleta",
+                "ready": bool(closed == len(bot_list)),
+                "reason": "ok" if closed == len(bot_list) else "round_incompleta",
                 "round": int(round_id),
                 "cells": cells,
+                "total_closed": int(closed),
                 "total_validos": int(valids),
                 "total_verdes": int(greens),
                 "total_rojos": int(reds),
+                "total_no_setup": int(no_setup),
                 "red_bots": red_bots,
                 "missing_bots": missing_bots,
                 "pending_bots": pending_bots,
@@ -15656,7 +15663,7 @@ def _resolver_lxv_sincronizado(candidatos: list, estado: dict, bot_names: list[s
     out = {
         "triggered": False, "selected_bot": None, "selected_case": None, "selected_score": 0.0,
         "reason": "estructura_insuficiente", "valids": 0, "greens": 0, "reds": 0,
-        "red_bots": [], "round": 0, "missing_bots": [], "pending_bots": [], "cells": {},
+        "red_bots": [], "round": 0, "missing_bots": [], "pending_bots": [], "cells": {}, "closed": 0, "no_setup": 0,
     }
     try:
         bots = [str(b) for b in list(bot_names or []) if str(b).strip()]
@@ -15676,19 +15683,23 @@ def _resolver_lxv_sincronizado(candidatos: list, estado: dict, bot_names: list[s
                 agregar_evento(f"LXV_SYNC_WAIT: ronda={int((out['round'] or 0) + 1)} | faltan_bots={','.join(out['missing_bots']) or '-'}")
             return out
 
+        closed = int(sync.get("total_closed", 0) or 0)
         valids = int(sync.get("total_validos", 0) or 0)
         greens = int(sync.get("total_verdes", 0) or 0)
         reds = int(sync.get("total_rojos", 0) or 0)
+        no_setup = int(sync.get("total_no_setup", 0) or 0)
         red_bots = list(sync.get("red_bots", []) or [])
         n_bots = len(bots)
         min_greens = 3 if n_bots == 5 else max(3, n_bots - 2)
 
-        out.update({"valids": valids, "greens": greens, "reds": reds, "red_bots": red_bots})
+        out.update({"closed": closed, "valids": valids, "greens": greens, "reds": reds, "no_setup": no_setup, "red_bots": red_bots})
         if emitir_log:
             agregar_evento(f"LXV_SYNC_READY: ronda={int(out['round'])} | greens={greens} | reds={reds}")
 
-        if valids != n_bots:
-            out["reason"] = "validos_incompletos"
+        if closed != n_bots:
+            out["reason"] = "cierres_incompletos"
+        elif valids != n_bots:
+            out["reason"] = "round_con_neutrales"
         elif greens < min_greens:
             out["reason"] = "menos_de_3_verdes"
         elif reds not in (1, 2):
