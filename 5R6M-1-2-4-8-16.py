@@ -2601,6 +2601,12 @@ anexar_incremental_desde_bot = _anexar_incremental_desde_bot_CANON
 # === BLOQUE 7 — ORDEN DE REAL Y CONTROL DE TOKEN ===
 # === ORDEN DE REAL (handshake maestro→bot) ===
 ORDEN_DIR = "orden_real"
+SYNC_ROUND_DIR = "sync_round"
+BARRIER_STATE_FILE = os.path.join(SYNC_ROUND_DIR, "barrier_state.json")
+BARRIER_ENABLED = True
+BARRIER_ACK_TIMEOUT_S = 45
+BARRIER_STRICT_MODE = True
+BARRIER_ALLOW_TEMP_EXCLUDE = False
 
 def _ensure_dir(p):
     try:
@@ -2618,6 +2624,83 @@ def _atomic_write(path: str, text: str):
 def path_orden(bot: str) -> str:
     _ensure_dir(ORDEN_DIR)
     return os.path.join(ORDEN_DIR, f"{bot}.json")
+
+def _sync_round_ack_path(bot: str) -> str:
+    _ensure_dir(SYNC_ROUND_DIR)
+    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
+
+def leer_barrier_state() -> dict:
+    try:
+        if not os.path.exists(BARRIER_STATE_FILE):
+            return {
+                "barrier_enabled": bool(BARRIER_ENABLED),
+                "current_round": 1,
+                "release_round": 1,
+                "all_closed": False,
+                "pending_bots": list(BOT_NAMES),
+                "last_evaluated_round": 0,
+                "selected_bot": "",
+                "lxv_ready": False,
+                "ts": float(time.time()),
+            }
+        with open(BARRIER_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception:
+        return {}
+
+def escribir_barrier_state_atomic(state: dict):
+    _ensure_dir(SYNC_ROUND_DIR)
+    _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
+
+def leer_ack_ronda_bot(bot: str) -> dict | None:
+    p = _sync_round_ack_path(bot)
+    try:
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+def barrier_round_pendiente(round_id: int) -> list[str]:
+    pending = []
+    now = float(time.time())
+    for b in BOT_NAMES:
+        ack = leer_ack_ronda_bot(b) or {}
+        ack_round = int(ack.get("round_id", 0) or 0)
+        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
+        ack_pending = bool(ack.get("pending_open", False))
+        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
+        if ack_round != int(round_id) or not ack_ok or ack_pending:
+            pending.append(str(b))
+            continue
+        if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
+            pending.append(str(b))
+    return pending
+
+def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
+    pending = barrier_round_pendiente(round_id)
+    return (len(pending) == 0), pending
+
+def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
+    st = leer_barrier_state() or {}
+    out = {
+        "barrier_enabled": bool(BARRIER_ENABLED),
+        "current_round": int(current_round),
+        "release_round": int(current_round) + 1,
+        "all_closed": True,
+        "pending_bots": [],
+        "last_evaluated_round": int(current_round),
+        "selected_bot": str(selected_bot or ""),
+        "lxv_ready": bool(lxv_ready),
+        "ts": float(time.time()),
+    }
+    out.update({k: v for k, v in st.items() if k not in out and k not in {"pending_bots"}})
+    escribir_barrier_state_atomic(out)
 
 # === PATCH: REAL INMEDIATO EN HUD AL EMITIR ORDEN (sin esperar compra) ===
 # Objetivo:
@@ -18164,6 +18247,36 @@ async def main():
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
                         logica_unica_real = _resolver_lxv_sincronizado(candidatos, estado_bots, BOT_NAMES, emitir_log=True)
                         lxv_permite_real_nuevo = bool(logica_unica_real.get("triggered", False))
+                        barrier_round_id = int(logica_unica_real.get("round", 0) or 0)
+                        barrier_ok = True
+                        if bool(BARRIER_ENABLED):
+                            try:
+                                st_bar = leer_barrier_state() or {}
+                                round_obj = int(st_bar.get("current_round", barrier_round_id or 1) or (barrier_round_id or 1))
+                                if round_obj <= 0:
+                                    round_obj = int(barrier_round_id or 1)
+                                ok_round, pending_round = barrier_round_completa(round_obj)
+                                common_round = int(logica_unica_real.get("round", 0) or 0)
+                                if common_round > 0 and round_obj != common_round:
+                                    agregar_evento(f"BARRIER_MISMATCH: barrier_round={round_obj} common_round={common_round}")
+                                if not ok_round:
+                                    barrier_ok = False
+                                    if pending_round:
+                                        agregar_evento(f"BARRIER_WAIT: round={round_obj} faltan={','.join(pending_round)}")
+                                    for bp in pending_round[:2]:
+                                        ack_bp = leer_ack_ronda_bot(bp) or {}
+                                        if bool(ack_bp.get("pending_open", False)):
+                                            agregar_evento(f"BARRIER_WAIT: round={round_obj} motivo=pendiente_abierta bot={bp}")
+                                else:
+                                    agregar_evento(f"BARRIER_READY: round={round_obj} all_closed={len(BOT_NAMES)}/{len(BOT_NAMES)}")
+                                    agregar_evento(f"BARRIER_EVAL_START: round={round_obj}")
+                                barrier_round_id = int(round_obj)
+                            except Exception:
+                                barrier_ok = False
+                                agregar_evento("BARRIER_DISABLED_FALLBACK: usando common_round")
+                                barrier_ok = True
+                        if not barrier_ok:
+                            lxv_permite_real_nuevo = False
                         selected_bot_operativo = ""
                         selected_prob_operativo = 0.0
                         real_source_operativo = "LXV_SINCRONIZADO"
@@ -18392,10 +18505,33 @@ async def main():
                                         agregar_evento(
                                             f"LXV_EXEC_OK: bot={mejor_bot} ciclo={ciclo_tag} round={round_tag} snapshot={snapshot_tag}"
                                         )
+                                        if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0:
+                                            try:
+                                                escribir_barrier_release(int(barrier_round_id), selected_bot=str(mejor_bot), lxv_ready=True)
+                                                agregar_evento(f"BARRIER_RELEASE: next_round={int(barrier_round_id) + 1}")
+                                            except Exception:
+                                                agregar_evento("BARRIER_DISABLED_FALLBACK: usando common_round")
                                     else:
                                         estado_bots[mejor_bot]["ia_senal_pendiente"] = False
                                         motivo_fail = str(globals().get("LAST_REAL_ORDER_FAIL_REASON", "") or "order_write_fail")
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
+                        elif bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo):
+                            try:
+                                st_prev = leer_barrier_state() or {}
+                                st_prev.update({
+                                    "barrier_enabled": bool(BARRIER_ENABLED),
+                                    "current_round": int(barrier_round_id),
+                                    "release_round": int(st_prev.get("release_round", max(1, barrier_round_id)) or max(1, barrier_round_id)),
+                                    "all_closed": False,
+                                    "pending_bots": barrier_round_pendiente(int(barrier_round_id)),
+                                    "last_evaluated_round": int(st_prev.get("last_evaluated_round", 0) or 0),
+                                    "selected_bot": "",
+                                    "lxv_ready": False,
+                                    "ts": float(time.time()),
+                                })
+                                escribir_barrier_state_atomic(st_prev)
+                            except Exception:
+                                pass
 
                         if candidatos and not MODO_REAL_MANUAL and (not lxv_exec_handled):
                             agregar_evento(
