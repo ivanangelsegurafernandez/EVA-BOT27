@@ -164,6 +164,7 @@ estado_bot = {
     "score_senal": None,
     "ciclo_actual": 1,
     "round_id_actual": 0,
+    "barra_activa": False,
     "last_round_ack": 0,
 }  # Added modo_manual and barra_activa
 racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de PÉRDIDAS
