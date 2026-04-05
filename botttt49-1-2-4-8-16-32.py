@@ -387,6 +387,8 @@ def _resolver_ciclo_prioritario(fallback: int = 1):
     ciclo_forzado = estado_bot.get("ciclo_forzado")
     if ciclo_forzado:
         return int(ciclo_forzado), "retenido"
+    if _es_token_real(leer_token_desde_archivo()):
+        return None, "sin_orden"
     return int(fallback), "fallback"
 
 def _retener_ciclo_para_reinicio(ciclo_actual: int):
@@ -2316,8 +2318,13 @@ async def ejecutar_panel():
                 estado_bot["reinicios_consecutivos"] += 1
                 if estado_bot["reinicios_consecutivos"] > 5:
                     ciclo_reanudado, src_reanudado = _resolver_ciclo_prioritario(fallback=1)
-                    estado_bot["ciclo_forzado"] = int(ciclo_reanudado)
-                    print(Fore.RED + f"Demasiados reinicios consecutivos: conservando continuidad martingala ({src_reanudado}) en C{int(ciclo_reanudado)}. Sin reset a C1.")
+                    if ciclo_reanudado:
+                        estado_bot["ciclo_forzado"] = int(ciclo_reanudado)
+                        print(Fore.RED + f"Demasiados reinicios consecutivos: conservando continuidad martingala ({src_reanudado}) en C{int(ciclo_reanudado)}. Sin reset a C1.")
+                    else:
+                        estado_bot["ciclo_forzado"] = None
+                        if _print_once("lxv-sync-abort-reinicio", ttl=5):
+                            print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
                     estado_bot["reinicios_consecutivos"] = 0
                     await asyncio.sleep(5)
 
