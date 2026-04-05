@@ -384,6 +384,9 @@ IA_METRIC_THRESHOLD = AUTO_REAL_THR_MIN
 # Mantiene lock de un solo bot en REAL y ciclo martingala global en HUD.
 REAL_CLASSIC_GATE = True
 LXV_CORE_ENABLE = True
+LXV_CORE_REAL_ROUTE_ENABLE = True
+LXV_CORE_BYPASS_GLOBAL_GATE = True
+LXV_CORE_REQUIRE_HARD_SAFETY_ONLY = True
 
 # ✅ Umbral SOLO para auditoría/calibración (señales CERRADAS en ia_signals_log)
 # Esto es lo que querías: contar cierres desde 60% sin afectar la operativa.
@@ -18665,8 +18668,9 @@ async def main():
                                 logica_unica_real["reason"] = "snapshot_build_error"
                                 agregar_evento(f"LXV_SYNC_SKIP: motivo=snapshot_build_error ({type(e_lxv_payload).__name__})")
 
+                        lxv_core_route_active = bool(LXV_CORE_ENABLE and LXV_CORE_REAL_ROUTE_ENABLE)
                         lxv_exec_handled = False
-                        if (not MODO_REAL_MANUAL) and lxv_permite_real_nuevo:
+                        if (not MODO_REAL_MANUAL) and lxv_permite_real_nuevo and ((not LXV_CORE_ENABLE) or lxv_core_route_active):
                             lxv_exec_handled = True
                             ciclo_auto = ciclo_martingala_siguiente()
                             if reset_martingala_por_saldo(ciclo_auto, saldo_val):
@@ -18676,10 +18680,23 @@ async def main():
                             ciclo_tag = _marti_ciclo_tag(ciclo_auto)
                             snapshot_tag = str((lxv_sync_order_payload or {}).get("snapshot_id", "") or "--")
                             round_tag = int((lxv_sync_order_payload or {}).get("round_lxv", 0) or 0)
+                            if lxv_core_route_active and isinstance(lxv_sync_order_payload, dict):
+                                agregar_evento(
+                                    f"LXV_CORE_REAL_ARMED bot={mejor_bot or '--'} case={str(logica_unica_real.get('selected_case') or '--')} "
+                                    f"score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} round={int(round_tag)} snapshot={snapshot_tag}"
+                                )
+                                if bool(LXV_CORE_BYPASS_GLOBAL_GATE) and veto_flags_info:
+                                    agregar_evento(f"LXV_CORE_ROUTE_BYPASS gate_legacy={str(veto_flags_info[0])}")
                             if not mejor_bot:
-                                agregar_evento("LXV_EXEC_BLOCKED: motivo=selected_bot_invalido")
+                                if lxv_core_route_active:
+                                    agregar_evento("LXV_CORE_REAL_BLOCKED_HARD bot=-- motivo=selected_bot_invalido")
+                                else:
+                                    agregar_evento("LXV_EXEC_BLOCKED: motivo=selected_bot_invalido")
                             elif not isinstance(lxv_sync_order_payload, dict):
-                                agregar_evento("LXV_EXEC_BLOCKED: motivo=payload_incompleto")
+                                if lxv_core_route_active:
+                                    agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=payload_incompleto")
+                                else:
+                                    agregar_evento("LXV_EXEC_BLOCKED: motivo=payload_incompleto")
                             else:
                                 agregar_evento(
                                     f"LXV_EXEC_START: bot={mejor_bot} ciclo={ciclo_tag} round={round_tag} snapshot={snapshot_tag}"
@@ -18688,11 +18705,20 @@ async def main():
                                 owner_mem = next((b for b in BOT_NAMES if estado_bots.get(b, {}).get('token') == "REAL"), None)
                                 owner_activo = owner_prev if owner_prev in BOT_NAMES else (owner_mem if owner_mem in BOT_NAMES else None)
                                 if owner_activo and owner_activo != mejor_bot:
-                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=owner_real_ocupado")
+                                    if lxv_core_route_active:
+                                        agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=owner_real_ocupado")
+                                    else:
+                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=owner_real_ocupado")
                                 elif _equity_protection_is_active(time.time()):
-                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=proteccion_saldo")
+                                    if lxv_core_route_active:
+                                        agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=proteccion_saldo")
+                                    else:
+                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=proteccion_saldo")
                                 elif _bot_blocked_by_bg_close(mejor_bot):
-                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=bg_close")
+                                    if lxv_core_route_active:
+                                        agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=bg_close")
+                                    else:
+                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=bg_close")
                                 else:
                                     estado_bots[mejor_bot]["ia_senal_pendiente"] = True
                                     extra_payload = dict(lxv_sync_order_payload)
@@ -18713,17 +18739,24 @@ async def main():
                                         agregar_evento(
                                             f"LXV_EXEC_OK: bot={mejor_bot} ciclo={ciclo_tag} round={round_tag} snapshot={snapshot_tag}"
                                         )
-                                        if (not LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(barrier_round_id) > 0:
+                                        if lxv_core_route_active:
+                                            agregar_evento(f"LXV_CORE_REAL_GO bot={mejor_bot} ciclo={ciclo_tag} round={round_tag}")
+                                        if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0:
                                             try:
                                                 escribir_barrier_release(int(barrier_round_id), selected_bot=str(mejor_bot), lxv_ready=True)
                                                 agregar_evento(f"BARRIER_RELEASE: next_round={int(barrier_round_id) + 1}")
+                                                if lxv_core_route_active:
+                                                    agregar_evento(f"LXV_CORE_BARRIER_READY bot={mejor_bot} round={int(barrier_round_id)} lxv_ready=1")
                                             except Exception:
                                                 agregar_evento("BARRIER_DISABLED_FALLBACK: usando common_round")
                                     else:
                                         estado_bots[mejor_bot]["ia_senal_pendiente"] = False
                                         motivo_fail = str(globals().get("LAST_REAL_ORDER_FAIL_REASON", "") or "order_write_fail")
-                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
-                        elif (not LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo):
+                                        if lxv_core_route_active:
+                                            agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo={motivo_fail}")
+                                        else:
+                                            agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
+                        elif bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo):
                             try:
                                 st_prev = leer_barrier_state() or {}
                                 st_prev.update({
@@ -18740,7 +18773,7 @@ async def main():
                                 escribir_barrier_state_atomic(st_prev)
                             except Exception:
                                 pass
-                        if (not LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and bool(barrier_ok):
+                        if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and bool(barrier_ok):
                             try:
                                 st_rel = leer_barrier_state() or {}
                                 next_round = int(barrier_round_id) + 1
