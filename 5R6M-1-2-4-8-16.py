@@ -2843,6 +2843,47 @@ LAST_LXV_SYNC_SELECTED_BOT = ""
 LAST_LXV_SYNC_TS = 0.0
 LAST_REAL_ORDER_FAIL_REASON = ""
 
+def _lxv_consumed_ack_path(bot: str) -> str:
+    return os.path.join(SYNC_ROUND_DIR, "lxv_consumed", f"{bot}.json")
+
+def _leer_lxv_consumed_ack(bot: str) -> dict | None:
+    try:
+        p = _lxv_consumed_ack_path(bot)
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+def _aplicar_lxv_consumed_ack() -> None:
+    try:
+        for bot in BOT_NAMES:
+            d = _leer_lxv_consumed_ack(bot)
+            if not isinstance(d, dict):
+                continue
+            if str(d.get("status", "")).strip().lower() != "consumed_real":
+                continue
+            round_lxv = int(d.get("round_lxv", 0) or 0)
+            snapshot_id = str(d.get("snapshot_id", "") or "").strip()
+            ts_ack = float(d.get("ts", 0.0) or 0.0)
+            if round_lxv <= 0 or not snapshot_id:
+                continue
+            prev_round = int(globals().get("LAST_LXV_SYNC_ROUND_CONSUMED", 0) or 0)
+            prev_snap = str(globals().get("LAST_LXV_SYNC_SNAPSHOT_CONSUMED", "") or "")
+            prev_ts = float(globals().get("LAST_LXV_SYNC_TS", 0.0) or 0.0)
+            if (round_lxv < prev_round) or (round_lxv == prev_round and snapshot_id == prev_snap and ts_ack <= prev_ts):
+                continue
+            globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = snapshot_id
+            globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = snapshot_id
+            globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(round_lxv)
+            globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(bot)
+            globals()["LAST_LXV_SYNC_TS"] = float(ts_ack if ts_ack > 0 else time.time())
+            agregar_evento(f"LXV_CORE_CONSUMED_ACK bot={bot} round={int(round_lxv)} snapshot={snapshot_id}")
+    except Exception:
+        pass
+
 def limpiar_orden_real(bot: str):
     """
     Evita re-entradas fantasma:
@@ -18443,6 +18484,7 @@ async def main():
                                     )
                                 DYN_ROOF_STATE["last_low_balance_warn_ts"] = float(ahora_warn)
 
+                        _aplicar_lxv_consumed_ack()
                         if candidatos:
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
                         logica_unica_real = _resolver_lxv_sincronizado(candidatos, estado_bots, BOT_NAMES, emitir_log=True)

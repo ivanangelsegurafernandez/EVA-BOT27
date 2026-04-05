@@ -395,7 +395,7 @@ def leer_orden_real(bot: str):
             src = str(data.get("src", "") or "").upper() or None
             lim = max(30, min(ttl, 300))  # margen seguro
             if time.time() - ts > lim:
-                if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO", "LXV_CORE"}:
                     if _print_once("lxv-snapshot-exp-hard-block", ttl=15):
                         print(Fore.YELLOW + "LXV_SYNC_ABORT: orden_vencida")
                     return None, None, 0, src
