@@ -14,6 +14,7 @@ import time  # Added for timestamps in orden_real and BLOQUE 5
 import random  # Added for jitter in BLOQUE 1.3
 import itertools  # For req_counter in api_call
 import math
+import unicodedata
 
 # === BLINDAJE: señales limpias ===
 import signal
@@ -321,9 +322,31 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int) ->
         await asyncio.sleep(0.35)
     return True
 
+def normalizar_resultado_cierre(resultado_raw) -> dict:
+    txt = str(resultado_raw or "").strip().upper()
+    if not txt:
+        return {"resultado_norm": "INDEFINIDO", "resultado_definido": False}
+    txt = unicodedata.normalize("NFKD", txt)
+    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    txt = " ".join(txt.replace("✅", " ").replace("❌", " ").split())
+    map_g = {"GANANCIA", "GANADA", "WIN", "PROFIT", "WON", "GAIN"}
+    map_p = {"PERDIDA", "LOSS", "LOST", "FAIL", "ROJA"}
+    map_e = {"EMPATE", "DRAW", "PUSH", "TIE"}
+    map_i = {"INDEFINIDO", "ERROR", "NONE", "NULL", "OPEN", "PRE_TRADE", "PENDIENTE", "ABIERTO"}
+    if txt in map_g or ("GANAN" in txt) or ("WIN" in txt) or ("PROFIT" in txt):
+        return {"resultado_norm": "GANANCIA", "resultado_definido": True}
+    if txt in map_p or ("PERDI" in txt) or ("LOSS" in txt) or ("LOST" in txt):
+        return {"resultado_norm": "PERDIDA", "resultado_definido": True}
+    if txt in map_e:
+        return {"resultado_norm": "EMPATE", "resultado_definido": True}
+    if txt in map_i:
+        return {"resultado_norm": "INDEFINIDO", "resultado_definido": False}
+    return {"resultado_norm": "INDEFINIDO", "resultado_definido": False}
+
 def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = "", epoch_ref=None):
     if int(round_id or 0) <= 0:
         return
+    norm_res = normalizar_resultado_cierre(resultado)
     payload = {
         "bot": str(NOMBRE_BOT),
         "round_id": int(round_id),
@@ -332,7 +355,9 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
         "ia_decision_id": str(trade_uid or ""),
         "trade_status": "CERRADO",
         "pending_open": False,
-        "resultado_definido": bool(str(resultado or "").upper() in {"GANADA", "PERDIDA", "EMPATE"}),
+        "resultado_raw": str(resultado or ""),
+        "resultado_norm": str(norm_res.get("resultado_norm", "INDEFINIDO") or "INDEFINIDO"),
+        "resultado_definido": bool(norm_res.get("resultado_definido", False)),
         "ts_close": float(time.time()),
     }
     if not bool(payload["resultado_definido"]):
@@ -347,7 +372,7 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
         os.replace(tmp, p)
         estado_bot["last_round_ack"] = int(round_id)
         if _print_once(f"barrier-ack-{round_id}", ttl=5):
-            print(Fore.YELLOW + f"BARRIER_ACK_WRITE: round={int(round_id)} status=CERRADO")
+            print(Fore.YELLOW + f"BARRIER_ACK_WRITE: round={int(round_id)} status=CERRADO resultado={str(resultado or '')} norm={str(payload.get('resultado_norm','INDEFINIDO'))}")
     except Exception:
         pass
 
