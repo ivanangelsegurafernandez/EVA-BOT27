@@ -165,6 +165,8 @@ estado_bot = {
     "ciclo_actual": 1,
     "round_id_actual": 0,
     "last_round_ack": 0,
+    "last_round_token_latched": "",
+    "last_round_token_consumed": "",
 }  # Added modo_manual and barra_activa
 racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de PÉRDIDAS
 
@@ -228,12 +230,17 @@ except Exception:
 
 SYNC_ROUND_DIR = "sync_round"
 BARRIER_ENABLED = True
+LXV_CORE_ENABLE = True
+LXV_SYNC_SCAN_WINDOW_S = 45
 
 def _barrier_state_path() -> str:
     return os.path.join(SYNC_ROUND_DIR, "barrier_state.json")
 
-def _barrier_ack_path(bot: str) -> str:
-    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
+def _barrier_ack_path(bot: str, round_id: int) -> str:
+    rid = max(1, int(round_id or 1))
+    d = os.path.join(SYNC_ROUND_DIR, f"round_{rid}")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{bot}.json")
 
 def leer_barrier_state() -> dict:
     try:
@@ -246,6 +253,39 @@ def leer_barrier_state() -> dict:
     except Exception:
         return {}
 
+def latch_contexto_ronda(round_local: int):
+    st = leer_barrier_state() or {}
+    if not bool(st.get("barrier_enabled", True)):
+        return None, "barrier_disabled"
+    release_round = int(st.get("release_round", 1) or 1)
+    current_round = int(st.get("current_round", 1) or 1)
+    if int(release_round) < int(round_local):
+        return None, "release_pending"
+    if int(current_round) != int(round_local):
+        return None, f"current_round_mismatch:{current_round}"
+    token = str(st.get("round_token", "") or st.get("snapshot_id", "") or "")
+    if not token:
+        return None, "missing_round_token"
+    deadline = float(st.get("round_deadline_ts", 0.0) or 0.0)
+    if deadline <= 0.0:
+        scan_window = float(st.get("scan_window_s", LXV_SYNC_SCAN_WINDOW_S) or LXV_SYNC_SCAN_WINDOW_S)
+        round_open = float(st.get("round_open_ts", time.time()) or time.time())
+        deadline = float(round_open + scan_window)
+    if float(time.time()) > float(deadline):
+        return None, "deadline_expired"
+    consumed = str(estado_bot.get("last_round_token_consumed", "") or "")
+    ctx_id = f"{int(round_local)}|{token}"
+    if consumed == ctx_id:
+        return None, "already_consumed"
+    return {
+        "round_id": int(round_local),
+        "round_token": token,
+        "round_deadline_ts": float(deadline),
+        "scan_window_s": float(st.get("scan_window_s", LXV_SYNC_SCAN_WINDOW_S) or LXV_SYNC_SCAN_WINDOW_S),
+        "cycle_id": int(st.get("cycle_id", 1) or 1),
+        "snapshot_id": str(st.get("snapshot_id", token) or token),
+    }, "ok"
+
 async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int) -> bool:
     while bool(BARRIER_ENABLED):
         st = leer_barrier_state() or {}
@@ -254,8 +294,8 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int) ->
         release_round = int(st.get("release_round", 1) or 1)
         if int(release_round) >= int(round_local_siguiente):
             return True
-        if _print_once(f"barrier-wait-{round_local_siguiente}-{release_round}", ttl=4):
-            print(Fore.YELLOW + f"BARRIER_WAIT_LOCAL: esperando round={int(round_local_siguiente)} release_round={int(release_round)}")
+        if _print_once(f"bot-wait-release-{round_local_siguiente}-{release_round}", ttl=6):
+            print(Fore.YELLOW + f"BOT_WAIT_RELEASE bot={NOMBRE_BOT} round={int(round_local_siguiente)} release_round={int(release_round)}")
         await asyncio.sleep(0.35)
     return True
 
@@ -270,18 +310,23 @@ def normalizar_resultado_cierre(resultado_raw) -> dict:
     map_p = {"PERDIDA", "LOSS", "LOST", "FAIL", "ROJA"}
     map_e = {"EMPATE", "DRAW", "PUSH", "TIE"}
     map_i = {"INDEFINIDO", "ERROR", "NONE", "NULL", "OPEN", "PRE_TRADE", "PENDIENTE", "ABIERTO"}
+    map_n = {"NO_SETUP", "SIN_SETUP", "NO CANDIDATO", "ERROR_CERRADO_NO_CANDIDATO"}
     if txt in map_g or ("GANAN" in txt) or ("WIN" in txt) or ("PROFIT" in txt):
         return {"resultado_norm": "GANANCIA", "resultado_definido": True}
     if txt in map_p or ("PERDI" in txt) or ("LOSS" in txt) or ("LOST" in txt):
         return {"resultado_norm": "PERDIDA", "resultado_definido": True}
     if txt in map_e:
         return {"resultado_norm": "EMPATE", "resultado_definido": True}
+    if txt in map_n:
+        return {"resultado_norm": "NO_SETUP", "resultado_definido": True}
     if txt in map_i:
         return {"resultado_norm": "INDEFINIDO", "resultado_definido": False}
     return {"resultado_norm": "INDEFINIDO", "resultado_definido": False}
 
 def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = "", epoch_ref=None):
     if int(round_id or 0) <= 0:
+        return
+    if int(estado_bot.get("last_round_ack", 0) or 0) >= int(round_id):
         return
     norm_res = normalizar_resultado_cierre(resultado)
     payload = {
@@ -301,15 +346,17 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
         return
     try:
         os.makedirs(SYNC_ROUND_DIR, exist_ok=True)
-        p = _barrier_ack_path(NOMBRE_BOT)
+        p = _barrier_ack_path(NOMBRE_BOT, int(round_id))
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
             f.flush(); os.fsync(f.fileno())
         os.replace(tmp, p)
         estado_bot["last_round_ack"] = int(round_id)
-        if _print_once(f"barrier-ack-{round_id}", ttl=5):
-            print(Fore.YELLOW + f"BARRIER_ACK_WRITE: round={int(round_id)} status=CERRADO resultado={str(resultado or '')} norm={str(payload.get('resultado_norm','INDEFINIDO'))}")
+        if str(payload.get("resultado_norm", "")) == "NO_SETUP":
+            print(Fore.YELLOW + f"BOT_ACK_NO_SETUP bot={NOMBRE_BOT} round={int(round_id)}")
+        if _print_once(f"bot-ack-write-{round_id}", ttl=5):
+            print(Fore.YELLOW + f"BOT_ACK_WRITE bot={NOMBRE_BOT} round={int(round_id)} resultado={str(payload.get('resultado_norm','INDEFINIDO'))}")
     except Exception:
         pass
 
@@ -2365,6 +2412,11 @@ async def ejecutar_panel():
                         print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
                     await asyncio.sleep(0.35)
                     continue
+                if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED):
+                    if _print_once("bot-wait-context-c1-block", ttl=6):
+                        print(Fore.YELLOW + f"BOT_WAIT_CONTEXT bot={NOMBRE_BOT} round={int(estado_bot.get('round_id_actual', 0) or 0) + 1} motivo=sin_orden_y_lxv_core")
+                    await asyncio.sleep(0.35)
+                    continue
                 if _print_once("ciclo-fallback-c1", ttl=30):
                     print(Fore.YELLOW + "Sin orden fresca ni ciclo retenido: usando fallback C1.")
 
@@ -2407,10 +2459,46 @@ async def ejecutar_panel():
                         print(Fore.CYAN + Style.BRIGHT + "WS reabierto por salud. Retomando MISMO ciclo.")
                     await asyncio.sleep(0.6 + random.uniform(0.0, 0.5))
 
+                round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
+                if bool(LXV_CORE_ENABLE) and (not await esperar_permiso_barrier_siguiente_ronda(round_next)):
+                    continue
+                ctx_round = None
+                if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED):
+                    ctx_round, motivo_ctx = latch_contexto_ronda(int(round_next))
+                    if not isinstance(ctx_round, dict):
+                        if _print_once(f"bot-wait-ctx-{round_next}-{motivo_ctx}", ttl=3):
+                            print(Fore.YELLOW + f"BOT_WAIT_CONTEXT bot={NOMBRE_BOT} round={int(round_next)} motivo={motivo_ctx}")
+                        await asyncio.sleep(0.30)
+                        continue
+                    ctx_id = f"{int(round_next)}|{str(ctx_round.get('round_token',''))}"
+                    if str(estado_bot.get("last_round_token_latched", "") or "") != ctx_id:
+                        estado_bot["last_round_token_latched"] = ctx_id
+                        print(Fore.YELLOW + f"BOT_ROUND_LATCH bot={NOMBRE_BOT} round={int(round_next)} token={str(ctx_round.get('round_token',''))}")
+                    if _print_once(f"bot-scan-window-open-{round_next}", ttl=3):
+                        print(Fore.YELLOW + f"BOT_SCAN_WINDOW_OPEN bot={NOMBRE_BOT} round={int(round_next)} deadline={int(float(ctx_round.get('round_deadline_ts', 0.0) or 0.0))}")
+                    if float(time.time()) >= float(ctx_round.get("round_deadline_ts", 0.0) or 0.0):
+                        print(Fore.YELLOW + f"BOT_SCAN_WINDOW_EXPIRED bot={NOMBRE_BOT} round={int(round_next)}")
+                        escribir_ack_cierre_ronda(int(round_next), "NO_SETUP", trade_uid=f"no_setup:{ctx_id}", epoch_ref=int(time.time()))
+                        estado_bot["last_round_token_consumed"] = ctx_id
+                        estado_bot["round_id_actual"] = int(round_next)
+                        continue
+                estado_bot["round_id_actual"] = int(round_next)
+
                 # ========= BUSCAR SEÑAL =========
                 symbol, direccion, rsi9, rsi14, sma5, sma20, breakout, cruce, condiciones, rsi_reversion, close_snapshot = await buscar_estrategia(ws, ciclo, current_token)
+                if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and isinstance(ctx_round, dict):
+                    if float(time.time()) >= float(ctx_round.get("round_deadline_ts", 0.0) or 0.0):
+                        print(Fore.YELLOW + f"BOT_SCAN_WINDOW_EXPIRED bot={NOMBRE_BOT} round={int(round_next)}")
+                        ctx_id = f"{int(round_next)}|{str(ctx_round.get('round_token',''))}"
+                        escribir_ack_cierre_ronda(int(round_next), "NO_SETUP", trade_uid=f"no_setup:{ctx_id}", epoch_ref=int(time.time()))
+                        estado_bot["last_round_token_consumed"] = ctx_id
+                        continue
 
                 if symbol == "REINTENTAR" or symbol is None:
+                    if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and (not modo_real):
+                        ctx_id = str(estado_bot.get("last_round_token_latched", "") or f"{int(round_next)}|na")
+                        escribir_ack_cierre_ronda(int(round_next), "NO_SETUP", trade_uid=f"no_setup:{ctx_id}", epoch_ref=int(time.time()))
+                        estado_bot["last_round_token_consumed"] = ctx_id
                     continue
 
                 if not all([direccion, rsi9 is not None, rsi14 is not None]):
@@ -2541,10 +2629,6 @@ async def ejecutar_panel():
                 print(Fore.CYAN + Style.BRIGHT + f"[{symbol}] Martingala #{ciclo} - {direccion} - {monto} USD")
                 # === PRE-TRADE SNAPSHOT (para inferencia real del Maestro) ===
                 epoch_pre = None
-                round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
-                if not await esperar_permiso_barrier_siguiente_ronda(round_next):
-                    continue
-                estado_bot["round_id_actual"] = int(round_next)
                 now_pre = datetime.now(timezone.utc)
                 ts_pre = now_pre.isoformat()
                 trade_uid = _build_trade_uid(int(now_pre.timestamp()), symbol, direccion, ciclo, current_token, ts_iso=ts_pre)
@@ -2750,6 +2834,7 @@ async def ejecutar_panel():
                         trade_uid=str(trade_uid or ""),
                         epoch_ref=epoch_pre,
                     )
+                    estado_bot["last_round_token_consumed"] = str(estado_bot.get("last_round_token_latched", "") or "")
                 except Exception:
                     pass
 
