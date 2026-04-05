@@ -367,6 +367,44 @@ async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
             wait_logged = True
         await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
 
+async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
+    if not (bool(LXV_SOFT_LEVEL_ENABLE) and bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED)):
+        return True
+    if int(round_cerrada or 0) <= 0:
+        return True
+    if _es_token_real(leer_token_desde_archivo()):
+        return True
+    st = leer_barrier_state()
+    if not isinstance(st, dict):
+        return True
+    if not bool(st.get("barrier_enabled", True)):
+        return True
+
+    round_target = int(round_cerrada) + 1
+    t0 = time.time()
+    wait_logged = False
+    while True:
+        st = leer_barrier_state()
+        if not isinstance(st, dict):
+            return True
+        if not bool(st.get("barrier_enabled", True)):
+            return True
+        release_round = int(st.get("release_round", 1) or 1)
+        current_round = int(st.get("current_round", 1) or 1)
+        waited = max(0.0, float(time.time() - t0))
+        if (release_round >= round_target) or (current_round >= round_target):
+            if waited >= 0.2 and _print_once(f"bot-soft-level-ok-{round_target}", ttl=2):
+                print(Fore.YELLOW + f"BOT_SOFT_LEVEL_OK bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
+            return True
+        if waited >= float(LXV_SOFT_LEVEL_MAX_WAIT_S):
+            if _print_once(f"bot-soft-level-timeout-{round_target}", ttl=2):
+                print(Fore.YELLOW + f"BOT_SOFT_LEVEL_TIMEOUT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
+            return False
+        if (not wait_logged) and _print_once(f"bot-soft-level-wait-{round_target}", ttl=2):
+            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_o_current")
+            wait_logged = True
+        await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
+
 def normalizar_resultado_cierre(resultado_raw) -> dict:
     txt = str(resultado_raw or "").strip().upper()
     if not txt:
@@ -2904,11 +2942,6 @@ async def ejecutar_panel():
                         token_actual=current_token,
                         owner_ok=True,
                     )
-                    if isinstance(data_lxv_buy, dict):
-                        snap_audit = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
-                        round_audit = int(data_lxv_buy.get("round_lxv", 0) or 0)
-                        if snap_audit and _print_once(f"lxv-audit-pre-buy-{round_audit}-{snap_audit}", ttl=8):
-                            print(Fore.YELLOW + f"LXV_AUDIT_BOT_CONSUME_POINT stage=pre_buy bot={NOMBRE_BOT} round={int(round_audit)} snapshot={snap_audit}")
                     if not ok_lxv_buy:
                         if _print_once(f"lxv-buy-abort-{motivo_lxv_buy}", ttl=10):
                             print(Fore.YELLOW + f"LXV_SYNC_ABORT: {motivo_lxv_buy}")
@@ -2920,12 +2953,6 @@ async def ejecutar_panel():
                                     print(Fore.YELLOW + f"LXV_SYNC_RETRY_ALLOWED bot={NOMBRE_BOT} round={int(round_retry)} snapshot={snap_retry} motivo={motivo_lxv_buy}")
                         await asyncio.sleep(0.8)
                         continue
-                    if isinstance(data_lxv_buy, dict):
-                        snap_pre = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
-                        round_pre = int(data_lxv_buy.get("round_lxv", 0) or 0)
-                        src_pre = str(data_lxv_buy.get("src", "") or "").upper()
-                        if snap_pre and _print_once(f"lxv-prebuy-ok-{round_pre}-{snap_pre}", ttl=8):
-                            print(Fore.YELLOW + f"LXV_SYNC_PREBUY_OK bot={NOMBRE_BOT} round={int(round_pre)} snapshot={snap_pre} src={src_pre or '--'} ciclo={int(ciclo)}")
 
                 try:
                     data_buy = await api_call(ws, {
@@ -2964,10 +2991,7 @@ async def ejecutar_panel():
                         snap_ok = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
                         round_ok = int(data_lxv_buy.get("round_lxv", 0) or 0)
                         if snap_ok and _print_once(f"lxv-consumed-real-{round_ok}-{snap_ok}", ttl=8):
-                            print(Fore.YELLOW + f"LXV_SYNC_CONSUMED_REAL bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok} contract_id={contract_id}")
-                        escribir_ack_lxv_consumido(round_lxv=int(round_ok), snapshot_id=snap_ok, contract_id=contract_id)
-                        if snap_ok and _print_once(f"lxv-audit-post-contract-{round_ok}-{snap_ok}", ttl=8):
-                            print(Fore.YELLOW + f"LXV_AUDIT_BOT_CONSUME_POINT stage=post_contract_id bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok}")
+                            print(Fore.YELLOW + f"LXV_SYNC_CONSUMED_REAL bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok}")
                     except Exception:
                         pass
 
