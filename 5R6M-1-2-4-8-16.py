@@ -2834,7 +2834,10 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
 #   asegurar que el bot tenga también su orden_real.json escrita (sin recursión).
 
 _last_real_push_ts = {bot: 0.0 for bot in BOT_NAMES}
-LAST_LXV_SYNC_SNAPSHOT_ID = ""
+LAST_LXV_SYNC_SNAPSHOT_ID = ""  # compat legacy: alias del snapshot consumido
+LAST_LXV_SYNC_SNAPSHOT_ARMED = ""
+LAST_LXV_SYNC_ROUND_ARMED = 0
+LAST_LXV_SYNC_SNAPSHOT_CONSUMED = ""
 LAST_LXV_SYNC_ROUND_CONSUMED = 0
 LAST_LXV_SYNC_SELECTED_BOT = ""
 LAST_LXV_SYNC_TS = 0.0
@@ -18629,16 +18632,16 @@ async def main():
                                 is_repeated = bool(
                                     snapshot_id
                                     and (
-                                        str(snapshot_id) == str(LAST_LXV_SYNC_SNAPSHOT_ID or "")
+                                        str(snapshot_id) == str(LAST_LXV_SYNC_SNAPSHOT_CONSUMED or "")
                                         or int(round_lxv) <= int(LAST_LXV_SYNC_ROUND_CONSUMED or 0)
                                     )
                                 )
                                 if is_repeated:
                                     lxv_permite_real_nuevo = False
                                     logica_unica_real["triggered"] = False
-                                    logica_unica_real["reason"] = "snapshot_repetido_o_ronda_consumida"
+                                    logica_unica_real["reason"] = "snapshot_consumido_real"
                                     agregar_evento(
-                                        f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | snapshot={snapshot_id} | motivo=snapshot_repetido_o_ronda_consumida"
+                                        f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | snapshot={snapshot_id} | motivo=snapshot_consumido_real"
                                     )
                                 elif round_lxv <= 0 or not cells_lxv:
                                     lxv_permite_real_nuevo = False
@@ -18648,6 +18651,19 @@ async def main():
                                         f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | motivo=snapshot_incompleto"
                                     )
                                 else:
+                                    if (
+                                        str(snapshot_id or "") == str(LAST_LXV_SYNC_SNAPSHOT_ARMED or "")
+                                        and int(round_lxv) == int(LAST_LXV_SYNC_ROUND_ARMED or 0)
+                                        and str(snapshot_id or "") != str(LAST_LXV_SYNC_SNAPSHOT_CONSUMED or "")
+                                    ):
+                                        agregar_evento(
+                                            f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_lxv)} snapshot={snapshot_id} motivo=armed_sin_consumo_exitoso"
+                                        )
+                                    globals()["LAST_LXV_SYNC_SNAPSHOT_ARMED"] = str(snapshot_id or "")
+                                    globals()["LAST_LXV_SYNC_ROUND_ARMED"] = int(round_lxv)
+                                    agregar_evento(
+                                        f"LXV_CORE_SNAPSHOT_ARMED round={int(round_lxv)} snapshot={snapshot_id} bot={str(selected_bot_operativo)}"
+                                    )
                                     lxv_sync_order_payload = {
                                         "bot": str(selected_bot_operativo),
                                         "src": "LXV_CORE",
@@ -18850,11 +18866,16 @@ async def main():
                                             if isinstance(extra_payload, dict):
                                                 try:
                                                     globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
+                                                    globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = str(extra_payload.get("snapshot_id", "") or "")
                                                     globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
                                                     globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
                                                     globals()["LAST_LXV_SYNC_TS"] = float(time.time())
                                                 except Exception:
                                                     pass
+                                                agregar_evento(
+                                                    f"LXV_CORE_SNAPSHOT_CONSUMED round={int(extra_payload.get('round_lxv', 0) or 0)} "
+                                                    f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} bot={mejor_bot}"
+                                                )
                                             estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                             estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                             activo_real = mejor_bot
@@ -18870,6 +18891,11 @@ async def main():
                                             )
                                             if lxv_permite_real_nuevo:
                                                 agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=write_real_failed")
+                                                if isinstance(extra_payload, dict):
+                                                    agregar_evento(
+                                                        f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(extra_payload.get('round_lxv', 0) or 0)} "
+                                                        f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} motivo=write_real_failed"
+                                                    )
                         else:
                             max_prob = max((_prob_ia_operativa_bot(bot, default=0.0) for bot in BOT_NAMES if estado_bots[bot]["ia_ready"]), default=0)
                             if max_prob < umbral_ia_real:
