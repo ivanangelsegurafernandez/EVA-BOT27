@@ -2350,6 +2350,12 @@ async def ejecutar_panel():
                 if _print_once(f"ciclo-retenido-{ciclo_forzado}", ttl=30):
                     print(Fore.YELLOW + f"Reanudando ciclo retenido: C{int(ciclo_forzado)}.")
             else:
+                if modo_real:
+                    estado_bot["ciclo_forzado"] = None
+                    if _print_once("lxv-sync-abort-c1", ttl=5):
+                        print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
+                    await asyncio.sleep(0.35)
+                    continue
                 if _print_once("ciclo-fallback-c1", ttl=30):
                     print(Fore.YELLOW + "Sin orden fresca ni ciclo retenido: usando fallback C1.")
 
