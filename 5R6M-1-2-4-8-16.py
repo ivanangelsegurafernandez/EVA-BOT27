@@ -660,6 +660,17 @@ OVERRIDE_REZAGADA_GREENS_OK = (4, 5)
 OVERRIDE_REZAGADA_REDS_OK = (1, 2)
 EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = True
 EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = True
+
+# === LXV_SYNC como única lógica de promoción a REAL ===
+LXV_PROMO_REAL_SOLO_SYNC = True
+if bool(LXV_PROMO_REAL_SOLO_SYNC):
+    IA_HARD_GUARD_ENABLE = False
+    ASSET_PROTECT_ENABLE = False
+    GATE_SEGMENTO_ENABLED = False
+    SMART_LOCKS_ENABLE = False
+    EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = False
+    EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = False
+    REAL_CLASSIC_GATE = False
 IA_PROB_POLARIZE_ENABLE = True
 IA_PROB_POLARIZE_FACTOR_RELIABLE = 1.25
 IA_PROB_POLARIZE_FACTOR_UNRELIABLE = 2.05
@@ -18265,6 +18276,7 @@ async def main():
                             )
                         _log_operational_degradation_runtime(ttl_s=60.0)
 
+                        lxv_sync_promo_mode = bool(LXV_PROMO_REAL_SOLO_SYNC and LXV_CORE_ENABLE and LXV_CORE_REAL_ROUTE_ENABLE)
                         for b in BOT_NAMES:
                             try:
                                 modo_b = str(estado_bots.get(b, {}).get("modo_ia", "off")).lower()
@@ -18469,6 +18481,31 @@ async def main():
                                     )
 
                             # Selección automática: tomar la mejor señal elegible >= umbral REAL vigente.
+                        if lxv_sync_promo_mode:
+                            candidatos_lxv = []
+                            for b in BOT_NAMES:
+                                try:
+                                    modo_b = str(estado_bots.get(b, {}).get("modo_ia", "off")).lower()
+                                    if modo_b == "off":
+                                        continue
+                                    if not ia_prob_valida(b, max_age_s=12.0):
+                                        continue
+                                    p = _prob_ia_operativa_bot(b, default=None)
+                                    if not isinstance(p, (int, float)):
+                                        continue
+                                    ctx_lxv = _ultimo_contexto_operativo_bot(b)
+                                    regime_lxv = float(_score_regimen_contexto(ctx_lxv))
+                                    ev_lxv = _evidencia_bot_umbral_objetivo(b)
+                                    ev_n_lxv = int(ev_lxv.get("n", 0) or 0)
+                                    ev_wr_lxv = float(ev_lxv.get("wr", 0.0) or 0.0)
+                                    ev_lb_lxv = float(ev_lxv.get("lb", 0.0) or 0.0)
+                                    p_lxv = float(p)
+                                    candidatos_lxv.append((p_lxv, b, p_lxv, p_lxv, regime_lxv, ev_n_lxv, ev_wr_lxv, ev_lb_lxv))
+                                except Exception:
+                                    continue
+                            if candidatos_lxv:
+                                candidatos = sorted(candidatos_lxv, key=lambda x: x[0], reverse=True)
+                                agregar_evento(f"LXV_SYNC_PROMO_MODE: candidatos_lxv={len(candidatos)} (gates IA laterales en bypass)")
 
                         # Si hay señal y el saldo no cubre el plan completo, solo avisar (no bloquear).
                         if candidatos and (saldo_val is not None) and saldo_val < costo_plan:
