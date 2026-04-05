@@ -272,6 +272,33 @@ try:
 except Exception:
     pass
 
+LXV_CONSUMED_ACK_DIR = "lxv_consumed_ack"
+try:
+    os.makedirs(LXV_CONSUMED_ACK_DIR, exist_ok=True)
+except Exception:
+    pass
+
+def escribir_ack_consumed_real_lxv(bot: str, round_lxv: int, snapshot_id: str, contract_id=None):
+    try:
+        payload = {
+            "bot": str(bot or ""),
+            "round_lxv": int(round_lxv or 0),
+            "snapshot_id": str(snapshot_id or ""),
+            "ts": float(time.time()),
+            "contract_id": str(contract_id or ""),
+            "estado": "consumed_real",
+        }
+        path = os.path.join(LXV_CONSUMED_ACK_DIR, f"{bot}.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        return False
+
 def leer_ia_ack(bot: str):
     path = os.path.join(IA_ACK_DIR, f"{bot}.json")
     try:
@@ -496,14 +523,14 @@ def leer_orden_real(bot: str):
     ttl = int(data.get("ttl", 120))
     quiet = 1 if int(data.get("quiet", 0)) == 1 else 0
     src = str(data.get("src", "") or "").upper() or None
-    if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+    if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO", "LXV_CORE"}:
         if _lxv_sync_tiene_pendiente_abierta(ARCHIVO_CSV):
             if _print_once("lxv-sync-skip-pendiente", ttl=10):
                 print(Fore.YELLOW + "LXV_SYNC_SKIP: ronda=0 | motivo=pendiente_abierta")
             return None, None, 0, src
     lim = max(30, min(ttl, 300))  # margen seguro
     if time.time() - ts > lim:
-        if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+        if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO", "LXV_CORE"}:
             if _print_once("lxv-snapshot-exp-hard-block", ttl=15):
                 print(Fore.YELLOW + "LXV_SYNC_ABORT: orden_vencida")
             return None, None, 0, src
@@ -547,7 +574,7 @@ def validar_permiso_buy_lxv_sync(bot: str, ciclo: int, token_actual, owner_ok: b
     if _es_token_real(token_actual) and not isinstance(data, dict):
         return False, "token_real_sin_orden_valida", None
     src = str((data or {}).get("src", "") or "").upper()
-    if src not in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+    if src not in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO", "LXV_CORE"}:
         return True, "not_lxv_sync", None
     if not _es_token_real(token_actual):
         return False, "token_no_real", data
@@ -2877,6 +2904,15 @@ async def ejecutar_panel():
                         token_actual=current_token,
                         owner_ok=True,
                     )
+                    if isinstance(data_lxv_buy, dict):
+                        src_lxv = str(data_lxv_buy.get("src", "") or "").upper()
+                        if src_lxv == "LXV_CORE":
+                            snap_ok = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+                            round_ok = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                            ciclo_ok = int(data_lxv_buy.get("ciclo", 0) or 0)
+                            if snap_ok and _print_once(f"lxv-prebuy-ok-{round_ok}-{snap_ok}", ttl=8):
+                                print(Fore.YELLOW + f"LXV_SYNC_PREBUY_OK bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok} src=LXV_CORE ciclo={int(ciclo_ok)}")
+
                     if not ok_lxv_buy:
                         if _print_once(f"lxv-buy-abort-{motivo_lxv_buy}", ttl=10):
                             print(Fore.YELLOW + f"LXV_SYNC_ABORT: {motivo_lxv_buy}")
@@ -2925,8 +2961,9 @@ async def ejecutar_panel():
                         estado_bot["last_lxv_round_consumed"] = int(data_lxv_buy.get("round_lxv", 0) or 0)
                         snap_ok = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
                         round_ok = int(data_lxv_buy.get("round_lxv", 0) or 0)
+                        escribir_ack_consumed_real_lxv(NOMBRE_BOT, round_ok, snap_ok, contract_id=contract_id)
                         if snap_ok and _print_once(f"lxv-consumed-real-{round_ok}-{snap_ok}", ttl=8):
-                            print(Fore.YELLOW + f"LXV_SYNC_CONSUMED_REAL bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok}")
+                            print(Fore.YELLOW + f"LXV_SYNC_CONSUMED_REAL bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok} contract_id={contract_id}")
                     except Exception:
                         pass
 

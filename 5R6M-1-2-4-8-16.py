@@ -2606,6 +2606,7 @@ anexar_incremental_desde_bot = _anexar_incremental_desde_bot_CANON
 # === ORDEN DE REAL (handshake maestro→bot) ===
 ORDEN_DIR = "orden_real"
 SYNC_ROUND_DIR = "sync_round"
+LXV_CONSUMED_ACK_DIR = "lxv_consumed_ack"
 BARRIER_STATE_FILE = os.path.join(SYNC_ROUND_DIR, "barrier_state.json")
 BARRIER_ENABLED = True
 BARRIER_ACK_TIMEOUT_S = 45
@@ -2634,6 +2635,48 @@ def path_orden(bot: str) -> str:
     _ensure_dir(ORDEN_DIR)
     return os.path.join(ORDEN_DIR, f"{bot}.json")
 
+
+def _lxv_consumed_ack_path(bot: str) -> str:
+    _ensure_dir(LXV_CONSUMED_ACK_DIR)
+    return os.path.join(LXV_CONSUMED_ACK_DIR, f"{bot}.json")
+
+def leer_lxv_consumed_ack(bot: str) -> dict | None:
+    p = _lxv_consumed_ack_path(bot)
+    try:
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+def consumir_lxv_consumed_ack(bot: str, expected_round: int | None = None, expected_snapshot: str | None = None) -> bool:
+    ack = leer_lxv_consumed_ack(bot)
+    if not isinstance(ack, dict):
+        return False
+    estado = str(ack.get("estado", "") or "").strip().lower()
+    round_ack = int(ack.get("round_lxv", 0) or 0)
+    snap_ack = str(ack.get("snapshot_id", "") or "").strip()
+    if estado != "consumed_real" or round_ack <= 0 or not snap_ack:
+        return False
+    if expected_round is not None and int(round_ack) != int(expected_round):
+        return False
+    if expected_snapshot is not None and str(snap_ack) != str(expected_snapshot):
+        return False
+    if str(snap_ack) == str(LAST_LXV_SYNC_SNAPSHOT_CONSUMED or "") and int(round_ack) <= int(LAST_LXV_SYNC_ROUND_CONSUMED or 0):
+        return False
+    globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(snap_ack)
+    globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = str(snap_ack)
+    globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(round_ack)
+    globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(bot or "")
+    globals()["LAST_LXV_SYNC_TS"] = float(time.time())
+    try:
+        os.remove(_lxv_consumed_ack_path(bot))
+    except Exception:
+        pass
+    agregar_evento(f"LXV_CORE_CONSUMED_ACK bot={str(bot)} round={int(round_ack)} snapshot={snap_ack}")
+    return True
 
 def _sync_round_ack_path(bot: str, round_id: int) -> str:
     _ensure_dir(SYNC_ROUND_DIR)
@@ -18620,6 +18663,10 @@ async def main():
                         lxv_sync_order_payload = None
                         if lxv_permite_real_nuevo and selected_bot_operativo:
                             try:
+                                consumir_lxv_consumed_ack(str(selected_bot_operativo))
+                            except Exception:
+                                pass
+                            try:
                                 round_lxv = int(logica_unica_real.get("round", 0) or 0)
                                 cells_lxv = dict(logica_unica_real.get("cells", {}) or {})
                                 selected_case = str(logica_unica_real.get("selected_case") or "")
@@ -18662,7 +18709,7 @@ async def main():
                                     globals()["LAST_LXV_SYNC_SNAPSHOT_ARMED"] = str(snapshot_id or "")
                                     globals()["LAST_LXV_SYNC_ROUND_ARMED"] = int(round_lxv)
                                     agregar_evento(
-                                        f"LXV_CORE_SNAPSHOT_ARMED round={int(round_lxv)} snapshot={snapshot_id} bot={str(selected_bot_operativo)}"
+                                        f"LXV_CORE_SNAPSHOT_ARMED bot={str(selected_bot_operativo)} round={int(round_lxv)} snapshot={snapshot_id}"
                                     )
                                     lxv_sync_order_payload = {
                                         "bot": str(selected_bot_operativo),
@@ -18743,7 +18790,6 @@ async def main():
                                     if ok_real:
                                         try:
                                             globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
-                                            globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
                                             globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
                                             globals()["LAST_LXV_SYNC_TS"] = float(time.time())
                                         except Exception:
@@ -18757,6 +18803,7 @@ async def main():
                                         )
                                         if lxv_core_route_active:
                                             agregar_evento(f"LXV_CORE_REAL_GO bot={mejor_bot} ciclo={ciclo_tag} round={round_tag}")
+                                            agregar_evento(f"LXV_CORE_ORDER_WRITTEN bot={mejor_bot} round={int(round_tag)} snapshot={snapshot_tag} ciclo={int(ciclo_auto)}")
                                         if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0:
                                             try:
                                                 escribir_barrier_release(int(barrier_round_id), selected_bot=str(mejor_bot), lxv_ready=True)
@@ -18866,16 +18913,10 @@ async def main():
                                             if isinstance(extra_payload, dict):
                                                 try:
                                                     globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
-                                                    globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = str(extra_payload.get("snapshot_id", "") or "")
-                                                    globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
                                                     globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
                                                     globals()["LAST_LXV_SYNC_TS"] = float(time.time())
                                                 except Exception:
                                                     pass
-                                                agregar_evento(
-                                                    f"LXV_CORE_SNAPSHOT_CONSUMED round={int(extra_payload.get('round_lxv', 0) or 0)} "
-                                                    f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} bot={mejor_bot}"
-                                                )
                                             estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                             estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                             activo_real = mejor_bot
