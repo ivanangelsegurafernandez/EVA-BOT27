@@ -230,6 +230,9 @@ except Exception:
 SYNC_ROUND_DIR = "sync_round"
 BARRIER_ENABLED = True
 LXV_CORE_ENABLE = True
+LXV_SOFT_LEVEL_ENABLE = True
+LXV_SOFT_LEVEL_MAX_WAIT_S = 20.0
+LXV_SOFT_LEVEL_POLL_S = 0.5
 
 def _barrier_state_path() -> str:
     return os.path.join(SYNC_ROUND_DIR, "barrier_state.json")
@@ -263,6 +266,44 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int) ->
             print(Fore.YELLOW + f"BOT_WAIT_RELEASE bot={NOMBRE_BOT} round={int(round_local_siguiente)} release_round={int(release_round)}")
         await asyncio.sleep(0.35)
     return True
+
+async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
+    if not (bool(LXV_SOFT_LEVEL_ENABLE) and bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED)):
+        return True
+    if int(round_cerrada or 0) <= 0:
+        return True
+    if _es_token_real(leer_token_desde_archivo()):
+        return True
+    st = leer_barrier_state()
+    if not isinstance(st, dict):
+        return True
+    if not bool(st.get("barrier_enabled", True)):
+        return True
+
+    round_target = int(round_cerrada) + 1
+    t0 = time.time()
+    wait_logged = False
+    while True:
+        st = leer_barrier_state()
+        if not isinstance(st, dict):
+            return True
+        if not bool(st.get("barrier_enabled", True)):
+            return True
+        release_round = int(st.get("release_round", 1) or 1)
+        current_round = int(st.get("current_round", 1) or 1)
+        waited = max(0.0, float(time.time() - t0))
+        if (release_round >= round_target) or (current_round >= round_target):
+            if waited >= 0.2 and _print_once(f"bot-soft-level-ok-{round_target}", ttl=2):
+                print(Fore.YELLOW + f"BOT_SOFT_LEVEL_OK bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
+            return True
+        if waited >= float(LXV_SOFT_LEVEL_MAX_WAIT_S):
+            if _print_once(f"bot-soft-level-timeout-{round_target}", ttl=2):
+                print(Fore.YELLOW + f"BOT_SOFT_LEVEL_TIMEOUT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
+            return False
+        if (not wait_logged) and _print_once(f"bot-soft-level-wait-{round_target}", ttl=2):
+            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_o_current")
+            wait_logged = True
+        await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
 
 def normalizar_resultado_cierre(resultado_raw) -> dict:
     txt = str(resultado_raw or "").strip().upper()
@@ -355,7 +396,7 @@ def leer_orden_real(bot: str):
             src = str(data.get("src", "") or "").upper() or None
             lim = max(30, min(ttl, 300))  # margen seguro
             if time.time() - ts > lim:
-                if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}:
+                if src in {"LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO", "LXV_CORE"}:
                     if _print_once("lxv-snapshot-exp-hard-block", ttl=15):
                         print(Fore.YELLOW + "LXV_SYNC_ABORT: orden_vencida")
                     return None, None, 0, src
@@ -388,6 +429,8 @@ def _resolver_ciclo_prioritario(fallback: int = 1):
     ciclo_forzado = estado_bot.get("ciclo_forzado")
     if ciclo_forzado:
         return int(ciclo_forzado), "retenido"
+    if _es_token_real(leer_token_desde_archivo()):
+        return None, "sin_orden"
     return int(fallback), "fallback"
 
 def _retener_ciclo_para_reinicio(ciclo_actual: int):
@@ -2317,8 +2360,13 @@ async def ejecutar_panel():
                 estado_bot["reinicios_consecutivos"] += 1
                 if estado_bot["reinicios_consecutivos"] > 5:
                     ciclo_reanudado, src_reanudado = _resolver_ciclo_prioritario(fallback=1)
-                    estado_bot["ciclo_forzado"] = int(ciclo_reanudado)
-                    print(Fore.RED + f"Demasiados reinicios consecutivos: conservando continuidad martingala ({src_reanudado}) en C{int(ciclo_reanudado)}. Sin reset a C1.")
+                    if ciclo_reanudado:
+                        estado_bot["ciclo_forzado"] = int(ciclo_reanudado)
+                        print(Fore.RED + f"Demasiados reinicios consecutivos: conservando continuidad martingala ({src_reanudado}) en C{int(ciclo_reanudado)}. Sin reset a C1.")
+                    else:
+                        estado_bot["ciclo_forzado"] = None
+                        if _print_once("lxv-sync-abort-reinicio", ttl=5):
+                            print(Fore.YELLOW + "LXV_SYNC_ABORT: token_real_sin_orden_valida")
                     estado_bot["reinicios_consecutivos"] = 0
                     await asyncio.sleep(5)
 
@@ -2798,6 +2846,10 @@ async def ejecutar_panel():
 
 
                 # ========= DEMO =========
+                try:
+                    await esperar_nivelacion_suave_post_ronda(int(estado_bot.get("round_id_actual", 0) or 0))
+                except Exception:
+                    pass
                 print(Fore.YELLOW + f"Pausa de {PAUSA_POST_OPERACION_S}s antes de continuar...")
                 await asyncio.sleep(PAUSA_POST_OPERACION_S + random.uniform(0.0, 0.5))
 

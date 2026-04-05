@@ -384,6 +384,9 @@ IA_METRIC_THRESHOLD = AUTO_REAL_THR_MIN
 # Mantiene lock de un solo bot en REAL y ciclo martingala global en HUD.
 REAL_CLASSIC_GATE = True
 LXV_CORE_ENABLE = True
+LXV_CORE_REAL_ROUTE_ENABLE = True
+LXV_CORE_BYPASS_GLOBAL_GATE = True
+LXV_CORE_REQUIRE_HARD_SAFETY_ONLY = True
 
 # ✅ Umbral SOLO para auditoría/calibración (señales CERRADAS en ia_signals_log)
 # Esto es lo que querías: contar cierres desde 60% sin afectar la operativa.
@@ -2831,11 +2834,55 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
 #   asegurar que el bot tenga también su orden_real.json escrita (sin recursión).
 
 _last_real_push_ts = {bot: 0.0 for bot in BOT_NAMES}
-LAST_LXV_SYNC_SNAPSHOT_ID = ""
+LAST_LXV_SYNC_SNAPSHOT_ID = ""  # compat legacy: alias del snapshot consumido
+LAST_LXV_SYNC_SNAPSHOT_ARMED = ""
+LAST_LXV_SYNC_ROUND_ARMED = 0
+LAST_LXV_SYNC_SNAPSHOT_CONSUMED = ""
 LAST_LXV_SYNC_ROUND_CONSUMED = 0
 LAST_LXV_SYNC_SELECTED_BOT = ""
 LAST_LXV_SYNC_TS = 0.0
 LAST_REAL_ORDER_FAIL_REASON = ""
+
+def _lxv_consumed_ack_path(bot: str) -> str:
+    return os.path.join(SYNC_ROUND_DIR, "lxv_consumed", f"{bot}.json")
+
+def _leer_lxv_consumed_ack(bot: str) -> dict | None:
+    try:
+        p = _lxv_consumed_ack_path(bot)
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+def _aplicar_lxv_consumed_ack() -> None:
+    try:
+        for bot in BOT_NAMES:
+            d = _leer_lxv_consumed_ack(bot)
+            if not isinstance(d, dict):
+                continue
+            if str(d.get("status", "")).strip().lower() != "consumed_real":
+                continue
+            round_lxv = int(d.get("round_lxv", 0) or 0)
+            snapshot_id = str(d.get("snapshot_id", "") or "").strip()
+            ts_ack = float(d.get("ts", 0.0) or 0.0)
+            if round_lxv <= 0 or not snapshot_id:
+                continue
+            prev_round = int(globals().get("LAST_LXV_SYNC_ROUND_CONSUMED", 0) or 0)
+            prev_snap = str(globals().get("LAST_LXV_SYNC_SNAPSHOT_CONSUMED", "") or "")
+            prev_ts = float(globals().get("LAST_LXV_SYNC_TS", 0.0) or 0.0)
+            if (round_lxv < prev_round) or (round_lxv == prev_round and snapshot_id == prev_snap and ts_ack <= prev_ts):
+                continue
+            globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = snapshot_id
+            globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = snapshot_id
+            globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(round_lxv)
+            globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(bot)
+            globals()["LAST_LXV_SYNC_TS"] = float(ts_ack if ts_ack > 0 else time.time())
+            agregar_evento(f"LXV_CORE_CONSUMED_ACK bot={bot} round={int(round_lxv)} snapshot={snapshot_id}")
+    except Exception:
+        pass
 
 def limpiar_orden_real(bot: str):
     """
@@ -18437,6 +18484,7 @@ async def main():
                                     )
                                 DYN_ROOF_STATE["last_low_balance_warn_ts"] = float(ahora_warn)
 
+                        _aplicar_lxv_consumed_ack()
                         if candidatos:
                             candidatos.sort(key=lambda x: float(x[2]), reverse=True)
                         logica_unica_real = _resolver_lxv_sincronizado(candidatos, estado_bots, BOT_NAMES, emitir_log=True)
@@ -18626,16 +18674,16 @@ async def main():
                                 is_repeated = bool(
                                     snapshot_id
                                     and (
-                                        str(snapshot_id) == str(LAST_LXV_SYNC_SNAPSHOT_ID or "")
+                                        str(snapshot_id) == str(LAST_LXV_SYNC_SNAPSHOT_CONSUMED or "")
                                         or int(round_lxv) <= int(LAST_LXV_SYNC_ROUND_CONSUMED or 0)
                                     )
                                 )
                                 if is_repeated:
                                     lxv_permite_real_nuevo = False
                                     logica_unica_real["triggered"] = False
-                                    logica_unica_real["reason"] = "snapshot_repetido_o_ronda_consumida"
+                                    logica_unica_real["reason"] = "snapshot_consumido_real"
                                     agregar_evento(
-                                        f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | snapshot={snapshot_id} | motivo=snapshot_repetido_o_ronda_consumida"
+                                        f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | snapshot={snapshot_id} | motivo=snapshot_consumido_real"
                                     )
                                 elif round_lxv <= 0 or not cells_lxv:
                                     lxv_permite_real_nuevo = False
@@ -18645,6 +18693,19 @@ async def main():
                                         f"LXV_SYNC_SKIP: ronda={int(round_lxv)} | motivo=snapshot_incompleto"
                                     )
                                 else:
+                                    if (
+                                        str(snapshot_id or "") == str(LAST_LXV_SYNC_SNAPSHOT_ARMED or "")
+                                        and int(round_lxv) == int(LAST_LXV_SYNC_ROUND_ARMED or 0)
+                                        and str(snapshot_id or "") != str(LAST_LXV_SYNC_SNAPSHOT_CONSUMED or "")
+                                    ):
+                                        agregar_evento(
+                                            f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_lxv)} snapshot={snapshot_id} motivo=armed_sin_consumo_exitoso"
+                                        )
+                                    globals()["LAST_LXV_SYNC_SNAPSHOT_ARMED"] = str(snapshot_id or "")
+                                    globals()["LAST_LXV_SYNC_ROUND_ARMED"] = int(round_lxv)
+                                    agregar_evento(
+                                        f"LXV_CORE_SNAPSHOT_ARMED round={int(round_lxv)} snapshot={snapshot_id} bot={str(selected_bot_operativo)}"
+                                    )
                                     lxv_sync_order_payload = {
                                         "bot": str(selected_bot_operativo),
                                         "src": "LXV_CORE",
@@ -18665,8 +18726,9 @@ async def main():
                                 logica_unica_real["reason"] = "snapshot_build_error"
                                 agregar_evento(f"LXV_SYNC_SKIP: motivo=snapshot_build_error ({type(e_lxv_payload).__name__})")
 
+                        lxv_core_route_active = bool(LXV_CORE_ENABLE and LXV_CORE_REAL_ROUTE_ENABLE)
                         lxv_exec_handled = False
-                        if (not MODO_REAL_MANUAL) and lxv_permite_real_nuevo:
+                        if (not MODO_REAL_MANUAL) and lxv_permite_real_nuevo and ((not LXV_CORE_ENABLE) or lxv_core_route_active):
                             lxv_exec_handled = True
                             ciclo_auto = ciclo_martingala_siguiente()
                             if reset_martingala_por_saldo(ciclo_auto, saldo_val):
@@ -18676,36 +18738,67 @@ async def main():
                             ciclo_tag = _marti_ciclo_tag(ciclo_auto)
                             snapshot_tag = str((lxv_sync_order_payload or {}).get("snapshot_id", "") or "--")
                             round_tag = int((lxv_sync_order_payload or {}).get("round_lxv", 0) or 0)
+                            if lxv_core_route_active and isinstance(lxv_sync_order_payload, dict):
+                                agregar_evento(
+                                    f"LXV_CORE_REAL_ARMED bot={mejor_bot or '--'} case={str(logica_unica_real.get('selected_case') or '--')} "
+                                    f"score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} round={int(round_tag)} snapshot={snapshot_tag}"
+                                )
+                                if bool(LXV_CORE_BYPASS_GLOBAL_GATE) and veto_flags_info:
+                                    agregar_evento(f"LXV_CORE_ROUTE_BYPASS gate_legacy={str(veto_flags_info[0])}")
                             if not mejor_bot:
-                                agregar_evento("LXV_EXEC_BLOCKED: motivo=selected_bot_invalido")
+                                if lxv_core_route_active:
+                                    agregar_evento("LXV_CORE_REAL_BLOCKED_HARD bot=-- motivo=selected_bot_invalido")
+                                    agregar_evento("LXV_AUDIT_MASTER_BLOCK bot=-- motivo=selected_bot_invalido")
+                                    agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=selected_bot_invalido")
+                                else:
+                                    agregar_evento("LXV_EXEC_BLOCKED: motivo=selected_bot_invalido")
                             elif not isinstance(lxv_sync_order_payload, dict):
-                                agregar_evento("LXV_EXEC_BLOCKED: motivo=payload_incompleto")
+                                if lxv_core_route_active:
+                                    agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=payload_incompleto")
+                                    agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo=payload_incompleto")
+                                    agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=payload_incompleto")
+                                else:
+                                    agregar_evento("LXV_EXEC_BLOCKED: motivo=payload_incompleto")
                             else:
                                 agregar_evento(
                                     f"LXV_EXEC_START: bot={mejor_bot} ciclo={ciclo_tag} round={round_tag} snapshot={snapshot_tag}"
                                 )
+                                if lxv_core_route_active:
+                                    agregar_evento(f"LXV_AUDIT_MASTER_ROUTE bot={mejor_bot} armed=1 exec_start=1 write_ok=0 activate_ok=0")
                                 owner_prev = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else leer_token_actual()
                                 owner_mem = next((b for b in BOT_NAMES if estado_bots.get(b, {}).get('token') == "REAL"), None)
                                 owner_activo = owner_prev if owner_prev in BOT_NAMES else (owner_mem if owner_mem in BOT_NAMES else None)
                                 if owner_activo and owner_activo != mejor_bot:
-                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=owner_real_ocupado")
+                                    if lxv_core_route_active:
+                                        agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=owner_real_ocupado")
+                                        agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo=owner_real_ocupado")
+                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=owner_real_ocupado")
+                                    else:
+                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=owner_real_ocupado")
                                 elif _equity_protection_is_active(time.time()):
-                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=proteccion_saldo")
+                                    if lxv_core_route_active:
+                                        agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=proteccion_saldo")
+                                        agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo=proteccion_saldo")
+                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=proteccion_saldo")
+                                    else:
+                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=proteccion_saldo")
                                 elif _bot_blocked_by_bg_close(mejor_bot):
-                                    agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=bg_close")
+                                    if lxv_core_route_active:
+                                        agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=bg_close")
+                                        agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo=bg_close")
+                                        agregar_evento(f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(round_tag)} snapshot={snapshot_tag} motivo=bg_close")
+                                    else:
+                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=bg_close")
                                 else:
                                     estado_bots[mejor_bot]["ia_senal_pendiente"] = True
                                     extra_payload = dict(lxv_sync_order_payload)
                                     extra_payload["ciclo"] = int(ciclo_auto)
                                     ok_real = escribir_orden_real(mejor_bot, ciclo_auto, extra_payload=extra_payload)
                                     if ok_real:
-                                        try:
-                                            globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
-                                            globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
-                                            globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
-                                            globals()["LAST_LXV_SYNC_TS"] = float(time.time())
-                                        except Exception:
-                                            pass
+                                        agregar_evento(
+                                            f"LXV_CORE_ORDER_WRITTEN bot={mejor_bot} round={int(extra_payload.get('round_lxv', 0) or 0)} "
+                                            f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} ciclo={ciclo_tag}"
+                                        )
                                         estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                         estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                         activo_real = mejor_bot
@@ -18713,17 +18806,26 @@ async def main():
                                         agregar_evento(
                                             f"LXV_EXEC_OK: bot={mejor_bot} ciclo={ciclo_tag} round={round_tag} snapshot={snapshot_tag}"
                                         )
-                                        if (not LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(barrier_round_id) > 0:
+                                        if lxv_core_route_active:
+                                            agregar_evento(f"LXV_CORE_REAL_GO bot={mejor_bot} ciclo={ciclo_tag} round={round_tag}")
+                                            agregar_evento(f"LXV_AUDIT_MASTER_ROUTE bot={mejor_bot} armed=1 exec_start=1 write_ok=1 activate_ok=1")
+                                        if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0:
                                             try:
                                                 escribir_barrier_release(int(barrier_round_id), selected_bot=str(mejor_bot), lxv_ready=True)
                                                 agregar_evento(f"BARRIER_RELEASE: next_round={int(barrier_round_id) + 1}")
+                                                if lxv_core_route_active:
+                                                    agregar_evento(f"LXV_CORE_BARRIER_READY bot={mejor_bot} round={int(barrier_round_id)} lxv_ready=1")
                                             except Exception:
                                                 agregar_evento("BARRIER_DISABLED_FALLBACK: usando common_round")
                                     else:
                                         estado_bots[mejor_bot]["ia_senal_pendiente"] = False
                                         motivo_fail = str(globals().get("LAST_REAL_ORDER_FAIL_REASON", "") or "order_write_fail")
-                                        agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
-                        elif (not LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo):
+                                        if lxv_core_route_active:
+                                            agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo={motivo_fail}")
+                                            agregar_evento(f"LXV_AUDIT_MASTER_BLOCK bot={mejor_bot} motivo={motivo_fail}")
+                                        else:
+                                            agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
+                        elif bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo):
                             try:
                                 st_prev = leer_barrier_state() or {}
                                 st_prev.update({
@@ -18740,7 +18842,7 @@ async def main():
                                 escribir_barrier_state_atomic(st_prev)
                             except Exception:
                                 pass
-                        if (not LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and bool(barrier_ok):
+                        if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and bool(barrier_ok):
                             try:
                                 st_rel = leer_barrier_state() or {}
                                 next_round = int(barrier_round_id) + 1
@@ -18815,13 +18917,10 @@ async def main():
                                             ok_real = escribir_orden_real(mejor_bot, ciclo_auto, extra_payload=extra_payload)
                                         if ok_real:
                                             if isinstance(extra_payload, dict):
-                                                try:
-                                                    globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
-                                                    globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
-                                                    globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
-                                                    globals()["LAST_LXV_SYNC_TS"] = float(time.time())
-                                                except Exception:
-                                                    pass
+                                                agregar_evento(
+                                                    f"LXV_CORE_ORDER_WRITTEN bot={mejor_bot} round={int(extra_payload.get('round_lxv', 0) or 0)} "
+                                                    f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} ciclo={ciclo_tag}"
+                                                )
                                             estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                             estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                             activo_real = mejor_bot
@@ -18837,6 +18936,11 @@ async def main():
                                             )
                                             if lxv_permite_real_nuevo:
                                                 agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} | motivo=write_real_failed")
+                                                if isinstance(extra_payload, dict):
+                                                    agregar_evento(
+                                                        f"LXV_CORE_SNAPSHOT_RETRY_ALLOWED round={int(extra_payload.get('round_lxv', 0) or 0)} "
+                                                        f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} motivo=write_real_failed"
+                                                    )
                         else:
                             max_prob = max((_prob_ia_operativa_bot(bot, default=0.0) for bot in BOT_NAMES if estado_bots[bot]["ia_ready"]), default=0)
                             if max_prob < umbral_ia_real:
