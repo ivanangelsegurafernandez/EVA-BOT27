@@ -165,7 +165,6 @@ estado_bot = {
     "ciclo_actual": 1,
     "round_id_actual": 0,
     "last_round_ack": 0,
-    "round_operacion_activa": 0,
 }  # Added modo_manual and barra_activa
 racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de PÉRDIDAS
 
@@ -233,11 +232,8 @@ BARRIER_ENABLED = True
 def _barrier_state_path() -> str:
     return os.path.join(SYNC_ROUND_DIR, "barrier_state.json")
 
-def _barrier_ack_path(bot: str, round_id: int) -> str:
-    rid = max(1, int(round_id or 1))
-    d = os.path.join(SYNC_ROUND_DIR, f"round_{rid}")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, f"{bot}.json")
+def _barrier_ack_path(bot: str) -> str:
+    return os.path.join(SYNC_ROUND_DIR, f"{bot}.json")
 
 def leer_barrier_state() -> dict:
     try:
@@ -263,23 +259,6 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int) ->
         await asyncio.sleep(0.35)
     return True
 
-def obtener_round_autorizada_barrier() -> tuple[bool, int]:
-    st = leer_barrier_state() or {}
-    barrier_enabled = bool(st.get("barrier_enabled", True))
-    release_round = int(st.get("release_round", 1) or 1)
-    return barrier_enabled, max(1, int(release_round))
-
-def sincronizar_round_local_con_barrier() -> tuple[bool, int]:
-    barrier_enabled, release_round = obtener_round_autorizada_barrier()
-    if not barrier_enabled:
-        return False, int(release_round)
-    round_local = int(estado_bot.get("round_id_actual", 0) or 0)
-    if int(round_local) > int(release_round):
-        estado_bot["round_id_actual"] = int(release_round)
-        if _print_once(f"barrier-resync-{round_local}-{release_round}", ttl=4):
-            print(Fore.YELLOW + f"BARRIER_RESYNC_LOCAL: round_local={int(round_local)} -> release_round={int(release_round)}")
-    return True, int(release_round)
-
 def normalizar_resultado_cierre(resultado_raw) -> dict:
     txt = str(resultado_raw or "").strip().upper()
     if not txt:
@@ -304,13 +283,6 @@ def normalizar_resultado_cierre(resultado_raw) -> dict:
 def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = "", epoch_ref=None):
     if int(round_id or 0) <= 0:
         return
-    try:
-        if bool(BARRIER_ENABLED):
-            _, round_autorizada = obtener_round_autorizada_barrier()
-            if int(round_id) > int(round_autorizada):
-                return
-    except Exception:
-        pass
     norm_res = normalizar_resultado_cierre(resultado)
     payload = {
         "bot": str(NOMBRE_BOT),
@@ -329,7 +301,7 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
         return
     try:
         os.makedirs(SYNC_ROUND_DIR, exist_ok=True)
-        p = _barrier_ack_path(NOMBRE_BOT, round_id)
+        p = _barrier_ack_path(NOMBRE_BOT)
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
@@ -2560,19 +2532,10 @@ async def ejecutar_panel():
                 print(Fore.CYAN + Style.BRIGHT + f"[{symbol}] Martingala #{ciclo} - {direccion} - {monto} USD")
                 # === PRE-TRADE SNAPSHOT (para inferencia real del Maestro) ===
                 epoch_pre = None
-                barrier_on, round_autorizada = sincronizar_round_local_con_barrier()
-                if bool(barrier_on):
-                    last_ack = int(estado_bot.get("last_round_ack", 0) or 0)
-                    if int(round_autorizada) <= int(last_ack):
-                        await asyncio.sleep(0.25)
-                        continue
-                    round_next = int(round_autorizada)
-                else:
-                    round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
+                round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
                 if not await esperar_permiso_barrier_siguiente_ronda(round_next):
                     continue
                 estado_bot["round_id_actual"] = int(round_next)
-                estado_bot["round_operacion_activa"] = int(round_next)
                 now_pre = datetime.now(timezone.utc)
                 ts_pre = now_pre.isoformat()
                 trade_uid = _build_trade_uid(int(now_pre.timestamp()), symbol, direccion, ciclo, current_token, ts_iso=ts_pre)
@@ -2772,16 +2735,12 @@ async def ejecutar_panel():
                 estado_bot["ciclo_en_progreso"] = False
                 estado_bot["token_msg_mostrado"] = False
                 try:
-                    round_ack = int(estado_bot.get("round_operacion_activa", 0) or 0)
-                    if int(round_ack) <= 0:
-                        round_ack = int(estado_bot.get("round_id_actual", 0) or 0)
                     escribir_ack_cierre_ronda(
-                        int(round_ack),
+                        int(estado_bot.get("round_id_actual", 0) or 0),
                         str(resultado or ""),
                         trade_uid=str(trade_uid or ""),
                         epoch_ref=epoch_pre,
                     )
-                    estado_bot["round_operacion_activa"] = 0
                 except Exception:
                     pass
 
