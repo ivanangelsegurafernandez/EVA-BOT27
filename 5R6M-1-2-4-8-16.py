@@ -660,6 +660,17 @@ OVERRIDE_REZAGADA_GREENS_OK = (4, 5)
 OVERRIDE_REZAGADA_REDS_OK = (1, 2)
 EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = True
 EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = True
+
+# === LXV_SYNC como única lógica de promoción a REAL ===
+LXV_PROMO_REAL_SOLO_SYNC = True
+if bool(LXV_PROMO_REAL_SOLO_SYNC):
+    IA_HARD_GUARD_ENABLE = False
+    ASSET_PROTECT_ENABLE = False
+    GATE_SEGMENTO_ENABLED = False
+    SMART_LOCKS_ENABLE = False
+    EMBUDO_MAIN_BLOCK_ON_MODE_C_PENDING = False
+    EMBUDO_MAIN_REQUIRE_TRIGGER_OR_CONTEXT = False
+    REAL_CLASSIC_GATE = False
 IA_PROB_POLARIZE_ENABLE = True
 IA_PROB_POLARIZE_FACTOR_RELIABLE = 1.25
 IA_PROB_POLARIZE_FACTOR_UNRELIABLE = 2.05
@@ -2606,6 +2617,7 @@ anexar_incremental_desde_bot = _anexar_incremental_desde_bot_CANON
 # === ORDEN DE REAL (handshake maestro→bot) ===
 ORDEN_DIR = "orden_real"
 SYNC_ROUND_DIR = "sync_round"
+LXV_CONSUMED_ACK_DIR = "lxv_consumed_ack"
 BARRIER_STATE_FILE = os.path.join(SYNC_ROUND_DIR, "barrier_state.json")
 BARRIER_ENABLED = True
 BARRIER_ACK_TIMEOUT_S = 45
@@ -2634,6 +2646,48 @@ def path_orden(bot: str) -> str:
     _ensure_dir(ORDEN_DIR)
     return os.path.join(ORDEN_DIR, f"{bot}.json")
 
+
+def _lxv_consumed_ack_path(bot: str) -> str:
+    _ensure_dir(LXV_CONSUMED_ACK_DIR)
+    return os.path.join(LXV_CONSUMED_ACK_DIR, f"{bot}.json")
+
+def leer_lxv_consumed_ack(bot: str) -> dict | None:
+    p = _lxv_consumed_ack_path(bot)
+    try:
+        if not os.path.exists(p):
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            d = json.load(f) or {}
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+def consumir_lxv_consumed_ack(bot: str, expected_round: int | None = None, expected_snapshot: str | None = None) -> bool:
+    ack = leer_lxv_consumed_ack(bot)
+    if not isinstance(ack, dict):
+        return False
+    estado = str(ack.get("estado", "") or "").strip().lower()
+    round_ack = int(ack.get("round_lxv", 0) or 0)
+    snap_ack = str(ack.get("snapshot_id", "") or "").strip()
+    if estado != "consumed_real" or round_ack <= 0 or not snap_ack:
+        return False
+    if expected_round is not None and int(round_ack) != int(expected_round):
+        return False
+    if expected_snapshot is not None and str(snap_ack) != str(expected_snapshot):
+        return False
+    if str(snap_ack) == str(LAST_LXV_SYNC_SNAPSHOT_CONSUMED or "") and int(round_ack) <= int(LAST_LXV_SYNC_ROUND_CONSUMED or 0):
+        return False
+    globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(snap_ack)
+    globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = str(snap_ack)
+    globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(round_ack)
+    globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(bot or "")
+    globals()["LAST_LXV_SYNC_TS"] = float(time.time())
+    try:
+        os.remove(_lxv_consumed_ack_path(bot))
+    except Exception:
+        pass
+    agregar_evento(f"LXV_CORE_CONSUMED_ACK bot={str(bot)} round={int(round_ack)} snapshot={snap_ack}")
+    return True
 
 def _sync_round_ack_path(bot: str, round_id: int) -> str:
     _ensure_dir(SYNC_ROUND_DIR)
@@ -18222,7 +18276,8 @@ async def main():
                             )
                         _log_operational_degradation_runtime(ttl_s=60.0)
 
-                        for b in BOT_NAMES:
+                        lxv_sync_promo_mode = bool(LXV_PROMO_REAL_SOLO_SYNC and LXV_CORE_ENABLE and LXV_CORE_REAL_ROUTE_ENABLE)
+                        for b in ([] if lxv_sync_promo_mode else BOT_NAMES):
                             try:
                                 modo_b = str(estado_bots.get(b, {}).get("modo_ia", "off")).lower()
                                 if modo_b == "off":
@@ -18426,6 +18481,31 @@ async def main():
                                     )
 
                             # Selección automática: tomar la mejor señal elegible >= umbral REAL vigente.
+                        if lxv_sync_promo_mode:
+                            candidatos_lxv = []
+                            for b in BOT_NAMES:
+                                try:
+                                    modo_b = str(estado_bots.get(b, {}).get("modo_ia", "off")).lower()
+                                    if modo_b == "off":
+                                        continue
+                                    if not ia_prob_valida(b, max_age_s=12.0):
+                                        continue
+                                    p = _prob_ia_operativa_bot(b, default=None)
+                                    if not isinstance(p, (int, float)):
+                                        continue
+                                    ctx_lxv = _ultimo_contexto_operativo_bot(b)
+                                    regime_lxv = float(_score_regimen_contexto(ctx_lxv))
+                                    ev_lxv = _evidencia_bot_umbral_objetivo(b)
+                                    ev_n_lxv = int(ev_lxv.get("n", 0) or 0)
+                                    ev_wr_lxv = float(ev_lxv.get("wr", 0.0) or 0.0)
+                                    ev_lb_lxv = float(ev_lxv.get("lb", 0.0) or 0.0)
+                                    p_lxv = float(p)
+                                    candidatos_lxv.append((p_lxv, b, p_lxv, p_lxv, regime_lxv, ev_n_lxv, ev_wr_lxv, ev_lb_lxv))
+                                except Exception:
+                                    continue
+                            if candidatos_lxv:
+                                candidatos = sorted(candidatos_lxv, key=lambda x: x[0], reverse=True)
+                                agregar_evento(f"LXV_SYNC_PROMO_MODE: candidatos_lxv={len(candidatos)} (gates IA laterales en bypass)")
 
                         # Si hay señal y el saldo no cubre el plan completo, solo avisar (no bloquear).
                         if candidatos and (saldo_val is not None) and saldo_val < costo_plan:
@@ -18620,6 +18700,10 @@ async def main():
                         lxv_sync_order_payload = None
                         if lxv_permite_real_nuevo and selected_bot_operativo:
                             try:
+                                consumir_lxv_consumed_ack(str(selected_bot_operativo))
+                            except Exception:
+                                pass
+                            try:
                                 round_lxv = int(logica_unica_real.get("round", 0) or 0)
                                 cells_lxv = dict(logica_unica_real.get("cells", {}) or {})
                                 selected_case = str(logica_unica_real.get("selected_case") or "")
@@ -18662,7 +18746,7 @@ async def main():
                                     globals()["LAST_LXV_SYNC_SNAPSHOT_ARMED"] = str(snapshot_id or "")
                                     globals()["LAST_LXV_SYNC_ROUND_ARMED"] = int(round_lxv)
                                     agregar_evento(
-                                        f"LXV_CORE_SNAPSHOT_ARMED round={int(round_lxv)} snapshot={snapshot_id} bot={str(selected_bot_operativo)}"
+                                        f"LXV_CORE_SNAPSHOT_ARMED bot={str(selected_bot_operativo)} round={int(round_lxv)} snapshot={snapshot_id}"
                                     )
                                     lxv_sync_order_payload = {
                                         "bot": str(selected_bot_operativo),
@@ -18743,7 +18827,6 @@ async def main():
                                     if ok_real:
                                         try:
                                             globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
-                                            globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
                                             globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
                                             globals()["LAST_LXV_SYNC_TS"] = float(time.time())
                                         except Exception:
@@ -18757,6 +18840,7 @@ async def main():
                                         )
                                         if lxv_core_route_active:
                                             agregar_evento(f"LXV_CORE_REAL_GO bot={mejor_bot} ciclo={ciclo_tag} round={round_tag}")
+                                            agregar_evento(f"LXV_CORE_ORDER_WRITTEN bot={mejor_bot} round={int(round_tag)} snapshot={snapshot_tag} ciclo={int(ciclo_auto)}")
                                         if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0:
                                             try:
                                                 escribir_barrier_release(int(barrier_round_id), selected_bot=str(mejor_bot), lxv_ready=True)
@@ -18866,16 +18950,10 @@ async def main():
                                             if isinstance(extra_payload, dict):
                                                 try:
                                                     globals()["LAST_LXV_SYNC_SNAPSHOT_ID"] = str(extra_payload.get("snapshot_id", "") or "")
-                                                    globals()["LAST_LXV_SYNC_SNAPSHOT_CONSUMED"] = str(extra_payload.get("snapshot_id", "") or "")
-                                                    globals()["LAST_LXV_SYNC_ROUND_CONSUMED"] = int(extra_payload.get("round_lxv", 0) or 0)
                                                     globals()["LAST_LXV_SYNC_SELECTED_BOT"] = str(extra_payload.get("selected_bot", "") or "")
                                                     globals()["LAST_LXV_SYNC_TS"] = float(time.time())
                                                 except Exception:
                                                     pass
-                                                agregar_evento(
-                                                    f"LXV_CORE_SNAPSHOT_CONSUMED round={int(extra_payload.get('round_lxv', 0) or 0)} "
-                                                    f"snapshot={str(extra_payload.get('snapshot_id', '') or '--')} bot={mejor_bot}"
-                                                )
                                             estado_bots[mejor_bot]["fuente"] = "IA_AUTO"
                                             estado_bots[mejor_bot]["ciclo_actual"] = ciclo_auto
                                             activo_real = mejor_bot
