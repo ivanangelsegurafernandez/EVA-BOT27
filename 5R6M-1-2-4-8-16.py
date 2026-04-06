@@ -2919,19 +2919,7 @@ def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_rea
 
 
 def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str]:
-    common_round = int((logica_unica_real or {}).get("round", 0) or 0)
     barrier_round = int((st_bar or {}).get("current_round", 0) or 0)
-
-    if common_round > 0:
-        ok_common, pend_common = barrier_round_completa(common_round)
-        if ok_common:
-            if barrier_round > 0 and common_round != barrier_round:
-                agregar_evento(f"BARRIER_PROMOTE: from_round={barrier_round} to_round={common_round} motivo=common_round_ready")
-            return int(common_round), True, [], "common_round_ready"
-        if common_round > barrier_round > 0:
-            agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            ok_bar, pend_bar = barrier_round_completa(barrier_round)
-            return int(barrier_round), bool(ok_bar), list(pend_bar or []), "common_round_aun_no_completo"
 
     if barrier_round > 0:
         ok_bar, pend_bar = barrier_round_completa(barrier_round)
@@ -18685,7 +18673,10 @@ async def main():
                                 barrier_pending_round = list(barrier_round_pendiente(int(barrier_round_id)) or [])
                             except Exception:
                                 barrier_pending_round = list(barrier_pending_round or [])
-                        faltan_gate = ",".join(list(barrier_pending_round or [])) if barrier_pending_round else "--"
+                        if barrier_pending_round:
+                            faltan_gate = ",".join(list(barrier_pending_round or []))
+                        else:
+                            faltan_gate = "unknown" if (not barrier_ok and int(barrier_round_id) > 0) else "--"
                         agregar_evento(
                             f"ROUND_GATE_DIAG common_round={int(logica_unica_real.get('round', 0) or 0)} "
                             f"barrier_round={int(barrier_round_id)} barrier_ok={1 if bool(barrier_ok) else 0} "
@@ -18697,7 +18688,7 @@ async def main():
                                 f"ROUND_BLOCKED_ACK_MISMATCH round={int(barrier_round_id)} "
                                 f"common_round={int(logica_unica_real.get('round', 0) or 0)} "
                                 f"barrier_round={int(barrier_round_id)} barrier_ok={1 if bool(barrier_ok) else 0} "
-                                f"visual_aligned={1 if bool(visual_aligned) else 0} faltan={faltan_gate} diag=1"
+                                f"visual_aligned={1 if bool(visual_aligned) else 0} faltan={faltan_gate} diag_only=1"
                             )
                         if not barrier_ok:
                             lxv_permite_real_nuevo = False
