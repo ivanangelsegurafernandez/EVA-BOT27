@@ -2737,6 +2737,45 @@ def escribir_barrier_state_atomic(state: dict):
     _ensure_dir(SYNC_ROUND_DIR)
     _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
 
+def reset_barrier_state_on_start():
+    now = float(time.time())
+    try:
+        if os.path.isdir(SYNC_ROUND_DIR):
+            for name in os.listdir(SYNC_ROUND_DIR):
+                if not str(name).startswith("round_"):
+                    continue
+                dpath = os.path.join(SYNC_ROUND_DIR, str(name))
+                if not os.path.isdir(dpath):
+                    continue
+                for fn in os.listdir(dpath):
+                    fp = os.path.join(dpath, fn)
+                    if os.path.isfile(fp):
+                        try:
+                            os.remove(fp)
+                        except Exception:
+                            pass
+                try:
+                    os.rmdir(dpath)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    out = {
+        "barrier_enabled": True,
+        "current_round": 1,
+        "release_round": 1,
+        "all_closed": False,
+        "pending_bots": list(BOT_NAMES),
+        "last_evaluated_round": 0,
+        "selected_bot": "",
+        "lxv_ready": False,
+        "round_state": "ROUND_WAIT_ACK",
+        "round_open_ts": now,
+        "ts": now,
+    }
+    escribir_barrier_state_atomic(out)
+    agregar_evento("BARRIER_RESET_ON_START current_round=1 release_round=1")
+
 
 def leer_ack_ronda_bot(bot: str, round_id: int) -> dict | None:
     p = _sync_round_ack_path(bot, round_id)
@@ -18034,6 +18073,7 @@ async def main():
 
     try:
         set_etapa("BOOT_01", "Inicializando main()", anunciar=True)
+        reset_barrier_state_on_start()
         # Seguridad: NO borrar real.lock al arrancar; evita carreras entre instancias.
         set_etapa("BOOT_02", "Leyendo tokens de usuario")
         tokens = leer_tokens_usuario()
