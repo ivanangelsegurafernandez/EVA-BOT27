@@ -18680,6 +18680,18 @@ async def main():
                                 barrier_ok = False
                                 barrier_resolution_reason = "barrier_error"
                                 agregar_evento("LXV_CORE_TIMEOUT round=0 missing_bots=[]")
+                        faltan_gate = ",".join(list(barrier_pending_round or [])) if barrier_pending_round else "--"
+                        agregar_evento(
+                            f"ROUND_GATE_DIAG common_round={int(logica_unica_real.get('round', 0) or 0)} "
+                            f"barrier_round={int(barrier_round_id)} barrier_ok={1 if bool(barrier_ok) else 0} "
+                            f"faltan={faltan_gate} reason={str(barrier_resolution_reason or '--')}"
+                        )
+                        if (not barrier_ok) and int(logica_unica_real.get("valids", 0) or 0) >= int(len(BOT_NAMES)):
+                            agregar_evento(
+                                f"ROUND_BLOCKED_ACK_MISMATCH round={int(barrier_round_id)} "
+                                f"common_round={int(logica_unica_real.get('round', 0) or 0)} "
+                                f"barrier_round={int(barrier_round_id)} faltan={faltan_gate}"
+                            )
                         if not barrier_ok:
                             lxv_permite_real_nuevo = False
                         selected_bot_operativo = ""
@@ -18761,13 +18773,20 @@ async def main():
                                 f"| ronda={int(logica_unica_real.get('round', 0) or 0)} | score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} | source=LXV_CORE | "
                                 f"decision_final=REAL_OK por LXV_CORE"
                             )
+                            agregar_evento(
+                                f"LXV_SYNC_REAL round={int(logica_unica_real.get('round', 0) or 0)} real=SI motivo=ok"
+                            )
                             agregar_evento(f"LXV_SYNC_CANDIDATE_READY: columna sincronizada -> candidato REAL {selected_bot_operativo}")
                             if veto_flags_info:
                                 agregar_evento("LXV_INFO: " + " | ".join(veto_flags_info[:6]))
                         elif not lxv_permite_real_nuevo:
+                            motivo_struct = str(logica_unica_real.get('reason') or 'estructura_insuficiente')
                             agregar_evento(
-                                f"LXV_SYNC_REAL: NO | motivo_estructural={str(logica_unica_real.get('reason') or 'estructura_insuficiente')} "
+                                f"LXV_SYNC_REAL: NO | motivo_estructural={motivo_struct} "
                                 f"| round={int(logica_unica_real.get('round', 0) or 0)}"
+                            )
+                            agregar_evento(
+                                f"LXV_SYNC_REAL round={int(logica_unica_real.get('round', 0) or 0)} real=NO motivo={motivo_struct}"
                             )
                         agregar_evento(
                             f"LXV_CORE_DECISION round={int(logica_unica_real.get('round', 0) or 0)} "
