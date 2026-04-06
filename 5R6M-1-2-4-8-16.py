@@ -18922,19 +18922,26 @@ async def main():
                             ciclo_tag = _marti_ciclo_tag(ciclo_auto)
                             snapshot_tag = str((lxv_sync_order_payload or {}).get("snapshot_id", "") or "--")
                             round_tag = int((lxv_sync_order_payload or {}).get("round_lxv", 0) or 0)
-                            if lxv_core_route_active and isinstance(lxv_sync_order_payload, dict):
-                                agregar_evento(
-                                    f"LXV_CORE_REAL_ARMED bot={mejor_bot or '--'} case={str(logica_unica_real.get('selected_case') or '--')} "
-                                    f"score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} round={int(round_tag)} snapshot={snapshot_tag}"
+                            def _lxv_log_drop_prewrite(reason: str, started: bool = False):
+                                reason_txt = str(reason or "pre_write_drop")
+                                tag_bot = str(mejor_bot or '--')
+                                base = (
+                                    f"stage=pre_write reason={reason_txt} round={int(round_tag)} "
+                                    f"snapshot={snapshot_tag} bot={tag_bot}"
                                 )
-                                if bool(LXV_CORE_BYPASS_GLOBAL_GATE) and veto_flags_info:
-                                    agregar_evento(f"LXV_CORE_ROUTE_BYPASS gate_legacy={str(veto_flags_info[0])}")
+                                agregar_evento(f"LXV_PATH_DROPPED {base}")
+                                if started:
+                                    agregar_evento(f"LXV_EXEC_ABORTED {base}")
+                            if lxv_core_route_active and bool(LXV_CORE_BYPASS_GLOBAL_GATE) and veto_flags_info:
+                                agregar_evento(f"LXV_CORE_ROUTE_BYPASS gate_legacy={str(veto_flags_info[0])}")
                             if not mejor_bot:
+                                _lxv_log_drop_prewrite("bot_invalido", started=False)
                                 if lxv_core_route_active:
                                     agregar_evento("LXV_CORE_REAL_BLOCKED_HARD bot=-- motivo=selected_bot_invalido")
                                 else:
                                     agregar_evento("LXV_EXEC_BLOCKED: motivo=selected_bot_invalido")
                             elif not isinstance(lxv_sync_order_payload, dict):
+                                _lxv_log_drop_prewrite("payload_incompleto", started=False)
                                 if lxv_core_route_active:
                                     agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=payload_incompleto")
                                 else:
@@ -18947,21 +18954,29 @@ async def main():
                                 owner_mem = next((b for b in BOT_NAMES if estado_bots.get(b, {}).get('token') == "REAL"), None)
                                 owner_activo = owner_prev if owner_prev in BOT_NAMES else (owner_mem if owner_mem in BOT_NAMES else None)
                                 if owner_activo and owner_activo != mejor_bot:
+                                    _lxv_log_drop_prewrite("owner_real_ocupado", started=True)
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=owner_real_ocupado")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=owner_real_ocupado")
                                 elif _equity_protection_is_active(time.time()):
+                                    _lxv_log_drop_prewrite("proteccion_saldo", started=True)
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=proteccion_saldo")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=proteccion_saldo")
                                 elif _bot_blocked_by_bg_close(mejor_bot):
+                                    _lxv_log_drop_prewrite("bg_close", started=True)
                                     if lxv_core_route_active:
                                         agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo=bg_close")
                                     else:
                                         agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo=bg_close")
                                 else:
+                                    if lxv_core_route_active:
+                                        agregar_evento(
+                                            f"LXV_CORE_REAL_ARMED bot={mejor_bot or '--'} case={str(logica_unica_real.get('selected_case') or '--')} "
+                                            f"score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} round={int(round_tag)} snapshot={snapshot_tag}"
+                                        )
                                     estado_bots[mejor_bot]["ia_senal_pendiente"] = True
                                     extra_payload = dict(lxv_sync_order_payload)
                                     extra_payload["ciclo"] = int(ciclo_auto)
@@ -18994,6 +19009,8 @@ async def main():
                                     else:
                                         estado_bots[mejor_bot]["ia_senal_pendiente"] = False
                                         motivo_fail = str(globals().get("LAST_REAL_ORDER_FAIL_REASON", "") or "order_write_fail")
+                                        motivo_drop = "order_write_fail" if motivo_fail in {"", "order_write_fail"} else str(motivo_fail)
+                                        _lxv_log_drop_prewrite(motivo_drop, started=True)
                                         if lxv_core_route_active:
                                             agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo={motivo_fail}")
                                         else:
