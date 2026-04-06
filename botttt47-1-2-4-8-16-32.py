@@ -3004,6 +3004,9 @@ async def ejecutar_panel():
 
                 if resultado == "INDEFINIDO":
                     print(Fore.YELLOW + "INDEFINIDO: WS/Token restart. Se mantiene MISMO ciclo (BG resolverá).")
+                    round_local = int(estado_bot.get("round_id_actual", 0) or 0)
+                    if _print_once(f"bot-indefinido-local-{round_local}", ttl=3):
+                        print(Fore.YELLOW + f"BOT_RESULT_INDEFINIDO_LOCAL bot={NOMBRE_BOT} round={int(round_local)} accion=no_barrier_same_cycle")
                     indefinidos_consecutivos += 1
 
                     if indefinidos_consecutivos > 5:
