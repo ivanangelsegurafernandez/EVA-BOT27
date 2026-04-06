@@ -407,7 +407,7 @@ async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
                 print(Fore.YELLOW + f"BOT_SOFT_LEVEL_TIMEOUT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
             return False
         if (not wait_logged) and _print_once(f"bot-soft-level-wait-{round_target}", ttl=2):
-            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_real")
+            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_round")
             wait_logged = True
         await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
 
