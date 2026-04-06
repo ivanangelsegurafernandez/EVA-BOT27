@@ -183,6 +183,7 @@ estado_bot = {
     "last_round_ack": 0,
     "last_lxv_snapshot_consumed": "",
     "last_lxv_round_consumed": 0,
+    "trade_ack_ctx": {},
 }  # Added modo_manual and barra_activa
 racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de PÉRDIDAS
 
@@ -631,6 +632,31 @@ def validar_permiso_buy_lxv_sync(bot: str, ciclo: int, token_actual, owner_ok: b
     if commit_guard_active():
         return False, "commit_guard_activo", data
     return True, "ok", data
+
+
+LXV_CANONICAL_SRCS = {"LXV_CORE", "LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}
+
+
+def _build_trade_ack_ctx(round_local: int, data_lxv_buy) -> dict:
+    ctx = {
+        "round_ack": int(round_local or 0),
+        "snapshot_id": "",
+        "src": "",
+        "is_lxv": False,
+        "round_local": int(round_local or 0),
+    }
+    if isinstance(data_lxv_buy, dict):
+        src_lxv = str(data_lxv_buy.get("src", "") or "").upper().strip()
+        round_lxv = int(data_lxv_buy.get("round_lxv", 0) or 0)
+        snapshot_id = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+        if src_lxv in LXV_CANONICAL_SRCS and round_lxv > 0:
+            ctx.update({
+                "round_ack": int(round_lxv),
+                "snapshot_id": str(snapshot_id),
+                "src": str(src_lxv),
+                "is_lxv": True,
+            })
+    return ctx
 
 # <<< PATCH 1
 
@@ -2983,10 +3009,15 @@ async def ejecutar_panel():
                     raise
 
                 contract_id = data_buy["buy"]["contract_id"]
-                round_armed = int(estado_bot.get("round_id_actual", 0) or 0) + 1
-                estado_bot["round_id_actual"] = int(round_armed)
+                round_armed_local = int(estado_bot.get("round_id_actual", 0) or 0) + 1
+                estado_bot["round_id_actual"] = int(round_armed_local)
+                trade_ack_ctx = _build_trade_ack_ctx(round_local=round_armed_local, data_lxv_buy=data_lxv_buy)
+                estado_bot["trade_ack_ctx"] = dict(trade_ack_ctx)
+                round_armed = int(trade_ack_ctx.get("round_ack", round_armed_local) or round_armed_local)
                 if _print_once(f"bot-round-armed-{round_armed}", ttl=3):
-                    print(Fore.YELLOW + f"BOT_ROUND_ARMED bot={NOMBRE_BOT} round={int(round_armed)}")
+                    src_tag = str(trade_ack_ctx.get("src", "") or "LOCAL")
+                    snap_tag = str(trade_ack_ctx.get("snapshot_id", "") or "--")
+                    print(Fore.YELLOW + f"BOT_ROUND_ARMED bot={NOMBRE_BOT} round={int(round_armed)} src={src_tag} snapshot={snap_tag}")
                 if isinstance(data_lxv_buy, dict):
                     try:
                         estado_bot["last_lxv_snapshot_consumed"] = str(data_lxv_buy.get("snapshot_id", "") or "")
@@ -3019,7 +3050,8 @@ async def ejecutar_panel():
 
                 if resultado == "INDEFINIDO":
                     print(Fore.YELLOW + "INDEFINIDO: WS/Token restart. Se mantiene MISMO ciclo (BG resolverá).")
-                    round_local = int(estado_bot.get("round_id_actual", 0) or 0)
+                    trade_ack_ctx = estado_bot.get("trade_ack_ctx", {}) if isinstance(estado_bot.get("trade_ack_ctx", {}), dict) else {}
+                    round_local = int(trade_ack_ctx.get("round_ack", estado_bot.get("round_id_actual", 0)) or 0)
                     if _print_once(f"bot-indefinido-local-{round_local}", ttl=3):
                         print(Fore.YELLOW + f"BOT_RESULT_INDEFINIDO_LOCAL bot={NOMBRE_BOT} round={int(round_local)} accion=no_barrier_same_cycle")
                     indefinidos_consecutivos += 1
@@ -3047,7 +3079,8 @@ async def ejecutar_panel():
                 estado_bot["intentos_saldo"] = 0
                 estado_bot["ciclo_en_progreso"] = False
                 estado_bot["token_msg_mostrado"] = False
-                round_cerrada = int(estado_bot.get("round_id_actual", 0) or 0)
+                trade_ack_ctx = estado_bot.get("trade_ack_ctx", {}) if isinstance(estado_bot.get("trade_ack_ctx", {}), dict) else {}
+                round_cerrada = int(trade_ack_ctx.get("round_ack", estado_bot.get("round_id_actual", 0)) or 0)
                 round_siguiente = int(round_cerrada) + 1
                 try:
                     escribir_ack_cierre_ronda(
@@ -3106,7 +3139,7 @@ async def ejecutar_panel():
 
                 # ========= DEMO =========
                 try:
-                    await esperar_nivelacion_suave_post_ronda(int(estado_bot.get("round_id_actual", 0) or 0))
+                    await esperar_nivelacion_suave_post_ronda(int(round_cerrada))
                 except Exception:
                     pass
                 print(Fore.YELLOW + f"Pausa de {PAUSA_POST_OPERACION_S}s antes de continuar...")
