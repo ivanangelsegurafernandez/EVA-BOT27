@@ -18973,7 +18973,7 @@ async def main():
                                             agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo={motivo_fail}")
                                         else:
                                             agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
-                        elif bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo):
+                        elif bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo) and (not barrier_ok):
                             try:
                                 st_prev = leer_barrier_state() or {}
                                 st_prev.update({
@@ -18985,6 +18985,7 @@ async def main():
                                     "last_evaluated_round": int(st_prev.get("last_evaluated_round", 0) or 0),
                                     "selected_bot": "",
                                     "lxv_ready": False,
+                                    "round_state": "ROUND_WAIT_ACK",
                                     "ts": float(time.time()),
                                 })
                                 escribir_barrier_state_atomic(st_prev)
@@ -18994,14 +18995,20 @@ async def main():
                             try:
                                 st_rel = leer_barrier_state() or {}
                                 next_round = int(barrier_round_id) + 1
-                                if int(st_rel.get("release_round", 1) or 1) < int(next_round):
-                                    st_rel["release_round"] = int(next_round)
-                                st_rel["current_round"] = int(barrier_round_id)
+                                st_rel["release_round"] = int(next_round)
+                                st_rel["current_round"] = int(next_round)
                                 st_rel["last_evaluated_round"] = int(barrier_round_id)
                                 st_rel["all_closed"] = True
+                                st_rel["pending_bots"] = []
+                                st_rel["round_state"] = "ROUND_RELEASE_NEXT"
                                 st_rel["ts"] = float(time.time())
                                 escribir_barrier_state_atomic(st_rel)
                                 agregar_evento(f"ROUND_RELEASE_NEXT round={int(barrier_round_id)} release_round={int(next_round)}")
+                                if not lxv_permite_real_nuevo:
+                                    motivo_nr = str(logica_unica_real.get("reason") or "estructura_insuficiente")
+                                    agregar_evento(
+                                        f"ROUND_RELEASE_AFTER_NO_REAL round={int(barrier_round_id)} motivo_estructural={motivo_nr} release_round={int(next_round)}"
+                                    )
                             except Exception:
                                 agregar_evento("BARRIER_DISABLED_FALLBACK: usando common_round")
 
