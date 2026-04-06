@@ -18277,7 +18277,7 @@ async def main():
                         _log_operational_degradation_runtime(ttl_s=60.0)
 
                         lxv_sync_promo_mode = bool(LXV_PROMO_REAL_SOLO_SYNC and LXV_CORE_ENABLE and LXV_CORE_REAL_ROUTE_ENABLE)
-                        for b in ([] if lxv_sync_promo_mode else BOT_NAMES):
+                        for b in BOT_NAMES:
                             try:
                                 modo_b = str(estado_bots.get(b, {}).get("modo_ia", "off")).lower()
                                 if modo_b == "off":
