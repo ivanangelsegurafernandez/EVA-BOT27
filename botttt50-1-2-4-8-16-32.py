@@ -16,6 +16,21 @@ import itertools  # For req_counter in api_call
 import math
 import unicodedata
 
+os.environ.setdefault("PYTHONUTF8", "1")
+
+def _configure_console_output_safe():
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream is None:
+            continue
+        try:
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+_configure_console_output_safe()
+
 # === BLINDAJE: señales limpias ===
 import signal
 from contextlib import suppress
@@ -343,16 +358,18 @@ def leer_barrier_state() -> dict:
     except Exception:
         return {}
 
-async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int) -> bool:
+async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int, round_local_actual: int | None = None) -> bool:
     while bool(BARRIER_ENABLED):
         st = leer_barrier_state() or {}
         if not bool(st.get("barrier_enabled", True)):
             return True
         release_round = int(st.get("release_round", 1) or 1)
         if int(release_round) >= int(round_local_siguiente):
+            if _print_once(f"bot-release-{round_local_siguiente}", ttl=2):
+                print(Fore.GREEN + f"BOT_BARRIER_RELEASED bot={NOMBRE_BOT} round={int(round_local_siguiente)}")
             return True
         if _print_once(f"bot-wait-release-{round_local_siguiente}-{release_round}", ttl=6):
-            print(Fore.YELLOW + f"BOT_WAIT_RELEASE bot={NOMBRE_BOT} round={int(round_local_siguiente)} release_round={int(release_round)}")
+            print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_local_actual or max(1, int(round_local_siguiente) - 1))} waiting_for={int(round_local_siguiente)} release_round={int(release_round)}")
         await asyncio.sleep(0.35)
     return True
 
@@ -444,7 +461,7 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
         os.replace(tmp, p)
         estado_bot["last_round_ack"] = int(round_id)
         if _print_once(f"bot-ack-write-{round_id}", ttl=5):
-            print(Fore.YELLOW + f"BOT_ACK_WRITE bot={NOMBRE_BOT} round={int(round_id)} resultado={str(payload.get('resultado_norm','INDEFINIDO'))}")
+            print(Fore.YELLOW + f"BOT_ACK_WRITE bot={NOMBRE_BOT} round={int(round_id)} result={str(payload.get('resultado_norm','INDEFINIDO'))}")
     except Exception:
         pass
 
@@ -2636,7 +2653,7 @@ async def ejecutar_panel():
                     await asyncio.sleep(0.6 + random.uniform(0.0, 0.5))
 
                 round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
-                if bool(LXV_CORE_ENABLE) and (not await esperar_permiso_barrier_siguiente_ronda(round_next)):
+                if bool(LXV_CORE_ENABLE) and (not await esperar_permiso_barrier_siguiente_ronda(round_next, round_local_actual=int(estado_bot.get("round_id_actual", 0) or 0))):
                     continue
                 estado_bot["round_id_actual"] = int(round_next)
 
@@ -3012,15 +3029,22 @@ async def ejecutar_panel():
                 estado_bot["intentos_saldo"] = 0
                 estado_bot["ciclo_en_progreso"] = False
                 estado_bot["token_msg_mostrado"] = False
+                round_cerrada = int(estado_bot.get("round_id_actual", 0) or 0)
+                round_siguiente = int(round_cerrada) + 1
                 try:
                     escribir_ack_cierre_ronda(
-                        int(estado_bot.get("round_id_actual", 0) or 0),
+                        int(round_cerrada),
                         str(resultado or ""),
                         trade_uid=str(trade_uid or ""),
                         epoch_ref=epoch_pre,
                     )
                 except Exception:
                     pass
+
+                if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(round_cerrada) > 0 and (not modo_real):
+                    if _print_once(f"bot-post-ack-wait-{round_cerrada}", ttl=4):
+                        print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_cerrada)} waiting_for={int(round_siguiente)}")
+                    await esperar_permiso_barrier_siguiente_ronda(int(round_siguiente), round_local_actual=int(round_cerrada))
 
                 print(Back.BLUE + Style.BRIGHT + f"\nTotal DEMO: {resultado_global['demo']:.2f} USD | Total REAL: {resultado_global['real']:.2f} USD")
                 await mostrar_saldos()
