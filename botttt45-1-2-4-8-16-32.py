@@ -407,7 +407,7 @@ async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
                 print(Fore.YELLOW + f"BOT_SOFT_LEVEL_TIMEOUT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
             return False
         if (not wait_logged) and _print_once(f"bot-soft-level-wait-{round_target}", ttl=2):
-            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_real")
+            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_round")
             wait_logged = True
         await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
 
@@ -3021,7 +3021,7 @@ async def ejecutar_panel():
                     print(Fore.YELLOW + "INDEFINIDO: WS/Token restart. Se mantiene MISMO ciclo (BG resolverá).")
                     round_local = int(estado_bot.get("round_id_actual", 0) or 0)
                     if _print_once(f"bot-indefinido-local-{round_local}", ttl=3):
-                        print(Fore.YELLOW + f"BOT_RESULT_INDEFINIDO_LOCAL bot={NOMBRE_BOT} round={int(round_local)} accion=same_cycle_no_barrier")
+                        print(Fore.YELLOW + f"BOT_RESULT_INDEFINIDO_LOCAL bot={NOMBRE_BOT} round={int(round_local)} accion=no_barrier_same_cycle")
                     indefinidos_consecutivos += 1
 
                     if indefinidos_consecutivos > 5:

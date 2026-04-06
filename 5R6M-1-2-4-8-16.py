@@ -18680,25 +18680,17 @@ async def main():
                                 barrier_ok = False
                                 barrier_resolution_reason = "barrier_error"
                                 agregar_evento("LXV_CORE_TIMEOUT round=0 missing_bots=[]")
-                        round_diag = int(barrier_round_id)
-                        if round_diag <= 0:
-                            st_diag = leer_barrier_state() or {}
-                            round_diag = int(st_diag.get("current_round", 1) or 1)
-                        faltan_gate_list = list(barrier_pending_round or [])
-                        if (not faltan_gate_list) and (not barrier_ok):
-                            faltan_gate_list = list(barrier_round_pendiente(int(round_diag)) or [])
-                        faltan_gate = ",".join(faltan_gate_list) if faltan_gate_list else "--"
+                        faltan_gate = ",".join(list(barrier_pending_round or [])) if barrier_pending_round else "--"
                         agregar_evento(
                             f"ROUND_GATE_DIAG common_round={int(logica_unica_real.get('round', 0) or 0)} "
                             f"barrier_round={int(barrier_round_id)} barrier_ok={1 if bool(barrier_ok) else 0} "
                             f"faltan={faltan_gate} reason={str(barrier_resolution_reason or '--')}"
                         )
-                        if not barrier_ok:
-                            motivo_mismatch = str(barrier_resolution_reason or "ack_incompleto")
+                        if (not barrier_ok) and int(logica_unica_real.get("valids", 0) or 0) >= int(len(BOT_NAMES)):
                             agregar_evento(
-                                f"ROUND_BLOCKED_ACK_MISMATCH round={int(round_diag)} "
+                                f"ROUND_BLOCKED_ACK_MISMATCH round={int(barrier_round_id)} "
                                 f"common_round={int(logica_unica_real.get('round', 0) or 0)} "
-                                f"barrier_round={int(round_diag)} barrier_ok=0 faltan={faltan_gate} motivo={motivo_mismatch}"
+                                f"barrier_round={int(barrier_round_id)} faltan={faltan_gate}"
                             )
                         if not barrier_ok:
                             lxv_permite_real_nuevo = False
@@ -19020,7 +19012,6 @@ async def main():
                                 pass
                         if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and bool(barrier_ok):
                             try:
-                                escribir_barrier_release(int(barrier_round_id), selected_bot="", lxv_ready=False)
                                 st_rel = leer_barrier_state() or {}
                                 next_round = int(barrier_round_id) + 1
                                 st_rel["release_round"] = int(next_round)
