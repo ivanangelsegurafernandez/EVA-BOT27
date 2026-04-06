@@ -2815,12 +2815,13 @@ def barrier_round_status(round_id: int) -> tuple[list[str], int]:
     for eb in extras:
         if _print_once(f"ack-extra-{round_id}-{eb}", ttl=6):
             agregar_evento(f"ROUND_ACK_INVALID round={int(round_id)} bot={eb} reason=bot_no_esperado")
+    total_bots = int(len(BOT_NAMES))
     if _print_once(f"ack-progress-{round_id}-{valid_count}-{'-'.join(sorted(pending))}", ttl=2):
         faltan = ','.join(sorted(pending)) if pending else '--'
-        agregar_evento(f"ROUND_ACK_PROGRESS round={int(round_id)} ack={int(valid_count)}/{int(len(BOT_NAMES))} faltan={faltan}")
-    if valid_count == int(len(BOT_NAMES)):
+        agregar_evento(f"ROUND_ACK_PROGRESS round={int(round_id)} ack={int(valid_count)}/{int(total_bots)} faltan={faltan}")
+    if valid_count == int(total_bots):
         if _print_once(f"ack-complete-{round_id}", ttl=5):
-            agregar_evento(f"ROUND_ACK_COMPLETE round={int(round_id)} ack={int(valid_count)}/{int(len(BOT_NAMES))}")
+            agregar_evento(f"ROUND_ACK_COMPLETE round={int(round_id)} ack=6/6")
     return pending, valid_count
 def barrier_round_pendiente(round_id: int) -> list[str]:
     pending, _ = barrier_round_status(int(round_id))
