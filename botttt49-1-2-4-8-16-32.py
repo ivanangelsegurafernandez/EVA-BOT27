@@ -369,7 +369,7 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int, ro
                 print(Fore.GREEN + f"BOT_BARRIER_RELEASED bot={NOMBRE_BOT} round={int(round_local_siguiente)}")
             return True
         if _print_once(f"bot-wait-release-{round_local_siguiente}-{release_round}", ttl=6):
-            print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_local_actual or max(1, int(round_local_siguiente) - 1))} waiting_for={int(round_local_siguiente)} release_round={int(release_round)}")
+            print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} next_round={int(round_local_siguiente)} release_round={int(release_round)}")
         await asyncio.sleep(0.35)
     return True
 
