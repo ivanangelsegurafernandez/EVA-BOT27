@@ -60,6 +60,21 @@ warnings.filterwarnings(
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
+os.environ.setdefault("PYTHONUTF8", "1")
+
+def _configure_console_output_safe():
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream is None:
+            continue
+        try:
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+_configure_console_output_safe()
+
 def _load_optional_module(name: str):
     try:
         if str(name) == "pygame":
@@ -2735,26 +2750,86 @@ def leer_ack_ronda_bot(bot: str, round_id: int) -> dict | None:
         return None
 
 
-def barrier_round_pendiente(round_id: int) -> list[str]:
+
+
+def _ack_resultado_es_valido(resultado_norm: str) -> bool:
+    txt = str(resultado_norm or '').strip().upper()
+    return txt in {"GANANCIA", "PERDIDA", "PÉRDIDA", "WIN", "LOSS", "G", "R", "X"}
+
+
+def validar_ack_ronda_bot(bot: str, round_id: int, ack: dict | None) -> tuple[bool, str]:
+    if not isinstance(ack, dict) or not ack:
+        return False, "missing"
+    bot_exp = str(bot or "").strip()
+    if bot_exp not in set(BOT_NAMES):
+        return False, "bot_no_esperado"
+    ack_bot = str(ack.get("bot", "") or "").strip()
+    if ack_bot and ack_bot != bot_exp:
+        return False, "bot_mismatch"
+    ack_round = int(ack.get("round_id", 0) or 0)
+    round_ok = int(round_id)
+    if ack_round != round_ok:
+        return False, ("round_vieja" if ack_round < round_ok else "round_futura")
+    ack_status = str(ack.get("status", "") or "").strip().upper()
+    if ack_status != "CERRADO":
+        return False, "status_invalido"
+    if bool(ack.get("pending_open", False)):
+        return False, "pending_open"
+    if not bool(ack.get("resultado_definido", False)):
+        return False, "resultado_indefinido"
+    res_norm = str(ack.get("resultado_norm", ack.get("resultado", "")) or "").strip().upper()
+    if not _ack_resultado_es_valido(res_norm):
+        return False, "resultado_invalido"
+    return True, "ok"
+
+
+def barrier_round_status(round_id: int) -> tuple[list[str], int]:
     pending = []
+    valid_count = 0
     now = float(time.time())
+    seen = set()
+    expected = set(str(b) for b in BOT_NAMES)
     for b in BOT_NAMES:
-        ack = leer_ack_ronda_bot(b, round_id) or {}
-        ack_round = int(ack.get("round_id", 0) or 0)
-        ack_ok = str(ack.get("status", "")).upper() == "CERRADO" and bool(ack.get("resultado_definido", False))
-        ack_pending = bool(ack.get("pending_open", False))
-        ts_close = float(ack.get("ts_close", 0.0) or 0.0)
-        if ack_round != int(round_id) or not ack_ok or ack_pending:
-            pending.append(str(b))
+        b = str(b)
+        ack = leer_ack_ronda_bot(b, round_id)
+        ok, reason = validar_ack_ronda_bot(b, round_id, ack)
+        if not ok:
+            pending.append(b)
+            if reason != "missing" and _print_once(f"ack-invalid-{round_id}-{b}-{reason}", ttl=4):
+                agregar_evento(f"ROUND_ACK_INVALID round={int(round_id)} bot={b} reason={reason}")
             continue
+        ts_close = float((ack or {}).get("ts_close", 0.0) or 0.0)
         if ts_close > 0 and (now - ts_close) > float(BARRIER_ACK_TIMEOUT_S * 4):
-            pending.append(str(b))
-    return pending
+            pending.append(b)
+            if _print_once(f"ack-invalid-timeout-{round_id}-{b}", ttl=4):
+                agregar_evento(f"ROUND_ACK_INVALID round={int(round_id)} bot={b} reason=stale_close")
+            continue
+        if b in seen:
+            pending.append(b)
+            if _print_once(f"ack-dup-{round_id}-{b}", ttl=4):
+                agregar_evento(f"ROUND_ACK_DUPLICATE round={int(round_id)} bot={b}")
+            continue
+        seen.add(b)
+        valid_count += 1
+    extras = sorted(set(seen) - expected)
+    for eb in extras:
+        if _print_once(f"ack-extra-{round_id}-{eb}", ttl=6):
+            agregar_evento(f"ROUND_ACK_INVALID round={int(round_id)} bot={eb} reason=bot_no_esperado")
+    if _print_once(f"ack-progress-{round_id}-{valid_count}-{'-'.join(sorted(pending))}", ttl=2):
+        faltan = ','.join(sorted(pending)) if pending else '--'
+        agregar_evento(f"ROUND_ACK_PROGRESS round={int(round_id)} ack={int(valid_count)}/{int(len(BOT_NAMES))} faltan={faltan}")
+    if valid_count == int(len(BOT_NAMES)):
+        if _print_once(f"ack-complete-{round_id}", ttl=5):
+            agregar_evento(f"ROUND_ACK_COMPLETE round={int(round_id)} ack={int(valid_count)}/{int(len(BOT_NAMES))}")
+    return pending, valid_count
+def barrier_round_pendiente(round_id: int) -> list[str]:
+    pending, _ = barrier_round_status(int(round_id))
+    return list(pending or [])
 
 
 def barrier_round_completa(round_id: int) -> tuple[bool, list[str]]:
-    pending = barrier_round_pendiente(round_id)
-    return (len(pending) == 0), pending
+    pending, valid_count = barrier_round_status(int(round_id))
+    return (int(valid_count) == int(len(BOT_NAMES))), list(pending or [])
 
 
 def escribir_barrier_release(current_round: int, selected_bot: str = "", lxv_ready: bool = False):
@@ -2846,9 +2921,9 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
     timeout_hit = bool(pending) and elapsed >= float(LXV_CORE_ROUND_TIMEOUT_S)
     ack_complete = (len(pending) == 0)
     if timeout_hit:
-        agregar_evento(f"LXV_CORE_TIMEOUT round={int(round_id)} missing_bots={pending}")
+        agregar_evento(f"ROUND_TIMEOUT_PENDING round={int(round_id)} faltan={pending}")
 
-    state = "ROUND_WAIT_ACK" if (pending and not timeout_hit) else "ROUND_EVAL_LXV"
+    state = "ROUND_EVAL_LXV" if ack_complete else "ROUND_WAIT_ACK"
     if state == "ROUND_EVAL_LXV":
         next_round = int(round_id) + 1
         out = {
@@ -2865,7 +2940,7 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
             "ts": now,
         }
         escribir_barrier_state_atomic(out)
-        agregar_evento(f"LXV_CORE_RELEASE_NEXT round={int(round_id)} new_release_round={int(out['release_round'])}")
+        agregar_evento(f"ROUND_RELEASE_NEXT round={int(round_id)} release_round={int(out['release_round'])}")
     else:
         st_bar.update({
             "barrier_enabled": bool(BARRIER_ENABLED),
@@ -2878,7 +2953,7 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
             "ts": now,
         })
         escribir_barrier_state_atomic(st_bar)
-    return int(round_id), bool(ack_complete), list(pending or []), ("timeout" if timeout_hit else ("ok" if ack_complete else "wait_ack")), state
+    return int(round_id), bool(ack_complete), list(pending or []), ("ok" if ack_complete else ("timeout_pending" if timeout_hit else "wait_ack")), state
 
 # === PATCH: REAL INMEDIATO EN HUD AL EMITIR ORDEN (sin esperar compra) ===
 # Objetivo:
@@ -18884,7 +18959,7 @@ async def main():
                                 st_rel["all_closed"] = True
                                 st_rel["ts"] = float(time.time())
                                 escribir_barrier_state_atomic(st_rel)
-                                agregar_evento(f"BARRIER_RELEASE_OK: evaluated_round={int(barrier_round_id)} next_round={int(next_round)}")
+                                agregar_evento(f"ROUND_RELEASE_NEXT round={int(barrier_round_id)} release_round={int(next_round)}")
                             except Exception:
                                 agregar_evento("BARRIER_DISABLED_FALLBACK: usando common_round")
 

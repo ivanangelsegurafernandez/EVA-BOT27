@@ -16,6 +16,21 @@ import itertools  # For req_counter in api_call
 import math
 import unicodedata
 
+os.environ.setdefault("PYTHONUTF8", "1")
+
+def _configure_console_output_safe():
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream is None:
+            continue
+        try:
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+_configure_console_output_safe()
+
 # === BLINDAJE: señales limpias ===
 import signal
 from contextlib import suppress
@@ -350,9 +365,11 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int) ->
             return True
         release_round = int(st.get("release_round", 1) or 1)
         if int(release_round) >= int(round_local_siguiente):
+            if _print_once(f"bot-release-{round_local_siguiente}", ttl=2):
+                print(Fore.GREEN + f"BOT_BARRIER_RELEASED bot={NOMBRE_BOT} round={int(round_local_siguiente)}")
             return True
         if _print_once(f"bot-wait-release-{round_local_siguiente}-{release_round}", ttl=6):
-            print(Fore.YELLOW + f"BOT_WAIT_RELEASE bot={NOMBRE_BOT} round={int(round_local_siguiente)} release_round={int(release_round)}")
+            print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} next_round={int(round_local_siguiente)} release_round={int(release_round)}")
         await asyncio.sleep(0.35)
     return True
 
@@ -444,7 +461,7 @@ def escribir_ack_cierre_ronda(round_id: int, resultado: str, trade_uid: str = ""
         os.replace(tmp, p)
         estado_bot["last_round_ack"] = int(round_id)
         if _print_once(f"bot-ack-write-{round_id}", ttl=5):
-            print(Fore.YELLOW + f"BOT_ACK_WRITE bot={NOMBRE_BOT} round={int(round_id)} resultado={str(payload.get('resultado_norm','INDEFINIDO'))}")
+            print(Fore.YELLOW + f"BOT_ACK_WRITE bot={NOMBRE_BOT} round={int(round_id)} result={str(payload.get('resultado_norm','INDEFINIDO'))}")
     except Exception:
         pass
 
