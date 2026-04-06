@@ -369,7 +369,8 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int, ro
                 print(Fore.GREEN + f"BOT_BARRIER_RELEASED bot={NOMBRE_BOT} round={int(round_local_siguiente)}")
             return True
         if _print_once(f"bot-wait-release-{round_local_siguiente}-{release_round}", ttl=6):
-            print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} next_round={int(round_local_siguiente)} release_round={int(release_round)}")
+            current_round = int(st.get("current_round", 1) or 1)
+            print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(current_round)} waiting_for={int(round_local_siguiente)} release_round={int(release_round)}")
         await asyncio.sleep(0.35)
     return True
 
@@ -396,9 +397,8 @@ async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
         if not bool(st.get("barrier_enabled", True)):
             return True
         release_round = int(st.get("release_round", 1) or 1)
-        current_round = int(st.get("current_round", 1) or 1)
         waited = max(0.0, float(time.time() - t0))
-        if (release_round >= round_target) or (current_round >= round_target):
+        if release_round >= round_target:
             if waited >= 0.2 and _print_once(f"bot-soft-level-ok-{round_target}", ttl=2):
                 print(Fore.YELLOW + f"BOT_SOFT_LEVEL_OK bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
             return True
@@ -407,7 +407,7 @@ async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
                 print(Fore.YELLOW + f"BOT_SOFT_LEVEL_TIMEOUT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
             return False
         if (not wait_logged) and _print_once(f"bot-soft-level-wait-{round_target}", ttl=2):
-            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_o_current")
+            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_real")
             wait_logged = True
         await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
 
@@ -3004,6 +3004,9 @@ async def ejecutar_panel():
 
                 if resultado == "INDEFINIDO":
                     print(Fore.YELLOW + "INDEFINIDO: WS/Token restart. Se mantiene MISMO ciclo (BG resolverá).")
+                    round_local = int(estado_bot.get("round_id_actual", 0) or 0)
+                    if _print_once(f"bot-indefinido-local-{round_local}", ttl=3):
+                        print(Fore.YELLOW + f"BOT_RESULT_INDEFINIDO_LOCAL bot={NOMBRE_BOT} round={int(round_local)} accion=no_barrier_same_cycle")
                     indefinidos_consecutivos += 1
 
                     if indefinidos_consecutivos > 5:
@@ -3043,7 +3046,9 @@ async def ejecutar_panel():
 
                 if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(round_cerrada) > 0 and (not modo_real):
                     if _print_once(f"bot-post-ack-wait-{round_cerrada}", ttl=4):
-                        print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_cerrada)} waiting_for={int(round_siguiente)}")
+                        st_wait = leer_barrier_state() or {}
+                        rr_wait = int(st_wait.get("release_round", 1) or 1)
+                        print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_cerrada)} waiting_for={int(round_siguiente)} release_round={int(rr_wait)}")
                     await esperar_permiso_barrier_siguiente_ronda(int(round_siguiente), round_local_actual=int(round_cerrada))
 
                 print(Back.BLUE + Style.BRIGHT + f"\nTotal DEMO: {resultado_global['demo']:.2f} USD | Total REAL: {resultado_global['real']:.2f} USD")
