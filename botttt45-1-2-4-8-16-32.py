@@ -16,6 +16,21 @@ import itertools  # For req_counter in api_call
 import math
 import unicodedata
 
+os.environ.setdefault("PYTHONUTF8", "1")
+
+def _configure_console_output_safe():
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream is None:
+            continue
+        try:
+            if hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+_configure_console_output_safe()
+
 # === BLINDAJE: señales limpias ===
 import signal
 from contextlib import suppress
