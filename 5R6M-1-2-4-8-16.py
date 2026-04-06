@@ -2737,6 +2737,45 @@ def escribir_barrier_state_atomic(state: dict):
     _ensure_dir(SYNC_ROUND_DIR)
     _atomic_write(BARRIER_STATE_FILE, json.dumps(dict(state or {}), ensure_ascii=False))
 
+def reset_barrier_state_on_start():
+    now = float(time.time())
+    try:
+        if os.path.isdir(SYNC_ROUND_DIR):
+            for name in os.listdir(SYNC_ROUND_DIR):
+                if not str(name).startswith("round_"):
+                    continue
+                dpath = os.path.join(SYNC_ROUND_DIR, str(name))
+                if not os.path.isdir(dpath):
+                    continue
+                for fn in os.listdir(dpath):
+                    fp = os.path.join(dpath, fn)
+                    if os.path.isfile(fp):
+                        try:
+                            os.remove(fp)
+                        except Exception:
+                            pass
+                try:
+                    os.rmdir(dpath)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    out = {
+        "barrier_enabled": True,
+        "current_round": 1,
+        "release_round": 1,
+        "all_closed": False,
+        "pending_bots": list(BOT_NAMES),
+        "last_evaluated_round": 0,
+        "selected_bot": "",
+        "lxv_ready": False,
+        "round_state": "ROUND_WAIT_ACK",
+        "round_open_ts": now,
+        "ts": now,
+    }
+    escribir_barrier_state_atomic(out)
+    agregar_evento("BARRIER_RESET_ON_START current_round=1 release_round=1")
+
 
 def leer_ack_ronda_bot(bot: str, round_id: int) -> dict | None:
     p = _sync_round_ack_path(bot, round_id)
@@ -2815,12 +2854,13 @@ def barrier_round_status(round_id: int) -> tuple[list[str], int]:
     for eb in extras:
         if _print_once(f"ack-extra-{round_id}-{eb}", ttl=6):
             agregar_evento(f"ROUND_ACK_INVALID round={int(round_id)} bot={eb} reason=bot_no_esperado")
+    total_bots = int(len(BOT_NAMES))
     if _print_once(f"ack-progress-{round_id}-{valid_count}-{'-'.join(sorted(pending))}", ttl=2):
         faltan = ','.join(sorted(pending)) if pending else '--'
-        agregar_evento(f"ROUND_ACK_PROGRESS round={int(round_id)} ack={int(valid_count)}/{int(len(BOT_NAMES))} faltan={faltan}")
-    if valid_count == int(len(BOT_NAMES)):
+        agregar_evento(f"ROUND_ACK_PROGRESS round={int(round_id)} ack={int(valid_count)}/{int(total_bots)} faltan={faltan}")
+    if valid_count == int(total_bots):
         if _print_once(f"ack-complete-{round_id}", ttl=5):
-            agregar_evento(f"ROUND_ACK_COMPLETE round={int(round_id)} ack={int(valid_count)}/{int(len(BOT_NAMES))}")
+            agregar_evento(f"ROUND_ACK_COMPLETE round={int(round_id)} ack=6/6")
     return pending, valid_count
 def barrier_round_pendiente(round_id: int) -> list[str]:
     pending, _ = barrier_round_status(int(round_id))
@@ -2890,7 +2930,8 @@ def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_n
             return int(common_round), True, [], "common_round_ready"
         if common_round > barrier_round > 0:
             agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
+            ok_bar, pend_bar = barrier_round_completa(barrier_round)
+            return int(barrier_round), bool(ok_bar), list(pend_bar or []), "common_round_aun_no_completo"
 
     if barrier_round > 0:
         ok_bar, pend_bar = barrier_round_completa(barrier_round)
@@ -2901,7 +2942,7 @@ def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_n
 
 def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str, str]:
     """
-    Resuelve una ronda LXV_CORE sin congelar release_round:
+    Resuelve una ronda LXV_CORE con barrera estricta por ACK 6/6:
     estados: ROUND_OPEN -> ROUND_WAIT_ACK -> ROUND_EVAL_LXV -> ROUND_RELEASE_NEXT.
     """
     st_bar = leer_barrier_state() or {}
@@ -2945,7 +2986,7 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
         st_bar.update({
             "barrier_enabled": bool(BARRIER_ENABLED),
             "current_round": int(round_id),
-            "release_round": int(max(release_round, round_id)),
+            "release_round": int(round_id),
             "pending_bots": list(pending or []),
             "all_closed": False,
             "round_state": "ROUND_WAIT_ACK",
@@ -2953,7 +2994,7 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
             "ts": now,
         })
         escribir_barrier_state_atomic(st_bar)
-    return int(round_id), bool(ack_complete), list(pending or []), ("ok" if ack_complete else ("timeout_pending" if timeout_hit else "wait_ack")), state
+    return int(round_id), bool(ack_complete), list(pending or []), ("ok" if ack_complete else "wait_ack"), state
 
 # === PATCH: REAL INMEDIATO EN HUD AL EMITIR ORDEN (sin esperar compra) ===
 # Objetivo:
@@ -18032,6 +18073,7 @@ async def main():
 
     try:
         set_etapa("BOOT_01", "Inicializando main()", anunciar=True)
+        reset_barrier_state_on_start()
         # Seguridad: NO borrar real.lock al arrancar; evita carreras entre instancias.
         set_etapa("BOOT_02", "Leyendo tokens de usuario")
         tokens = leer_tokens_usuario()
@@ -18638,6 +18680,26 @@ async def main():
                                 barrier_ok = False
                                 barrier_resolution_reason = "barrier_error"
                                 agregar_evento("LXV_CORE_TIMEOUT round=0 missing_bots=[]")
+                        round_diag = int(barrier_round_id)
+                        if round_diag <= 0:
+                            st_diag = leer_barrier_state() or {}
+                            round_diag = int(st_diag.get("current_round", 1) or 1)
+                        faltan_gate_list = list(barrier_pending_round or [])
+                        if (not faltan_gate_list) and (not barrier_ok):
+                            faltan_gate_list = list(barrier_round_pendiente(int(round_diag)) or [])
+                        faltan_gate = ",".join(faltan_gate_list) if faltan_gate_list else "--"
+                        agregar_evento(
+                            f"ROUND_GATE_DIAG common_round={int(logica_unica_real.get('round', 0) or 0)} "
+                            f"barrier_round={int(barrier_round_id)} barrier_ok={1 if bool(barrier_ok) else 0} "
+                            f"faltan={faltan_gate} reason={str(barrier_resolution_reason or '--')}"
+                        )
+                        if not barrier_ok:
+                            motivo_mismatch = str(barrier_resolution_reason or "ack_incompleto")
+                            agregar_evento(
+                                f"ROUND_BLOCKED_ACK_MISMATCH round={int(round_diag)} "
+                                f"common_round={int(logica_unica_real.get('round', 0) or 0)} "
+                                f"barrier_round={int(round_diag)} barrier_ok=0 faltan={faltan_gate} motivo={motivo_mismatch}"
+                            )
                         if not barrier_ok:
                             lxv_permite_real_nuevo = False
                         selected_bot_operativo = ""
@@ -18719,13 +18781,20 @@ async def main():
                                 f"| ronda={int(logica_unica_real.get('round', 0) or 0)} | score={float(logica_unica_real.get('selected_score', 0.0) or 0.0):.2f} | source=LXV_CORE | "
                                 f"decision_final=REAL_OK por LXV_CORE"
                             )
+                            agregar_evento(
+                                f"LXV_SYNC_REAL round={int(logica_unica_real.get('round', 0) or 0)} real=SI motivo=ok"
+                            )
                             agregar_evento(f"LXV_SYNC_CANDIDATE_READY: columna sincronizada -> candidato REAL {selected_bot_operativo}")
                             if veto_flags_info:
                                 agregar_evento("LXV_INFO: " + " | ".join(veto_flags_info[:6]))
                         elif not lxv_permite_real_nuevo:
+                            motivo_struct = str(logica_unica_real.get('reason') or 'estructura_insuficiente')
                             agregar_evento(
-                                f"LXV_SYNC_REAL: NO | motivo_estructural={str(logica_unica_real.get('reason') or 'estructura_insuficiente')} "
+                                f"LXV_SYNC_REAL: NO | motivo_estructural={motivo_struct} "
                                 f"| round={int(logica_unica_real.get('round', 0) or 0)}"
+                            )
+                            agregar_evento(
+                                f"LXV_SYNC_REAL round={int(logica_unica_real.get('round', 0) or 0)} real=NO motivo={motivo_struct}"
                             )
                         agregar_evento(
                             f"LXV_CORE_DECISION round={int(logica_unica_real.get('round', 0) or 0)} "
@@ -18931,7 +19000,7 @@ async def main():
                                             agregar_evento(f"LXV_CORE_REAL_BLOCKED_HARD bot={mejor_bot} motivo={motivo_fail}")
                                         else:
                                             agregar_evento(f"LXV_EXEC_BLOCKED: bot={mejor_bot} motivo={motivo_fail}")
-                        elif bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo):
+                        elif bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and (not lxv_permite_real_nuevo) and (not barrier_ok):
                             try:
                                 st_prev = leer_barrier_state() or {}
                                 st_prev.update({
@@ -18943,6 +19012,7 @@ async def main():
                                     "last_evaluated_round": int(st_prev.get("last_evaluated_round", 0) or 0),
                                     "selected_bot": "",
                                     "lxv_ready": False,
+                                    "round_state": "ROUND_WAIT_ACK",
                                     "ts": float(time.time()),
                                 })
                                 escribir_barrier_state_atomic(st_prev)
@@ -18950,16 +19020,23 @@ async def main():
                                 pass
                         if bool(BARRIER_ENABLED) and int(barrier_round_id) > 0 and bool(barrier_ok):
                             try:
+                                escribir_barrier_release(int(barrier_round_id), selected_bot="", lxv_ready=False)
                                 st_rel = leer_barrier_state() or {}
                                 next_round = int(barrier_round_id) + 1
-                                if int(st_rel.get("release_round", 1) or 1) < int(next_round):
-                                    st_rel["release_round"] = int(next_round)
-                                st_rel["current_round"] = int(barrier_round_id)
+                                st_rel["release_round"] = int(next_round)
+                                st_rel["current_round"] = int(next_round)
                                 st_rel["last_evaluated_round"] = int(barrier_round_id)
                                 st_rel["all_closed"] = True
+                                st_rel["pending_bots"] = []
+                                st_rel["round_state"] = "ROUND_RELEASE_NEXT"
                                 st_rel["ts"] = float(time.time())
                                 escribir_barrier_state_atomic(st_rel)
                                 agregar_evento(f"ROUND_RELEASE_NEXT round={int(barrier_round_id)} release_round={int(next_round)}")
+                                if not lxv_permite_real_nuevo:
+                                    motivo_nr = str(logica_unica_real.get("reason") or "estructura_insuficiente")
+                                    agregar_evento(
+                                        f"ROUND_RELEASE_AFTER_NO_REAL round={int(barrier_round_id)} motivo_estructural={motivo_nr} release_round={int(next_round)}"
+                                    )
                             except Exception:
                                 agregar_evento("BARRIER_DISABLED_FALLBACK: usando common_round")
 
