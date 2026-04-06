@@ -18680,17 +18680,24 @@ async def main():
                                 barrier_ok = False
                                 barrier_resolution_reason = "barrier_error"
                                 agregar_evento("LXV_CORE_TIMEOUT round=0 missing_bots=[]")
+                        if (not barrier_ok) and (not barrier_pending_round) and int(barrier_round_id) > 0:
+                            try:
+                                barrier_pending_round = list(barrier_round_pendiente(int(barrier_round_id)) or [])
+                            except Exception:
+                                barrier_pending_round = list(barrier_pending_round or [])
                         faltan_gate = ",".join(list(barrier_pending_round or [])) if barrier_pending_round else "--"
                         agregar_evento(
                             f"ROUND_GATE_DIAG common_round={int(logica_unica_real.get('round', 0) or 0)} "
                             f"barrier_round={int(barrier_round_id)} barrier_ok={1 if bool(barrier_ok) else 0} "
                             f"faltan={faltan_gate} reason={str(barrier_resolution_reason or '--')}"
                         )
-                        if (not barrier_ok) and int(logica_unica_real.get("valids", 0) or 0) >= int(len(BOT_NAMES)):
+                        visual_aligned = int(logica_unica_real.get("valids", 0) or 0) >= int(len(BOT_NAMES))
+                        if bool(visual_aligned) != bool(barrier_ok):
                             agregar_evento(
                                 f"ROUND_BLOCKED_ACK_MISMATCH round={int(barrier_round_id)} "
                                 f"common_round={int(logica_unica_real.get('round', 0) or 0)} "
-                                f"barrier_round={int(barrier_round_id)} faltan={faltan_gate}"
+                                f"barrier_round={int(barrier_round_id)} barrier_ok={1 if bool(barrier_ok) else 0} "
+                                f"visual_aligned={1 if bool(visual_aligned) else 0} faltan={faltan_gate} diag=1"
                             )
                         if not barrier_ok:
                             lxv_permite_real_nuevo = False
