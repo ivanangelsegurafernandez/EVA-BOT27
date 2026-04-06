@@ -2815,12 +2815,13 @@ def barrier_round_status(round_id: int) -> tuple[list[str], int]:
     for eb in extras:
         if _print_once(f"ack-extra-{round_id}-{eb}", ttl=6):
             agregar_evento(f"ROUND_ACK_INVALID round={int(round_id)} bot={eb} reason=bot_no_esperado")
+    total_bots = int(len(BOT_NAMES))
     if _print_once(f"ack-progress-{round_id}-{valid_count}-{'-'.join(sorted(pending))}", ttl=2):
         faltan = ','.join(sorted(pending)) if pending else '--'
-        agregar_evento(f"ROUND_ACK_PROGRESS round={int(round_id)} ack={int(valid_count)}/{int(len(BOT_NAMES))} faltan={faltan}")
-    if valid_count == int(len(BOT_NAMES)):
+        agregar_evento(f"ROUND_ACK_PROGRESS round={int(round_id)} ack={int(valid_count)}/{int(total_bots)} faltan={faltan}")
+    if valid_count == int(total_bots):
         if _print_once(f"ack-complete-{round_id}", ttl=5):
-            agregar_evento(f"ROUND_ACK_COMPLETE round={int(round_id)} ack={int(valid_count)}/{int(len(BOT_NAMES))}")
+            agregar_evento(f"ROUND_ACK_COMPLETE round={int(round_id)} ack=6/6")
     return pending, valid_count
 def barrier_round_pendiente(round_id: int) -> list[str]:
     pending, _ = barrier_round_status(int(round_id))
@@ -2890,7 +2891,8 @@ def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_n
             return int(common_round), True, [], "common_round_ready"
         if common_round > barrier_round > 0:
             agregar_evento(f"BARRIER_HOLD: round={common_round} motivo=common_round_aun_no_completo")
-            return int(common_round), False, list(pend_common or []), "common_round_aun_no_completo"
+            ok_bar, pend_bar = barrier_round_completa(barrier_round)
+            return int(barrier_round), bool(ok_bar), list(pend_bar or []), "common_round_aun_no_completo"
 
     if barrier_round > 0:
         ok_bar, pend_bar = barrier_round_completa(barrier_round)
@@ -2901,7 +2903,7 @@ def resolver_barrier_round_canonico(st_bar: dict, logica_unica_real: dict, bot_n
 
 def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> tuple[int, bool, list[str], str, str]:
     """
-    Resuelve una ronda LXV_CORE sin congelar release_round:
+    Resuelve una ronda LXV_CORE con barrera estricta por ACK 6/6:
     estados: ROUND_OPEN -> ROUND_WAIT_ACK -> ROUND_EVAL_LXV -> ROUND_RELEASE_NEXT.
     """
     st_bar = leer_barrier_state() or {}
@@ -2945,7 +2947,7 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
         st_bar.update({
             "barrier_enabled": bool(BARRIER_ENABLED),
             "current_round": int(round_id),
-            "release_round": int(max(release_round, round_id)),
+            "release_round": int(round_id),
             "pending_bots": list(pending or []),
             "all_closed": False,
             "round_state": "ROUND_WAIT_ACK",
@@ -2953,7 +2955,7 @@ def _lxv_core_resolver_ronda(logica_unica_real: dict, bot_names: list[str]) -> t
             "ts": now,
         })
         escribir_barrier_state_atomic(st_bar)
-    return int(round_id), bool(ack_complete), list(pending or []), ("ok" if ack_complete else ("timeout_pending" if timeout_hit else "wait_ack")), state
+    return int(round_id), bool(ack_complete), list(pending or []), ("ok" if ack_complete else "wait_ack"), state
 
 # === PATCH: REAL INMEDIATO EN HUD AL EMITIR ORDEN (sin esperar compra) ===
 # Objetivo:
