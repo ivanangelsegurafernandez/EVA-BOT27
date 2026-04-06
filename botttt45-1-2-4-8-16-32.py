@@ -369,7 +369,8 @@ async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int, ro
                 print(Fore.GREEN + f"BOT_BARRIER_RELEASED bot={NOMBRE_BOT} round={int(round_local_siguiente)}")
             return True
         if _print_once(f"bot-wait-release-{round_local_siguiente}-{release_round}", ttl=6):
-            print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} next_round={int(round_local_siguiente)} release_round={int(release_round)}")
+            current_round = int(st.get("current_round", 1) or 1)
+            print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(current_round)} waiting_for={int(round_local_siguiente)} release_round={int(release_round)}")
         await asyncio.sleep(0.35)
     return True
 
@@ -396,9 +397,8 @@ async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
         if not bool(st.get("barrier_enabled", True)):
             return True
         release_round = int(st.get("release_round", 1) or 1)
-        current_round = int(st.get("current_round", 1) or 1)
         waited = max(0.0, float(time.time() - t0))
-        if (release_round >= round_target) or (current_round >= round_target):
+        if release_round >= round_target:
             if waited >= 0.2 and _print_once(f"bot-soft-level-ok-{round_target}", ttl=2):
                 print(Fore.YELLOW + f"BOT_SOFT_LEVEL_OK bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
             return True
@@ -407,7 +407,7 @@ async def esperar_nivelacion_suave_post_ronda(round_cerrada: int) -> bool:
                 print(Fore.YELLOW + f"BOT_SOFT_LEVEL_TIMEOUT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s")
             return False
         if (not wait_logged) and _print_once(f"bot-soft-level-wait-{round_target}", ttl=2):
-            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_o_current")
+            print(Fore.YELLOW + f"BOT_SOFT_LEVEL_WAIT bot={NOMBRE_BOT} round={int(round_cerrada)} waited={waited:.1f}s reason=esperando_release_real")
             wait_logged = True
         await asyncio.sleep(max(0.1, float(LXV_SOFT_LEVEL_POLL_S)))
 
@@ -2654,17 +2654,22 @@ async def ejecutar_panel():
 
                 round_next = int(estado_bot.get("round_id_actual", 0) or 0) + 1
                 if bool(LXV_CORE_ENABLE) and (not await esperar_permiso_barrier_siguiente_ronda(round_next, round_local_actual=int(estado_bot.get("round_id_actual", 0) or 0))):
+                    if _print_once(f"bot-abort-prebuy-roundgate-{ciclo}", ttl=3):
+                        print(Fore.YELLOW + f"BOT_ROUND_ABORT_PREBUY bot={NOMBRE_BOT} ciclo={int(ciclo)} motivo=round_gate_denied accion=same_cycle_no_barrier")
                     continue
-                estado_bot["round_id_actual"] = int(round_next)
 
                 # ========= BUSCAR SEÑAL =========
                 symbol, direccion, rsi9, rsi14, sma5, sma20, breakout, cruce, condiciones, rsi_reversion, close_snapshot = await buscar_estrategia(ws, ciclo, current_token)
 
                 if symbol == "REINTENTAR" or symbol is None:
+                    if _print_once(f"bot-abort-prebuy-signal-{ciclo}", ttl=3):
+                        print(Fore.YELLOW + f"BOT_ROUND_ABORT_PREBUY bot={NOMBRE_BOT} ciclo={int(ciclo)} motivo=signal_retry accion=same_cycle_no_barrier")
                     continue
 
                 if not all([direccion, rsi9 is not None, rsi14 is not None]):
                     print(Fore.YELLOW + "Datos de estrategia incompletos. Reintentando ciclo.")
+                    if _print_once(f"bot-abort-prebuy-data-{ciclo}", ttl=3):
+                        print(Fore.YELLOW + f"BOT_ROUND_ABORT_PREBUY bot={NOMBRE_BOT} ciclo={int(ciclo)} motivo=datos_incompletos accion=same_cycle_no_barrier")
                     continue
 
                 # Rechequeo token justo antes de avanzar
@@ -2728,6 +2733,8 @@ async def ejecutar_panel():
 
                         if (dir2 != direccion) or (int(cond2) < 2) or (float(score2) < piso):
                             print(Fore.YELLOW + Style.BRIGHT + f"Revalidación falló en {symbol}: dir {direccion}->{dir2}, cond={cond2}, score={score2:.3f}<piso {piso:.3f}. Reintentando ciclo...")
+                            if _print_once(f"bot-abort-prebuy-reval-{ciclo}", ttl=3):
+                                print(Fore.YELLOW + f"BOT_ROUND_ABORT_PREBUY bot={NOMBRE_BOT} ciclo={int(ciclo)} motivo=revalidacion_fallo accion=same_cycle_no_barrier")
                             await asyncio.sleep(2.0 + random.uniform(0.0, 0.5))
                             continue
 
@@ -2931,6 +2938,8 @@ async def ejecutar_panel():
                                 print(Fore.YELLOW + f"LXV_SYNC_PREBUY_OK bot={NOMBRE_BOT} round={int(round_ok)} snapshot={snap_ok} src=LXV_CORE ciclo={int(ciclo_ok)}")
 
                     if not ok_lxv_buy:
+                        if _print_once(f"bot-abort-prebuy-lxv-{ciclo}-{motivo_lxv_buy}", ttl=3):
+                            print(Fore.YELLOW + f"BOT_ROUND_ABORT_PREBUY bot={NOMBRE_BOT} ciclo={int(ciclo)} motivo={motivo_lxv_buy} accion=same_cycle_no_barrier")
                         if _print_once(f"lxv-buy-abort-{motivo_lxv_buy}", ttl=10):
                             print(Fore.YELLOW + f"LXV_SYNC_ABORT: {motivo_lxv_buy}")
                         if isinstance(data_lxv_buy, dict):
@@ -2958,6 +2967,8 @@ async def ejecutar_panel():
                     }, expect_msg_type="buy", timeout=8.0)
                 except RuntimeError as api_e:
                     print(Fore.RED + Style.BRIGHT + f"[ERROR] Compra: {api_e}. Reintentando mismo ciclo...")
+                    if _print_once(f"bot-abort-prebuy-buy-runtime-{ciclo}", ttl=3):
+                        print(Fore.YELLOW + f"BOT_ROUND_ABORT_PREBUY bot={NOMBRE_BOT} ciclo={int(ciclo)} motivo=buy_runtime_error accion=same_cycle_no_barrier")
                     estado_bot["token_msg_mostrado"] = False
                     await asyncio.sleep(10 + random.uniform(0.0, 0.5))
                     continue
@@ -2972,6 +2983,10 @@ async def ejecutar_panel():
                     raise
 
                 contract_id = data_buy["buy"]["contract_id"]
+                round_armed = int(estado_bot.get("round_id_actual", 0) or 0) + 1
+                estado_bot["round_id_actual"] = int(round_armed)
+                if _print_once(f"bot-round-armed-{round_armed}", ttl=3):
+                    print(Fore.YELLOW + f"BOT_ROUND_ARMED bot={NOMBRE_BOT} round={int(round_armed)}")
                 if isinstance(data_lxv_buy, dict):
                     try:
                         estado_bot["last_lxv_snapshot_consumed"] = str(data_lxv_buy.get("snapshot_id", "") or "")
@@ -3004,6 +3019,9 @@ async def ejecutar_panel():
 
                 if resultado == "INDEFINIDO":
                     print(Fore.YELLOW + "INDEFINIDO: WS/Token restart. Se mantiene MISMO ciclo (BG resolverá).")
+                    round_local = int(estado_bot.get("round_id_actual", 0) or 0)
+                    if _print_once(f"bot-indefinido-local-{round_local}", ttl=3):
+                        print(Fore.YELLOW + f"BOT_RESULT_INDEFINIDO_LOCAL bot={NOMBRE_BOT} round={int(round_local)} accion=same_cycle_no_barrier")
                     indefinidos_consecutivos += 1
 
                     if indefinidos_consecutivos > 5:
@@ -3043,7 +3061,9 @@ async def ejecutar_panel():
 
                 if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(round_cerrada) > 0 and (not modo_real):
                     if _print_once(f"bot-post-ack-wait-{round_cerrada}", ttl=4):
-                        print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_cerrada)} waiting_for={int(round_siguiente)}")
+                        st_wait = leer_barrier_state() or {}
+                        rr_wait = int(st_wait.get("release_round", 1) or 1)
+                        print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_cerrada)} waiting_for={int(round_siguiente)} release_round={int(rr_wait)}")
                     await esperar_permiso_barrier_siguiente_ronda(int(round_siguiente), round_local_actual=int(round_cerrada))
 
                 print(Back.BLUE + Style.BRIGHT + f"\nTotal DEMO: {resultado_global['demo']:.2f} USD | Total REAL: {resultado_global['real']:.2f} USD")
