@@ -3113,12 +3113,18 @@ async def ejecutar_panel():
                 except Exception:
                     pass
 
-                if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(round_cerrada) > 0 and (not modo_real):
-                    if _print_once(f"bot-post-ack-wait-{round_cerrada}", ttl=4):
+                trade_src = str(trade_ack_ctx.get("src", "") or "LOCAL").upper().strip() if isinstance(trade_ack_ctx, dict) else "LOCAL"
+                wait_hard_barrier = bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(round_cerrada) > 0 and _debe_esperar_barrera_dura_post_ack(trade_ack_ctx)
+                if wait_hard_barrier:
+                    if _print_once(f"bot-post-ack-hard-{round_cerrada}", ttl=4):
                         st_wait = leer_barrier_state() or {}
                         rr_wait = int(st_wait.get("release_round", 1) or 1)
-                        print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_cerrada)} waiting_for={int(round_siguiente)} release_round={int(rr_wait)}")
+                        snap_wait = str(trade_ack_ctx.get("snapshot_id", "") or "--")
+                        print(Fore.YELLOW + f"BOT_POST_ACK_HARD_BARRIER bot={NOMBRE_BOT} round={int(round_cerrada)} src={trade_src} snapshot={snap_wait} release_round={int(rr_wait)}")
                     await esperar_permiso_barrier_siguiente_ronda(int(round_siguiente), round_local_actual=int(round_cerrada))
+                elif (not modo_real):
+                    if _print_once(f"bot-post-ack-local-{round_cerrada}", ttl=4):
+                        print(Fore.YELLOW + f"BOT_POST_ACK_LOCAL_CONTINUE bot={NOMBRE_BOT} round={int(round_cerrada)} src=LOCAL")
 
                 print(Back.BLUE + Style.BRIGHT + f"\nTotal DEMO: {resultado_global['demo']:.2f} USD | Total REAL: {resultado_global['real']:.2f} USD")
                 await mostrar_saldos()
