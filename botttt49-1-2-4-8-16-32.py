@@ -362,33 +362,15 @@ def leer_barrier_state() -> dict:
 async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int, round_local_actual: int | None = None) -> bool:
     try:
         expected_local = int(estado_bot.get("_post_ack_expected_local_round", 0) or 0)
-        expected_ts = float(estado_bot.get("_post_ack_expected_local_ts", 0.0) or 0.0)
         current_local = int(round_local_actual or 0)
-        now_ts = time.time()
-        guard_alive = (expected_local > 0) and ((now_ts - expected_ts) <= float(POST_ACK_LOCAL_GUARD_TTL_S))
-        if expected_local > 0 and not guard_alive:
-            if _print_once(f"post-ack-clear-expired-{expected_local}", ttl=6):
-                print(Fore.CYAN + f"BOT_CLEAR_POST_ACK_LOCAL_GUARD bot={NOMBRE_BOT} round={int(expected_local)}")
-            estado_bot["_post_ack_expected_local_round"] = 0
-            estado_bot["_post_ack_expected_local_ts"] = 0.0
-        elif guard_alive and current_local == expected_local:
+        if expected_local > 0 and current_local == expected_local:
             if _print_once(f"post-ack-route-inconsistent-{expected_local}", ttl=6):
                 print(
                     Fore.RED
                     + f"POST_ACK_ROUTE_INCONSISTENT bot={NOMBRE_BOT} round={int(expected_local)} "
                       f"expected=LOCAL_CONTINUE observed=HARD_WAIT"
                 )
-            if _print_once(f"post-ack-skip-residual-{expected_local}", ttl=6):
-                print(
-                    Fore.YELLOW
-                    + f"BOT_SKIP_RESIDUAL_HARD_BARRIER bot={NOMBRE_BOT} round={int(expected_local)} "
-                      f"reason=post_ack_local_continue_active"
-                )
             estado_bot["_post_ack_expected_local_round"] = 0
-            estado_bot["_post_ack_expected_local_ts"] = 0.0
-            if _print_once(f"post-ack-clear-skip-{expected_local}", ttl=6):
-                print(Fore.CYAN + f"BOT_CLEAR_POST_ACK_LOCAL_GUARD bot={NOMBRE_BOT} round={int(expected_local)}")
-            return True
     except Exception:
         pass
     while bool(BARRIER_ENABLED):
@@ -688,37 +670,6 @@ def _build_trade_ack_ctx(round_local: int, data_lxv_buy) -> dict:
                 "is_lxv": True,
             })
     return ctx
-
-
-def _debe_esperar_barrera_dura_post_ack(modo_real: bool, trade_ack_ctx: dict | None = None) -> bool:
-    """
-    Barrera dura SOLO para trayectorias LXV/REAL materializadas.
-    LOCAL/DEMO no debe quedar secuestrado esperando release_round global.
-    """
-    try:
-        if not (bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED)):
-            return False
-        if not bool(modo_real):
-            return False
-
-        ctx = trade_ack_ctx if isinstance(trade_ack_ctx, dict) else {}
-        src = str(ctx.get("src", "") or ctx.get("src_lxv", "") or "").strip().upper()
-        snapshot_id = str(ctx.get("snapshot_id", "") or "").strip()
-        round_lxv = int(ctx.get("round_lxv", 0) or 0)
-        round_ack = int(ctx.get("round_ack", 0) or 0)
-
-        src_lxv = src in {
-            "LXV_CORE", "LXV_SYNC", "LXV_SINCRONIZADO",
-            "LXB_SYNC", "LXB_SINCRONIZADO"
-        }
-
-        return bool(
-            src_lxv
-            or (snapshot_id and round_lxv > 0)
-            or (_lxv_post_real_confirmed() and round_ack > 0)
-        )
-    except Exception:
-        return False
 
 # <<< PATCH 1
 
@@ -2610,16 +2561,6 @@ async def ejecutar_panel():
     global _ws_fail_streak
 
     # Eliminado: reset_csv_and_total() para acumular histórico completo
-    running_file = os.path.abspath(__file__)
-    helper_ok = callable(globals().get("_debe_esperar_barrera_dura_post_ack", None))
-    print(
-        Fore.CYAN
-        + f"RUNNING_FILE={running_file} | BOT={NOMBRE_BOT} | PATCH_POST_ACK=ON | HELPER_POST_ACK={'ON' if helper_ok else 'OFF'}"
-    )
-    if not helper_ok:
-        print(Fore.RED + f"FATAL_POST_ACK_HELPER_MISSING bot={NOMBRE_BOT} file={running_file}")
-        return
-
     startup_jitter = random.uniform(float(SALDO_STARTUP_JITTER_MIN_S), float(SALDO_STARTUP_JITTER_MAX_S))
     await asyncio.sleep(startup_jitter)
     await mostrar_saldos()
@@ -3185,50 +3126,18 @@ async def ejecutar_panel():
                 except Exception:
                     pass
 
-                if not callable(globals().get("_debe_esperar_barrera_dura_post_ack")):
-                    raise RuntimeError("POST_ACK_HELPER_MISSING")
-                wait_hard_barrier = _debe_esperar_barrera_dura_post_ack(
-                    modo_real=modo_real,
-                    trade_ack_ctx=trade_ack_ctx,
-                )
-                src_dbg = str(trade_ack_ctx.get("src", "") or trade_ack_ctx.get("src_lxv", "") or "LOCAL").strip()
-                snap_dbg = str(trade_ack_ctx.get("snapshot_id", "") or "").strip()
-                round_ack_dbg = int(trade_ack_ctx.get("round_ack", 0) or 0)
-                if _print_once(f"post-ack-decision-{round_cerrada}-{round_ack_dbg}", ttl=2):
-                    print(
-                        Fore.CYAN
-                        + f"POST_ACK_DECISION bot={NOMBRE_BOT} modo_real={bool(modo_real)} src={src_dbg or 'LOCAL'} "
-                          f"round_ack={int(round_ack_dbg)} snapshot={snap_dbg or '--'} wait_hard_barrier={bool(wait_hard_barrier)}"
-                    )
-
-                if wait_hard_barrier and int(round_cerrada) > 0:
-                    estado_bot["_post_ack_expected_local_round"] = 0
-                    estado_bot["_post_ack_expected_local_ts"] = 0.0
+                trade_src = str(trade_ack_ctx.get("src", "") or "LOCAL").upper().strip() if isinstance(trade_ack_ctx, dict) else "LOCAL"
+                wait_hard_barrier = bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(round_cerrada) > 0 and _debe_esperar_barrera_dura_post_ack(trade_ack_ctx)
+                if wait_hard_barrier:
                     if _print_once(f"bot-post-ack-hard-{round_cerrada}", ttl=4):
                         st_wait = leer_barrier_state() or {}
                         rr_wait = int(st_wait.get("release_round", 1) or 1)
-                        print(
-                            Fore.YELLOW
-                            + f"BOT_POST_ACK_HARD_BARRIER bot={NOMBRE_BOT} round={int(round_cerrada)} "
-                              f"waiting_for={int(round_siguiente)} release_round={int(rr_wait)} "
-                              f"src={src_dbg or '--'} snapshot={snap_dbg or '--'}"
-                        )
-                    await esperar_permiso_barrier_siguiente_ronda(
-                        int(round_siguiente),
-                        round_local_actual=int(round_cerrada),
-                    )
-                else:
-                    estado_bot["_post_ack_expected_local_round"] = int(round_cerrada)
-                    estado_bot["_post_ack_expected_local_ts"] = time.time()
+                        snap_wait = str(trade_ack_ctx.get("snapshot_id", "") or "--")
+                        print(Fore.YELLOW + f"BOT_POST_ACK_HARD_BARRIER bot={NOMBRE_BOT} round={int(round_cerrada)} src={trade_src} snapshot={snap_wait} release_round={int(rr_wait)}")
+                    await esperar_permiso_barrier_siguiente_ronda(int(round_siguiente), round_local_actual=int(round_cerrada))
+                elif (not modo_real):
                     if _print_once(f"bot-post-ack-local-{round_cerrada}", ttl=4):
-                        print(
-                            Fore.GREEN
-                            + f"BOT_POST_ACK_LOCAL_CONTINUE bot={NOMBRE_BOT} round={int(round_cerrada)} src={src_dbg or 'LOCAL'}"
-                        )
-                    try:
-                        await esperar_nivelacion_suave_post_ronda(int(round_cerrada))
-                    except Exception:
-                        pass
+                        print(Fore.YELLOW + f"BOT_POST_ACK_LOCAL_CONTINUE bot={NOMBRE_BOT} round={int(round_cerrada)} src=LOCAL")
 
                 print(Back.BLUE + Style.BRIGHT + f"\nTotal DEMO: {resultado_global['demo']:.2f} USD | Total REAL: {resultado_global['real']:.2f} USD")
                 await mostrar_saldos()
@@ -3270,8 +3179,6 @@ async def ejecutar_panel():
 
                 # ========= DEMO =========
                 try:
-                    if _print_once(f"bot-post-ack-soft-{round_cerrada}", ttl=4):
-                        print(Fore.YELLOW + f"BOT_POST_ACK_SOFT_LEVEL bot={NOMBRE_BOT} round={int(round_cerrada)} src=LOCAL")
                     await esperar_nivelacion_suave_post_ronda(int(round_cerrada))
                 except Exception:
                     pass
