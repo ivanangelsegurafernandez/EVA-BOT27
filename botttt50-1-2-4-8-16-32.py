@@ -183,6 +183,7 @@ estado_bot = {
     "last_round_ack": 0,
     "last_lxv_snapshot_consumed": "",
     "last_lxv_round_consumed": 0,
+    "trade_ack_ctx": {},
 }  # Added modo_manual and barra_activa
 racha_actual_bot = 0  # racha del bot: >0 = racha de GANANCIAS, <0 = racha de PÉRDIDAS
 
@@ -359,6 +360,19 @@ def leer_barrier_state() -> dict:
         return {}
 
 async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int, round_local_actual: int | None = None) -> bool:
+    try:
+        expected_local = int(estado_bot.get("_post_ack_expected_local_round", 0) or 0)
+        current_local = int(round_local_actual or 0)
+        if expected_local > 0 and current_local == expected_local:
+            if _print_once(f"post-ack-route-inconsistent-{expected_local}", ttl=6):
+                print(
+                    Fore.RED
+                    + f"POST_ACK_ROUTE_INCONSISTENT bot={NOMBRE_BOT} round={int(expected_local)} "
+                      f"expected=LOCAL_CONTINUE observed=HARD_WAIT"
+                )
+            estado_bot["_post_ack_expected_local_round"] = 0
+    except Exception:
+        pass
     while bool(BARRIER_ENABLED):
         st = leer_barrier_state() or {}
         if not bool(st.get("barrier_enabled", True)):
@@ -632,6 +646,62 @@ def validar_permiso_buy_lxv_sync(bot: str, ciclo: int, token_actual, owner_ok: b
         return False, "commit_guard_activo", data
     return True, "ok", data
 
+
+LXV_CANONICAL_SRCS = {"LXV_CORE", "LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}
+
+
+def _build_trade_ack_ctx(round_local: int, data_lxv_buy) -> dict:
+    ctx = {
+        "round_ack": int(round_local or 0),
+        "snapshot_id": "",
+        "src": "",
+        "is_lxv": False,
+        "round_local": int(round_local or 0),
+    }
+    if isinstance(data_lxv_buy, dict):
+        src_lxv = str(data_lxv_buy.get("src", "") or "").upper().strip()
+        round_lxv = int(data_lxv_buy.get("round_lxv", 0) or 0)
+        snapshot_id = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+        if src_lxv in LXV_CANONICAL_SRCS and round_lxv > 0:
+            ctx.update({
+                "round_ack": int(round_lxv),
+                "snapshot_id": str(snapshot_id),
+                "src": str(src_lxv),
+                "is_lxv": True,
+            })
+    return ctx
+
+
+def _debe_esperar_barrera_dura_post_ack(modo_real: bool, trade_ack_ctx: dict | None = None) -> bool:
+    """
+    Barrera dura SOLO para trayectorias LXV/REAL materializadas.
+    LOCAL/DEMO no debe quedar secuestrado esperando release_round global.
+    """
+    try:
+        if not (bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED)):
+            return False
+        if not bool(modo_real):
+            return False
+
+        ctx = trade_ack_ctx if isinstance(trade_ack_ctx, dict) else {}
+        src = str(ctx.get("src", "") or ctx.get("src_lxv", "") or "").strip().upper()
+        snapshot_id = str(ctx.get("snapshot_id", "") or "").strip()
+        round_lxv = int(ctx.get("round_lxv", 0) or 0)
+        round_ack = int(ctx.get("round_ack", 0) or 0)
+
+        src_lxv = src in {
+            "LXV_CORE", "LXV_SYNC", "LXV_SINCRONIZADO",
+            "LXB_SYNC", "LXB_SINCRONIZADO"
+        }
+
+        return bool(
+            src_lxv
+            or (snapshot_id and round_lxv > 0)
+            or (_lxv_post_real_confirmed() and round_ack > 0)
+        )
+    except Exception:
+        return False
+
 # <<< PATCH 1
 
 # >>> PATCH: WS robusto
@@ -682,6 +752,9 @@ COOLDOWN_REAL_S = 12
 # >>> PATCH BLOQUE 4 y 8
 REFRESCO_SALDO = 12
 _last_saldo_ts = 0.0
+SALDO_CONNECT_OPEN_TIMEOUT_S = 8.0
+SALDO_STARTUP_JITTER_MIN_S = 0.4
+SALDO_STARTUP_JITTER_MAX_S = 2.0
 # <<< PATCH
 
 # >>> BLOQUE A: Buffer de logs para no romper la barra
@@ -2450,7 +2523,11 @@ async def mostrar_saldos():
         last_exc = None
         for intento in range(1, tries + 1):
             try:
-                async with websockets.connect(DERIV_WS_URL, **WS_KW) as ws:  # BLOQUE 1.2
+                async with websockets.connect(
+                    DERIV_WS_URL,
+                    open_timeout=float(SALDO_CONNECT_OPEN_TIMEOUT_S),
+                    **WS_KW,
+                ) as ws:  # BLOQUE 1.2
                     timeout_auth = 6.0 + (1.5 * max(0, intento - 1))
                     timeout_balance = 7.0 + (1.5 * max(0, intento - 1))
                     await authorize_ws(ws, token, tries=2, timeout=timeout_auth)
@@ -2461,10 +2538,12 @@ async def mostrar_saldos():
                     last_exc = RuntimeError("balance_missing")
             except Exception as e:
                 last_exc = e
+                if isinstance(e, (asyncio.TimeoutError, TimeoutError)) and _print_once(f"saldo-connect-timeout-{etiqueta}", ttl=4):
+                    print(Fore.YELLOW + f"SALDO_CONNECT_TIMEOUT bot={NOMBRE_BOT} cuenta={etiqueta}")
                 if (intento < tries) and _es_error_transitorio_ws(e):
                     espera = min(4.5, 0.7 * intento + random.uniform(0.0, 0.5))
-                    if _print_once(f"saldo-{etiqueta.lower()}-retry-{intento}", ttl=2):
-                        print(Fore.YELLOW + f"WS/NET inestable en saldo {etiqueta} ({type(e).__name__}). Reintento {intento}/{tries} en {espera:.1f}s...")
+                    if _print_once(f"saldo-connect-retry-{etiqueta}-{intento}", ttl=2):
+                        print(Fore.YELLOW + f"SALDO_CONNECT_RETRY bot={NOMBRE_BOT} cuenta={etiqueta} intento={intento}/{tries}")
                     await asyncio.sleep(espera)
                     continue
                 break
@@ -2479,6 +2558,11 @@ async def mostrar_saldos():
     elif err_demo is not None and _print_once("saldo-demo-error", ttl=REFRESCO_SALDO):
         print(Fore.YELLOW + Style.BRIGHT + f"[WARN] saldo DEMO: {type(err_demo).__name__}: {err_demo!r}")
         print(Fore.YELLOW + "Balance DEMO no disponible, usando último valor válido.")
+    if not isinstance(saldo_demo, (int, float)):
+        if isinstance(saldo_demo_last, (int, float)) and _print_once("saldo-demo-cache-fallback", ttl=REFRESCO_SALDO):
+            print(Fore.YELLOW + f"SALDO_FALLBACK_CACHE bot={NOMBRE_BOT} cuenta=DEMO")
+        elif _print_once("saldo-demo-no-balance", ttl=REFRESCO_SALDO):
+            print(Fore.YELLOW + f"SALDO_CONTINUE_WITHOUT_BALANCE bot={NOMBRE_BOT}")
 
     saldo_real, saldo_real_ts_new, err_real = await _consultar_saldo_con_reintentos(TOKEN_REAL, "REAL", saldo_real_last, saldo_real_last_ts)
     if isinstance(saldo_real, (int, float)):
@@ -2489,6 +2573,11 @@ async def mostrar_saldos():
     elif err_real is not None and _print_once("saldo-real-error", ttl=REFRESCO_SALDO):
         print(Fore.YELLOW + Style.BRIGHT + f"[WARN] saldo REAL: {type(err_real).__name__}: {err_real!r}")
         print(Fore.YELLOW + "Balance REAL no disponible, usando último valor válido.")
+    if not isinstance(saldo_real, (int, float)):
+        if isinstance(saldo_real_last, (int, float)) and _print_once("saldo-real-cache-fallback", ttl=REFRESCO_SALDO):
+            print(Fore.YELLOW + f"SALDO_FALLBACK_CACHE bot={NOMBRE_BOT} cuenta=REAL")
+        elif _print_once("saldo-real-no-balance", ttl=REFRESCO_SALDO):
+            print(Fore.YELLOW + f"SALDO_CONTINUE_WITHOUT_BALANCE bot={NOMBRE_BOT}")
 
     print(Fore.LIGHTBLUE_EX + Style.BRIGHT + _fmt_saldo("Saldo cuenta DEMO", saldo_demo, saldo_demo_last_ts))
     print(Fore.YELLOW + Style.BRIGHT + _fmt_saldo("Saldo cuenta REAL", saldo_real, saldo_real_last_ts))
@@ -2503,6 +2592,18 @@ async def ejecutar_panel():
     global _ws_fail_streak
 
     # Eliminado: reset_csv_and_total() para acumular histórico completo
+    running_file = os.path.abspath(__file__)
+    helper_ok = callable(globals().get("_debe_esperar_barrera_dura_post_ack", None))
+    print(
+        Fore.CYAN
+        + f"RUNNING_FILE={running_file} | BOT={NOMBRE_BOT} | PATCH_POST_ACK=ON | HELPER_POST_ACK={'ON' if helper_ok else 'OFF'}"
+    )
+    if not helper_ok:
+        print(Fore.RED + f"FATAL_POST_ACK_HELPER_MISSING bot={NOMBRE_BOT} file={running_file}")
+        return
+
+    startup_jitter = random.uniform(float(SALDO_STARTUP_JITTER_MIN_S), float(SALDO_STARTUP_JITTER_MAX_S))
+    await asyncio.sleep(startup_jitter)
     await mostrar_saldos()
     # =================== PATCH CSV (SOLO) ===================
     global _CSV_REPARADO_1VEZ
@@ -2983,10 +3084,15 @@ async def ejecutar_panel():
                     raise
 
                 contract_id = data_buy["buy"]["contract_id"]
-                round_armed = int(estado_bot.get("round_id_actual", 0) or 0) + 1
-                estado_bot["round_id_actual"] = int(round_armed)
+                round_armed_local = int(estado_bot.get("round_id_actual", 0) or 0) + 1
+                estado_bot["round_id_actual"] = int(round_armed_local)
+                trade_ack_ctx = _build_trade_ack_ctx(round_local=round_armed_local, data_lxv_buy=data_lxv_buy)
+                estado_bot["trade_ack_ctx"] = dict(trade_ack_ctx)
+                round_armed = int(trade_ack_ctx.get("round_ack", round_armed_local) or round_armed_local)
                 if _print_once(f"bot-round-armed-{round_armed}", ttl=3):
-                    print(Fore.YELLOW + f"BOT_ROUND_ARMED bot={NOMBRE_BOT} round={int(round_armed)}")
+                    src_tag = str(trade_ack_ctx.get("src", "") or "LOCAL")
+                    snap_tag = str(trade_ack_ctx.get("snapshot_id", "") or "--")
+                    print(Fore.YELLOW + f"BOT_ROUND_ARMED bot={NOMBRE_BOT} round={int(round_armed)} src={src_tag} snapshot={snap_tag}")
                 if isinstance(data_lxv_buy, dict):
                     try:
                         estado_bot["last_lxv_snapshot_consumed"] = str(data_lxv_buy.get("snapshot_id", "") or "")
@@ -3019,7 +3125,8 @@ async def ejecutar_panel():
 
                 if resultado == "INDEFINIDO":
                     print(Fore.YELLOW + "INDEFINIDO: WS/Token restart. Se mantiene MISMO ciclo (BG resolverá).")
-                    round_local = int(estado_bot.get("round_id_actual", 0) or 0)
+                    trade_ack_ctx = estado_bot.get("trade_ack_ctx", {}) if isinstance(estado_bot.get("trade_ack_ctx", {}), dict) else {}
+                    round_local = int(trade_ack_ctx.get("round_ack", estado_bot.get("round_id_actual", 0)) or 0)
                     if _print_once(f"bot-indefinido-local-{round_local}", ttl=3):
                         print(Fore.YELLOW + f"BOT_RESULT_INDEFINIDO_LOCAL bot={NOMBRE_BOT} round={int(round_local)} accion=no_barrier_same_cycle")
                     indefinidos_consecutivos += 1
@@ -3047,7 +3154,8 @@ async def ejecutar_panel():
                 estado_bot["intentos_saldo"] = 0
                 estado_bot["ciclo_en_progreso"] = False
                 estado_bot["token_msg_mostrado"] = False
-                round_cerrada = int(estado_bot.get("round_id_actual", 0) or 0)
+                trade_ack_ctx = estado_bot.get("trade_ack_ctx", {}) if isinstance(estado_bot.get("trade_ack_ctx", {}), dict) else {}
+                round_cerrada = int(trade_ack_ctx.get("round_ack", estado_bot.get("round_id_actual", 0)) or 0)
                 round_siguiente = int(round_cerrada) + 1
                 try:
                     escribir_ack_cierre_ronda(
@@ -3059,12 +3167,46 @@ async def ejecutar_panel():
                 except Exception:
                     pass
 
-                if bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED) and int(round_cerrada) > 0 and (not modo_real):
-                    if _print_once(f"bot-post-ack-wait-{round_cerrada}", ttl=4):
+                wait_hard_barrier = _debe_esperar_barrera_dura_post_ack(
+                    modo_real=modo_real,
+                    trade_ack_ctx=trade_ack_ctx,
+                )
+                src_dbg = str(trade_ack_ctx.get("src", "") or trade_ack_ctx.get("src_lxv", "") or "LOCAL").strip()
+                snap_dbg = str(trade_ack_ctx.get("snapshot_id", "") or "").strip()
+                round_ack_dbg = int(trade_ack_ctx.get("round_ack", 0) or 0)
+                if _print_once(f"post-ack-decision-{round_cerrada}-{round_ack_dbg}", ttl=2):
+                    print(
+                        Fore.CYAN
+                        + f"POST_ACK_DECISION bot={NOMBRE_BOT} modo_real={bool(modo_real)} src={src_dbg or 'LOCAL'} "
+                          f"round_ack={int(round_ack_dbg)} snapshot={snap_dbg or '--'} wait_hard_barrier={bool(wait_hard_barrier)}"
+                    )
+
+                if wait_hard_barrier and int(round_cerrada) > 0:
+                    estado_bot["_post_ack_expected_local_round"] = 0
+                    if _print_once(f"bot-post-ack-hard-{round_cerrada}", ttl=4):
                         st_wait = leer_barrier_state() or {}
                         rr_wait = int(st_wait.get("release_round", 1) or 1)
-                        print(Fore.YELLOW + f"BOT_WAIT_BARRIER bot={NOMBRE_BOT} current_round={int(round_cerrada)} waiting_for={int(round_siguiente)} release_round={int(rr_wait)}")
-                    await esperar_permiso_barrier_siguiente_ronda(int(round_siguiente), round_local_actual=int(round_cerrada))
+                        print(
+                            Fore.YELLOW
+                            + f"BOT_POST_ACK_HARD_BARRIER bot={NOMBRE_BOT} round={int(round_cerrada)} "
+                              f"waiting_for={int(round_siguiente)} release_round={int(rr_wait)} "
+                              f"src={src_dbg or '--'} snapshot={snap_dbg or '--'}"
+                        )
+                    await esperar_permiso_barrier_siguiente_ronda(
+                        int(round_siguiente),
+                        round_local_actual=int(round_cerrada),
+                    )
+                else:
+                    estado_bot["_post_ack_expected_local_round"] = int(round_cerrada)
+                    if _print_once(f"bot-post-ack-local-{round_cerrada}", ttl=4):
+                        print(
+                            Fore.GREEN
+                            + f"BOT_POST_ACK_LOCAL_CONTINUE bot={NOMBRE_BOT} round={int(round_cerrada)} src={src_dbg or 'LOCAL'}"
+                        )
+                    try:
+                        await esperar_nivelacion_suave_post_ronda(int(round_cerrada))
+                    except Exception:
+                        pass
 
                 print(Back.BLUE + Style.BRIGHT + f"\nTotal DEMO: {resultado_global['demo']:.2f} USD | Total REAL: {resultado_global['real']:.2f} USD")
                 await mostrar_saldos()
@@ -3106,7 +3248,9 @@ async def ejecutar_panel():
 
                 # ========= DEMO =========
                 try:
-                    await esperar_nivelacion_suave_post_ronda(int(estado_bot.get("round_id_actual", 0) or 0))
+                    if _print_once(f"bot-post-ack-soft-{round_cerrada}", ttl=4):
+                        print(Fore.YELLOW + f"BOT_POST_ACK_SOFT_LEVEL bot={NOMBRE_BOT} round={int(round_cerrada)} src=LOCAL")
+                    await esperar_nivelacion_suave_post_ronda(int(round_cerrada))
                 except Exception:
                     pass
                 print(Fore.YELLOW + f"Pausa de {PAUSA_POST_OPERACION_S}s antes de continuar...")
