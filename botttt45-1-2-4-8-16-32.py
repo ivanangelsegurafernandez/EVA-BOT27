@@ -839,6 +839,62 @@ def _build_trade_ack_ctx(round_local: int, data_lxv_buy) -> dict:
             })
     return ctx
 
+
+def _debe_esperar_barrera_dura_post_ack(modo_real: bool, trade_ack_ctx: dict | None = None) -> bool:
+    """
+    Barrera dura SOLO para trayectorias LXV/REAL materializadas.
+    LOCAL/DEMO no debe quedar secuestrado esperando release_round global.
+    """
+    try:
+        if not (bool(LXV_CORE_ENABLE) and bool(BARRIER_ENABLED)):
+            return False
+        if not bool(modo_real):
+            return False
+
+        ctx = trade_ack_ctx if isinstance(trade_ack_ctx, dict) else {}
+        src = str(ctx.get("src", "") or ctx.get("src_lxv", "") or "").strip().upper()
+        snapshot_id = str(ctx.get("snapshot_id", "") or "").strip()
+        round_lxv = int(ctx.get("round_lxv", 0) or 0)
+        round_ack = int(ctx.get("round_ack", 0) or 0)
+
+        src_lxv = src in {
+            "LXV_CORE", "LXV_SYNC", "LXV_SINCRONIZADO",
+            "LXB_SYNC", "LXB_SINCRONIZADO"
+        }
+
+        return bool(
+            src_lxv
+            or (snapshot_id and round_lxv > 0)
+            or (_lxv_post_real_confirmed() and round_ack > 0)
+        )
+    except Exception:
+        return False
+
+
+LXV_CANONICAL_SRCS = {"LXV_CORE", "LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}
+
+
+def _build_trade_ack_ctx(round_local: int, data_lxv_buy) -> dict:
+    ctx = {
+        "round_ack": int(round_local or 0),
+        "snapshot_id": "",
+        "src": "",
+        "is_lxv": False,
+        "round_local": int(round_local or 0),
+    }
+    if isinstance(data_lxv_buy, dict):
+        src_lxv = str(data_lxv_buy.get("src", "") or "").upper().strip()
+        round_lxv = int(data_lxv_buy.get("round_lxv", 0) or 0)
+        snapshot_id = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+        if src_lxv in LXV_CANONICAL_SRCS and round_lxv > 0:
+            ctx.update({
+                "round_ack": int(round_lxv),
+                "snapshot_id": str(snapshot_id),
+                "src": str(src_lxv),
+                "is_lxv": True,
+            })
+    return ctx
+
 # <<< PATCH 1
 
 # >>> PATCH: WS robusto
