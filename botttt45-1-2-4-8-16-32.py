@@ -702,6 +702,31 @@ def _debe_esperar_barrera_dura_post_ack(modo_real: bool, trade_ack_ctx: dict | N
     except Exception:
         return False
 
+
+LXV_CANONICAL_SRCS = {"LXV_CORE", "LXV_SYNC", "LXV_SINCRONIZADO", "LXB_SYNC", "LXB_SINCRONIZADO"}
+
+
+def _build_trade_ack_ctx(round_local: int, data_lxv_buy) -> dict:
+    ctx = {
+        "round_ack": int(round_local or 0),
+        "snapshot_id": "",
+        "src": "",
+        "is_lxv": False,
+        "round_local": int(round_local or 0),
+    }
+    if isinstance(data_lxv_buy, dict):
+        src_lxv = str(data_lxv_buy.get("src", "") or "").upper().strip()
+        round_lxv = int(data_lxv_buy.get("round_lxv", 0) or 0)
+        snapshot_id = str(data_lxv_buy.get("snapshot_id", "") or "").strip()
+        if src_lxv in LXV_CANONICAL_SRCS and round_lxv > 0:
+            ctx.update({
+                "round_ack": int(round_lxv),
+                "snapshot_id": str(snapshot_id),
+                "src": str(src_lxv),
+                "is_lxv": True,
+            })
+    return ctx
+
 # <<< PATCH 1
 
 # >>> PATCH: WS robusto
@@ -2592,16 +2617,6 @@ async def ejecutar_panel():
     global _ws_fail_streak
 
     # Eliminado: reset_csv_and_total() para acumular histórico completo
-    running_file = os.path.abspath(__file__)
-    helper_ok = callable(globals().get("_debe_esperar_barrera_dura_post_ack", None))
-    print(
-        Fore.CYAN
-        + f"RUNNING_FILE={running_file} | BOT={NOMBRE_BOT} | PATCH_POST_ACK=ON | HELPER_POST_ACK={'ON' if helper_ok else 'OFF'}"
-    )
-    if not helper_ok:
-        print(Fore.RED + f"FATAL_POST_ACK_HELPER_MISSING bot={NOMBRE_BOT} file={running_file}")
-        return
-
     startup_jitter = random.uniform(float(SALDO_STARTUP_JITTER_MIN_S), float(SALDO_STARTUP_JITTER_MAX_S))
     await asyncio.sleep(startup_jitter)
     await mostrar_saldos()
@@ -3248,8 +3263,6 @@ async def ejecutar_panel():
 
                 # ========= DEMO =========
                 try:
-                    if _print_once(f"bot-post-ack-soft-{round_cerrada}", ttl=4):
-                        print(Fore.YELLOW + f"BOT_POST_ACK_SOFT_LEVEL bot={NOMBRE_BOT} round={int(round_cerrada)} src=LOCAL")
                     await esperar_nivelacion_suave_post_ronda(int(round_cerrada))
                 except Exception:
                     pass
