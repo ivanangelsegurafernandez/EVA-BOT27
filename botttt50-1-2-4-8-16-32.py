@@ -360,6 +360,19 @@ def leer_barrier_state() -> dict:
         return {}
 
 async def esperar_permiso_barrier_siguiente_ronda(round_local_siguiente: int, round_local_actual: int | None = None) -> bool:
+    try:
+        expected_local = int(estado_bot.get("_post_ack_expected_local_round", 0) or 0)
+        current_local = int(round_local_actual or 0)
+        if expected_local > 0 and current_local == expected_local:
+            if _print_once(f"post-ack-route-inconsistent-{expected_local}", ttl=6):
+                print(
+                    Fore.RED
+                    + f"POST_ACK_ROUTE_INCONSISTENT bot={NOMBRE_BOT} round={int(expected_local)} "
+                      f"expected=LOCAL_CONTINUE observed=HARD_WAIT"
+                )
+            estado_bot["_post_ack_expected_local_round"] = 0
+    except Exception:
+        pass
     while bool(BARRIER_ENABLED):
         st = leer_barrier_state() or {}
         if not bool(st.get("barrier_enabled", True)):
