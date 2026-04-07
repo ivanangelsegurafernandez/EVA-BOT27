@@ -658,15 +658,6 @@ def _build_trade_ack_ctx(round_local: int, data_lxv_buy) -> dict:
             })
     return ctx
 
-
-def _debe_esperar_barrera_dura_post_ack(trade_ack_ctx: dict | None) -> bool:
-    ctx = trade_ack_ctx if isinstance(trade_ack_ctx, dict) else {}
-    src = str(ctx.get("src", "") or "").upper().strip()
-    round_ack = int(ctx.get("round_ack", 0) or 0)
-    snapshot_id = str(ctx.get("snapshot_id", "") or "").strip()
-    is_lxv = bool(ctx.get("is_lxv", False))
-    return bool(is_lxv and src in LXV_CANONICAL_SRCS and round_ack > 0 and snapshot_id)
-
 # <<< PATCH 1
 
 # >>> PATCH: WS robusto
@@ -3175,8 +3166,6 @@ async def ejecutar_panel():
 
                 # ========= DEMO =========
                 try:
-                    if _print_once(f"bot-post-ack-soft-{round_cerrada}", ttl=4):
-                        print(Fore.YELLOW + f"BOT_POST_ACK_SOFT_LEVEL bot={NOMBRE_BOT} round={int(round_cerrada)} src=LOCAL")
                     await esperar_nivelacion_suave_post_ronda(int(round_cerrada))
                 except Exception:
                     pass
