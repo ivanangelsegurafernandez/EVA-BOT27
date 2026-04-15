@@ -638,12 +638,11 @@ def _purificacion_real_activa() -> bool:
         allow_sync = str(globals().get("LXV_SYNC_REAL_SOURCE", "LXV_SYNC")).upper()
         allow_rxf = str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")).upper()
         allow_5v1x = str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")).upper()
+        allowed_sources = {allow_sync}
         if bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
-            allowed_sources = {allow_rxf}
-        elif bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
-            allowed_sources = {allow_5v1x}
-        else:
-            allowed_sources = {allow_sync}
+            allowed_sources.add(allow_rxf)
+        if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+            allowed_sources.add(allow_5v1x)
         if bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False)) and route_src in allowed_sources:
             try:
                 _lxv_5v1x_event_cooldown(
@@ -3902,12 +3901,11 @@ def emitir_real_autorizado(bot: str, ciclo: int, source: str = "LEGACY") -> bool
     allow_sync = str(globals().get("LXV_SYNC_REAL_SOURCE", "LXV_SYNC")).upper()
     allow_rxf = str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")).upper()
     allow_5v1x = str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")).upper()
+    allow_sources = {allow_sync}
     if bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
-        allow_sources = {allow_rxf}
-    elif bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
-        allow_sources = {allow_5v1x}
-    else:
-        allow_sources = {allow_sync}
+        allow_sources.add(allow_rxf)
+    if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+        allow_sources.add(allow_5v1x)
     if bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False)) and src not in allow_sources:
         agregar_evento(
             f"🧊 REAL source rechazada: {src} (permitidas={','.join(sorted(allow_sources))})."
