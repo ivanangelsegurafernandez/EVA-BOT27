@@ -60,7 +60,7 @@ HOME_DIR = Path.home()
 LIMA_TZ = ZoneInfo("America/Lima")
 MASTER_PAUSE_STATE_PATH = Path(os.path.expanduser(os.getenv("MAESTRO_PAUSE_STATE_PATH", str(SCRIPT_DIR / "maestro_pause_state.json"))))
 PROTECTION_DRAWDOWN_PCT = float(os.getenv("SALDO_MONITOR_PROTECTION_DRAWDOWN", "0.20"))
-PROTECTION_PAUSE_SECONDS = int(float(os.getenv("SALDO_MONITOR_PROTECTION_PAUSE_SECONDS", "1200")))
+PROTECTION_PAUSE_SECONDS = int(float(os.getenv("SALDO_MONITOR_PROTECTION_PAUSE_SECONDS", "2400")))
 
 
 @dataclass
