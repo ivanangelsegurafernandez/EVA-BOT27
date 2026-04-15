@@ -638,11 +638,12 @@ def _purificacion_real_activa() -> bool:
         allow_sync = str(globals().get("LXV_SYNC_REAL_SOURCE", "LXV_SYNC")).upper()
         allow_rxf = str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")).upper()
         allow_5v1x = str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")).upper()
-        allowed_sources = {allow_sync}
         if bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
-            allowed_sources.add(allow_rxf)
-        if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
-            allowed_sources.add(allow_5v1x)
+            allowed_sources = {allow_rxf}
+        elif bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+            allowed_sources = {allow_5v1x}
+        else:
+            allowed_sources = {allow_sync}
         if bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False)) and route_src in allowed_sources:
             try:
                 _lxv_5v1x_event_cooldown(
@@ -3292,6 +3293,93 @@ def _lxv_rxf_apply_real_route(candidate: dict | None, ciclo_pick: int) -> bool:
         source=str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")),
     ))
 
+def _lxv_rxf_event_cooldown(key: str, msg: str, cooldown_s: float = 10.0) -> None:
+    now = float(time.time())
+    last = float(_LXV_RXF_EVENT_TS.get(key, 0.0) or 0.0)
+    if (now - last) < float(cooldown_s):
+        return
+    _LXV_RXF_EVENT_TS[key] = now
+    agregar_evento(msg)
+
+def _lxv_rxf_get_exported_rows(round_id: int) -> tuple[dict, dict]:
+    return _lxv_5v1x_get_exported_rows(int(round_id))
+
+def _lxv_rxf_candidate_from_round(round_row: dict | None, feat_row: dict | None) -> dict | None:
+    row = round_row if isinstance(round_row, dict) else {}
+    feat = feat_row if isinstance(feat_row, dict) else {}
+    src = feat if feat else row
+    bot = str((src.get("bot_x_fuerte", "") or "")).strip()
+    try:
+        round_id = int((row.get("round_id", feat.get("round_id", 0)) or 0))
+    except Exception:
+        round_id = 0
+    candidate = {
+        "round_id": round_id,
+        "patron_lxv": str(src.get("patron_lxv", row.get("patron_lxv", "")) or ""),
+        "bot_x_fuerte": bot,
+        "round_complete": bool(src.get("round_complete", row.get("round_complete", False))),
+        "data_quality": str(src.get("data_quality", row.get("data_quality", "")) or ""),
+        "max_prob_rojos": src.get("max_prob_rojos", row.get("max_prob_rojos", None)),
+    }
+    return candidate if candidate["round_id"] > 0 else None
+
+def _lxv_rxf_gate_ok(candidate: dict | None) -> tuple[bool, str]:
+    c = candidate if isinstance(candidate, dict) else {}
+    if str(c.get("patron_lxv", "")).upper() != "4V2X":
+        return False, "patron_no_4v2x"
+    bot = str(c.get("bot_x_fuerte", "") or "").strip()
+    if not bot:
+        return False, "bot_x_fuerte_vacio"
+    if bot not in BOT_NAMES:
+        return False, "bot_x_fuerte_fuera_de_lista"
+    if bool(globals().get("LXV_RXF_REQUIRE_ROUND_COMPLETE", True)) and not bool(c.get("round_complete", False)):
+        return False, "round_incomplete"
+    dq = str(c.get("data_quality", "") or "").strip().lower()
+    if bool(globals().get("LXV_RXF_REQUIRE_DATA_QUALITY_OK", True)) and dq != "ok":
+        return False, "data_quality_no_ok"
+    try:
+        max_prob_rojos = float(c.get("max_prob_rojos"))
+    except Exception:
+        return False, "max_prob_rojos_invalido"
+    if not math.isfinite(max_prob_rojos):
+        return False, "max_prob_rojos_invalido"
+    if max_prob_rojos < float(globals().get("LXV_RXF_MIN_MAX_PROB_ROJOS", 0.50)):
+        return False, "max_prob_rojos_bajo"
+    return True, "ok"
+
+def _lxv_rxf_pick_real_bot(candidate: dict | None) -> str | None:
+    ok, _ = _lxv_rxf_gate_ok(candidate)
+    if not ok:
+        return None
+    bot = str((candidate or {}).get("bot_x_fuerte", "") or "").strip()
+    return bot if bot in BOT_NAMES else None
+
+def _lxv_rxf_apply_real_route(candidate: dict | None, ciclo_pick: int) -> bool:
+    bot_pick = _lxv_rxf_pick_real_bot(candidate)
+    rid = int((candidate or {}).get("round_id", 0) or 0)
+    if not bot_pick:
+        _lxv_rxf_event_cooldown(
+            key=f"invalid:{rid}",
+            msg="⏸️ Sin LXV-RXF+ válido | no hay promoción REAL",
+            cooldown_s=8.0,
+        )
+        return False
+    _lxv_rxf_event_cooldown(
+        key=f"route:{rid}",
+        msg=f"🧪 REAL route activa: {str(globals().get('LXV_RXF_REAL_SOURCE', 'LXV_RXF'))}",
+        cooldown_s=8.0,
+    )
+    _lxv_rxf_event_cooldown(
+        key=f"pick:{rid}",
+        msg=f"🎯 LXV-RXF+ gate OK | ronda #{rid} | bot_x_fuerte={bot_pick} | REAL habilitado",
+        cooldown_s=8.0,
+    )
+    return bool(emitir_real_autorizado(
+        bot_pick,
+        int(ciclo_pick),
+        source=str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")),
+    ))
+
 def _sync_round_tick_maestro():
     global _SYNC_ROUND_LAST_ANNOUNCED, _LXV_LAST_EMITTED_ROUND
     _sync_round_bootstrap_state(force=False)
@@ -3485,11 +3573,11 @@ def _sync_round_tick_maestro():
                     except Exception:
                         pass
                     agregar_evento(
-                        f"🚨 LXV_SYNC REAL emitido: ronda #{round_id} -> {bot_pick} ciclo_global C{ciclo_pick}."
+                        f"🚨 {'LXV_RXF' if bool(globals().get('LXV_RXF_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL emitido: ronda #{round_id} -> {bot_pick} ciclo_global C{ciclo_pick}."
                     )
                 else:
                     agregar_evento(
-                        f"⚠️ LXV_SYNC REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
+                        f"⚠️ {'LXV_RXF' if bool(globals().get('LXV_RXF_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
                     )
         else:
             if str(patron).upper() == "4V/2X":
@@ -3516,11 +3604,11 @@ def _sync_round_tick_maestro():
                             except Exception:
                                 pass
                             agregar_evento(
-                                f"🚨 LXV_SYNC REAL emitido: ronda #{round_id} -> {bot_pick} ciclo_global C{ciclo_pick}."
+                                f"🚨 {'LXV_RXF' if bool(globals().get('LXV_RXF_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL emitido: ronda #{round_id} -> {bot_pick} ciclo_global C{ciclo_pick}."
                             )
                         else:
                             agregar_evento(
-                                f"⚠️ LXV_SYNC REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
+                                f"⚠️ {'LXV_RXF' if bool(globals().get('LXV_RXF_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
                             )
                     else:
                         _lxv_rxf_event_cooldown(
@@ -3901,11 +3989,12 @@ def emitir_real_autorizado(bot: str, ciclo: int, source: str = "LEGACY") -> bool
     allow_sync = str(globals().get("LXV_SYNC_REAL_SOURCE", "LXV_SYNC")).upper()
     allow_rxf = str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")).upper()
     allow_5v1x = str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")).upper()
-    allow_sources = {allow_sync}
     if bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
-        allow_sources.add(allow_rxf)
-    if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
-        allow_sources.add(allow_5v1x)
+        allow_sources = {allow_rxf}
+    elif bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+        allow_sources = {allow_5v1x}
+    else:
+        allow_sources = {allow_sync}
     if bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False)) and src not in allow_sources:
         agregar_evento(
             f"🧊 REAL source rechazada: {src} (permitidas={','.join(sorted(allow_sources))})."
