@@ -13636,21 +13636,24 @@ def mostrar_panel():
             canary_prog_txt = f"{c_prog}/{c_tgt}" if canary_live else "-"
 
             why_reasons = []
-            if warmup_live:
-                why_reasons.append("warmup")
-            if (not reliable) and (not canary_live) and (not auto_adapt_ok):
-                if not bool(AUTO_REAL_ALLOW_UNRELIABLE_POST_N15):
-                    why_reasons.append("adapt_off")
-                if not post_n15:
-                    why_reasons.append("n15_pending")
-                if n_samples_live < int(AUTO_REAL_UNRELIABLE_MIN_N):
-                    why_reasons.append(f"n<{int(AUTO_REAL_UNRELIABLE_MIN_N)}")
-                if best_prob < float(unrel_thr_live):
-                    why_reasons.append(f"p_best<{float(unrel_thr_live)*100:.1f}%")
-            if confirm_h < confirm_need_h:
-                why_reasons.append(f"confirm_pending({confirm_txt_h})")
-            if not trigger_ok_h:
-                why_reasons.append("trigger_no")
+            if _lxv_5v1x_bypass_aux_activo():
+                why_reasons.append("5v1x_bypass_aux")
+            else:
+                if warmup_live:
+                    why_reasons.append("warmup")
+                if (not reliable) and (not canary_live) and (not auto_adapt_ok):
+                    if not bool(AUTO_REAL_ALLOW_UNRELIABLE_POST_N15):
+                        why_reasons.append("adapt_off")
+                    if not post_n15:
+                        why_reasons.append("n15_pending")
+                    if n_samples_live < int(AUTO_REAL_UNRELIABLE_MIN_N):
+                        why_reasons.append(f"n<{int(AUTO_REAL_UNRELIABLE_MIN_N)}")
+                    if best_prob < float(unrel_thr_live):
+                        why_reasons.append(f"p_best<{float(unrel_thr_live)*100:.1f}%")
+                if confirm_h < confirm_need_h:
+                    why_reasons.append(f"confirm_pending({confirm_txt_h})")
+                if not trigger_ok_h:
+                    why_reasons.append("trigger_no")
             try:
                 ctt_status_h = str(CTT_STATE.get("status", "NEUTRAL") or "NEUTRAL")
                 ctt_gate_h = str(CTT_STATE.get("gate", "NEUTRAL") or "NEUTRAL")
@@ -13827,24 +13830,28 @@ def mostrar_panel():
                 rep_go = auditar_calibracion_seniales_reales(min_prob=float(IA_CALIB_THRESHOLD)) or {}
                 closed_go = int(rep_go.get("n_total_closed", rep_go.get("n", 0)) or 0)
                 hg_go = _estado_guardrail_ia_fuerte(force=False)
-                go_ok = bool(
-                    (n_samples_go >= int(REAL_GO_N_MIN))
-                    and (closed_go >= int(REAL_GO_CLOSED_MIN))
-                    and rel_go
-                    and (auc_go >= 0.53)
-                    and (not bool(hg_go.get("hard_block", False)))
-                )
-                go_reasons = []
-                if n_samples_go < int(REAL_GO_N_MIN):
-                    go_reasons.append(f"n_samples<{int(REAL_GO_N_MIN)}")
-                if closed_go < int(REAL_GO_CLOSED_MIN):
-                    go_reasons.append(f"closed<{int(REAL_GO_CLOSED_MIN)}")
-                if not rel_go:
-                    go_reasons.append("reliable=false")
-                if auc_go < 0.53:
-                    go_reasons.append("auc<0.53")
-                if bool(hg_go.get("hard_block", False)):
-                    go_reasons.append("hard_guard=RED")
+                if _lxv_5v1x_bypass_aux_activo():
+                    go_ok = True
+                    go_reasons = ["5v1x_bypass_aux"]
+                else:
+                    go_ok = bool(
+                        (n_samples_go >= int(REAL_GO_N_MIN))
+                        and (closed_go >= int(REAL_GO_CLOSED_MIN))
+                        and rel_go
+                        and (auc_go >= 0.53)
+                        and (not bool(hg_go.get("hard_block", False)))
+                    )
+                    go_reasons = []
+                    if n_samples_go < int(REAL_GO_N_MIN):
+                        go_reasons.append(f"n_samples<{int(REAL_GO_N_MIN)}")
+                    if closed_go < int(REAL_GO_CLOSED_MIN):
+                        go_reasons.append(f"closed<{int(REAL_GO_CLOSED_MIN)}")
+                    if not rel_go:
+                        go_reasons.append("reliable=false")
+                    if auc_go < 0.53:
+                        go_reasons.append("auc<0.53")
+                    if bool(hg_go.get("hard_block", False)):
+                        go_reasons.append("hard_guard=RED")
                 go_line = (
                     f"🧭 GO/NO-GO REAL: {'GO ✅' if go_ok else 'NO-GO ❌'} "
                     f"(n={n_samples_go}, closed={closed_go}, auc={auc_go:.3f}, rel={'sí' if rel_go else 'no'}, HG={hg_go.get('level','GREEN')})"
@@ -16047,8 +16054,39 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
     return EMBUDO_DECISION_STATE
 
 
+def _lxv_5v1x_bypass_aux_activo() -> bool:
+    """Bypass de candados auxiliares cuando 5V1X gobierna REAL en modo exclusivo."""
+    try:
+        return bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)) and bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False))
+    except Exception:
+        return False
+
+
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
     """Embudo unificado: selección -> calidad blanda -> modulación -> estado final."""
+    if _lxv_5v1x_bypass_aux_activo():
+        top1_bot = str(candidatos[0][1]) if candidatos else None
+        top1_prob = float(candidatos[0][2] or 0.0) if candidatos else 0.0
+        top2_bot = str(candidatos[1][1]) if len(candidatos) > 1 else None
+        top2_prob = float(candidatos[1][2] or 0.0) if len(candidatos) > 1 else 0.0
+        gap_value = float(top1_prob - top2_prob) if candidatos else 0.0
+        return _registrar_estado_embudo({
+            "decision_final": "LXV_ONLY",
+            "decision_reason": "5v1x_bypass_aux",
+            "gate_quality": "bypass_aux",
+            "risk_mode": "LXV_ONLY",
+            "hard_block_reason": "",
+            "soft_wait_reason": "",
+            "top1_bot": top1_bot,
+            "top2_bot": top2_bot,
+            "gap_value": gap_value,
+            "top1_prob": top1_prob,
+            "top2_prob": top2_prob,
+            "degrade_from": "5v1x_bypass_aux",
+            "ia_real_backed": 0,
+            "real_source": str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")),
+            "ia_model_mature": 0,
+        })
     if _purificacion_real_activa():
         _emitir_marca_purificacion_real()
         lxv_on = bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False))
