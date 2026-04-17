@@ -180,7 +180,7 @@ init(autoreset=True)
 
 # === BLOQUE 2 — CONFIGURACIÓN GLOBAL (MARTINGALA, HUD, AUDIO, IA) ===
 # === CONFIGURACIÓN DE MARTINGALA ===
-MARTI_ESCALADO = [1, 2, 4, 8]  # Escalado oficial de 4 pasos
+MARTI_ESCALADO = [1, 2, 4, 8, 16]  # Escalado oficial de 5 pasos
 MONTO_TOL = 0.01  # Tolerancia para redondeos
 SONAR_TAMBIEN_EN_DEMO = False  # Activar sonidos para victorias en DEMO
 SONAR_SOLO_EN_GATEWIN = True   # Solo sonar dentro de la ventana GateWIN
@@ -274,12 +274,12 @@ REAL_CLASSIC_GATE = True
 MODO_PURIFICACION_REAL = True  # Llave maestra: bypassea toda promoción/activación REAL sin apagar IA/HUD.
 LXV_SYNC_REAL_ROUTE_ENABLE = True
 LXV_SYNC_REAL_SOURCE = "LXV_SYNC"
-LXV_5V1X_ONLY_ENABLE = False  # legacy inactivo: ruta REAL 5V1X fuera de operación
+LXV_5V1X_ONLY_ENABLE = True  # ruta REAL activa exclusiva en 5V1X
 LXV_5V1X_REAL_SOURCE = "LXV_5V1X"
 LXV_5V1X_REQUIRE_DATA_QUALITY_OK = True
 LXV_5V1X_REQUIRE_ROUND_COMPLETE = True
-LXV_RXF_ENABLE = True
-LXV_RXF_ONLY_ENABLE = True
+LXV_RXF_ENABLE = False
+LXV_RXF_ONLY_ENABLE = False
 LXV_RXF_REAL_SOURCE = "LXV_RXF"
 LXV_RXF_REQUIRE_ROUND_COMPLETE = True
 LXV_RXF_REQUIRE_DATA_QUALITY_OK = True
@@ -638,10 +638,10 @@ def _purificacion_real_activa() -> bool:
         allow_sync = str(globals().get("LXV_SYNC_REAL_SOURCE", "LXV_SYNC")).upper()
         allow_rxf = str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")).upper()
         allow_5v1x = str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")).upper()
-        if bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
-            allowed_sources = {allow_rxf}
-        elif bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+        if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
             allowed_sources = {allow_5v1x}
+        elif bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
+            allowed_sources = {allow_rxf}
         else:
             allowed_sources = {allow_sync}
         if bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False)) and route_src in allowed_sources:
@@ -3546,21 +3546,21 @@ def _sync_round_tick_maestro():
             )
             if int(_LXV_LAST_EMITTED_ROUND or 0) != int(round_id):
                 ok_emit = False
-                if bool(globals().get("LXV_RXF_ONLY_ENABLE", False)) and bool(globals().get("LXV_RXF_ENABLE", True)):
-                    round_row, feat_row = _lxv_rxf_get_exported_rows(int(round_id))
-                    candidate = _lxv_rxf_candidate_from_round(round_row, feat_row)
-                    gate_ok, gate_reason = _lxv_rxf_gate_ok(candidate)
+                if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+                    round_row, feat_row = _lxv_5v1x_get_exported_rows(int(round_id))
+                    candidate = _lxv_5v1x_candidate_from_round(round_row, feat_row)
+                    gate_ok, gate_reason = _lxv_5v1x_gate_ok(candidate)
                     if gate_ok:
-                        _lxv_rxf_event_cooldown(
+                        _lxv_5v1x_event_cooldown(
                             key=f"gate_ok:{round_id}",
-                            msg=f"✅ LXV-RXF+ gate OK ronda #{round_id}: candidato REAL válido",
+                            msg=f"✅ 5V1X gate OK ronda #{round_id}: candidato REAL válido",
                             cooldown_s=8.0,
                         )
-                        ok_emit = bool(_lxv_rxf_apply_real_route(candidate, ciclo_pick))
+                        ok_emit = bool(_lxv_5v1x_apply_real_route(candidate, ciclo_pick))
                     else:
-                        _lxv_rxf_event_cooldown(
+                        _lxv_5v1x_event_cooldown(
                             key=f"gate_no:{round_id}",
-                            msg=f"⏸️ LXV-RXF+ gate OFF ronda #{round_id}: {gate_reason}",
+                            msg=f"⏸️ 5V1X gate OFF ronda #{round_id}: {gate_reason}",
                             cooldown_s=8.0,
                         )
                         ok_emit = False
@@ -3573,29 +3573,29 @@ def _sync_round_tick_maestro():
                     except Exception:
                         pass
                     agregar_evento(
-                        f"🚨 {'LXV_RXF' if bool(globals().get('LXV_RXF_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL emitido: ronda #{round_id} -> {bot_pick} ciclo_global C{ciclo_pick}."
+                        f"🚨 {'LXV_5V1X' if bool(globals().get('LXV_5V1X_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL emitido: ronda #{round_id} -> {bot_pick} ciclo_global C{ciclo_pick}."
                     )
                 else:
                     agregar_evento(
-                        f"⚠️ {'LXV_RXF' if bool(globals().get('LXV_RXF_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
+                        f"⚠️ {'LXV_5V1X' if bool(globals().get('LXV_5V1X_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
                     )
         else:
             if str(patron).upper() == "4V/2X":
-                if int(_LXV_LAST_EMITTED_ROUND or 0) != int(round_id) and bool(globals().get("LXV_RXF_ONLY_ENABLE", False)) and bool(globals().get("LXV_RXF_ENABLE", True)):
+                if int(_LXV_LAST_EMITTED_ROUND or 0) != int(round_id) and bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
                     ciclo_pick = ciclo_martingala_siguiente()
                     saldo_val = obtener_valor_saldo()
                     if reset_martingala_por_saldo(ciclo_pick, saldo_val):
                         ciclo_pick = 1
-                    round_row, feat_row = _lxv_rxf_get_exported_rows(int(round_id))
-                    candidate = _lxv_rxf_candidate_from_round(round_row, feat_row)
-                    gate_ok, gate_reason = _lxv_rxf_gate_ok(candidate)
+                    round_row, feat_row = _lxv_5v1x_get_exported_rows(int(round_id))
+                    candidate = _lxv_5v1x_candidate_from_round(round_row, feat_row)
+                    gate_ok, gate_reason = _lxv_5v1x_gate_ok(candidate)
                     if gate_ok:
-                        _lxv_rxf_event_cooldown(
+                        _lxv_5v1x_event_cooldown(
                             key=f"gate_ok:{round_id}",
-                            msg=f"✅ LXV-RXF+ gate OK ronda #{round_id}: candidato REAL válido",
+                            msg=f"✅ 5V1X gate OK ronda #{round_id}: candidato REAL válido",
                             cooldown_s=8.0,
                         )
-                        ok_emit = bool(_lxv_rxf_apply_real_route(candidate, ciclo_pick))
+                        ok_emit = bool(_lxv_5v1x_apply_real_route(candidate, ciclo_pick))
                         if ok_emit:
                             bot_pick = str((candidate or {}).get("bot_x_fuerte", "") or "").strip()
                             _LXV_LAST_EMITTED_ROUND = int(round_id)
@@ -3604,16 +3604,16 @@ def _sync_round_tick_maestro():
                             except Exception:
                                 pass
                             agregar_evento(
-                                f"🚨 {'LXV_RXF' if bool(globals().get('LXV_RXF_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL emitido: ronda #{round_id} -> {bot_pick} ciclo_global C{ciclo_pick}."
+                                f"🚨 {'LXV_5V1X' if bool(globals().get('LXV_5V1X_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL emitido: ronda #{round_id} -> {bot_pick} ciclo_global C{ciclo_pick}."
                             )
                         else:
                             agregar_evento(
-                                f"⚠️ {'LXV_RXF' if bool(globals().get('LXV_RXF_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
+                                f"⚠️ {'LXV_5V1X' if bool(globals().get('LXV_5V1X_ONLY_ENABLE', False)) else 'LXV_SYNC'} REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
                             )
                     else:
-                        _lxv_rxf_event_cooldown(
+                        _lxv_5v1x_event_cooldown(
                             key=f"gate_no:{round_id}",
-                            msg=f"⏸️ LXV-RXF+ gate OFF ronda #{round_id}: {gate_reason}",
+                            msg=f"⏸️ 5V1X gate OFF ronda #{round_id}: {gate_reason}",
                             cooldown_s=8.0,
                         )
             agregar_evento(f"ℹ️ LXV columna #{round_id}: {patron} → {motivo}.")
@@ -3989,10 +3989,10 @@ def emitir_real_autorizado(bot: str, ciclo: int, source: str = "LEGACY") -> bool
     allow_sync = str(globals().get("LXV_SYNC_REAL_SOURCE", "LXV_SYNC")).upper()
     allow_rxf = str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")).upper()
     allow_5v1x = str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")).upper()
-    if bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
-        allow_sources = {allow_rxf}
-    elif bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+    if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
         allow_sources = {allow_5v1x}
+    elif bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
+        allow_sources = {allow_rxf}
     else:
         allow_sources = {allow_sync}
     if bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False)) and src not in allow_sources:
@@ -13535,7 +13535,7 @@ def mostrar_panel():
     else:
         print(padding + Fore.GREEN + "🟢 MODO OPERACIÓN ACTIVO – Escaneando…")
     if _purificacion_real_activa():
-        print(padding + Fore.YELLOW + "🧪 IA REAL purificada | LXV_SYNC habilitado")
+        print(padding + Fore.YELLOW + "🧪 IA REAL purificada | LXV_5V1X habilitado")
 
     # Etapa activa para depuración de flujo
     try:
@@ -17835,13 +17835,13 @@ async def main():
                         elif decision_final == EMBUDO_FINAL_REAL_MICRO:
                             candidatos = candidatos[:1]
                         elif decision_final == "LXV_ONLY":
-                            agregar_evento("🧪 IA REAL purificada | LXV_SYNC habilitado (embudo en telemetría).")
+                            agregar_evento("🧪 IA REAL purificada | LXV_5V1X habilitado (embudo en telemetría).")
                             candidatos = []
 
                         # LXV como ruta única de decisión REAL: el embudo legacy queda en telemetría.
                         if bool(LXV_SYNC_REAL_ROUTE_ENABLE):
                             if candidatos and _print_once("lxv-route-only", ttl=20.0):
-                                agregar_evento("🧊 Modo LXV_SYNC_REAL: legado REAL en telemetría (sin emisión).")
+                                agregar_evento("🧊 Modo LXV_5V1X_REAL: legado REAL en telemetría (sin emisión).")
                             candidatos = []
 
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
