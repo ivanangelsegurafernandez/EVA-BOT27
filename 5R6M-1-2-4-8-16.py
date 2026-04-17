@@ -17902,7 +17902,7 @@ async def main():
                         elif decision_final == EMBUDO_FINAL_REAL_MICRO:
                             candidatos = candidatos[:1]
                         elif decision_final == "LXV_ONLY":
-                            agregar_evento("🧪 IA REAL purificada | LXV_5V1X habilitado (embudo en telemetría).")
+                            agregar_evento("🧪 5V1X válida | bypass de candados auxiliares REAL activo.")
                             candidatos = []
 
                         # LXV como ruta única de decisión REAL: el embudo legacy queda en telemetría.
