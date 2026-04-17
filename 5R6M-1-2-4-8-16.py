@@ -2553,7 +2553,7 @@ def _update_saldo_monitor_feed(valor_saldo: float):
         return False
 # === /SALDO LIVE FEED ===
 
-# === LXV_SYNC_COLUMN: sincronización de ronda/columna maestro↔bots ===
+# === COLUMN_SYNC: sincronización de ronda/columna maestro↔bots ===
 SYNC_ROUND_DIR = "sync_round"
 SYNC_ROUND_STATE_PATH = os.path.join(SYNC_ROUND_DIR, "state.json")
 TTL_ACK_SYNC_ROUND_S = 300.0
@@ -3408,7 +3408,7 @@ def _sync_round_tick_maestro():
         expected = list(BOT_NAMES)
 
     if _SYNC_ROUND_LAST_ANNOUNCED != round_id:
-        agregar_evento(f"🧭 LXV_SYNC_COLUMN ronda #{round_id} iniciada ({len(expected)} bots esperados).")
+        agregar_evento(f"🧭 COLUMN_SYNC ronda #{round_id} iniciada ({len(expected)} bots esperados).")
         _SYNC_ROUND_LAST_ANNOUNCED = round_id
 
     closed = {}
@@ -3424,7 +3424,7 @@ def _sync_round_tick_maestro():
             last_p = float(_SYNC_PENDING_WARN_TS.get(bot, 0.0) or 0.0)
             if (now_p - last_p) >= 20.0:
                 _SYNC_PENDING_WARN_TS[bot] = now_p
-                agregar_evento(f"⏳ LXV_SYNC_COLUMN: {bot} pendiente por contrato incierto; no cuenta como cierre.")
+                agregar_evento(f"⏳ COLUMN_SYNC: {bot} pendiente por contrato incierto; no cuenta como cierre.")
             continue
         try:
             ack_round = int(ack.get("round_id", 0) or 0)
@@ -3444,13 +3444,13 @@ def _sync_round_tick_maestro():
             last_s = float(_SYNC_STALE_WARN_TS.get(bot, 0.0) or 0.0)
             if (now_ts - last_s) >= 20.0:
                 _SYNC_STALE_WARN_TS[bot] = now_ts
-                agregar_evento(f"🧹 LXV_SYNC_COLUMN: ACK stale ignorado para {bot}.")
+                agregar_evento(f"🧹 COLUMN_SYNC: ACK stale ignorado para {bot}.")
             continue
         if ack_ts > (now_ts + float(ACK_SYNC_ROUND_FUTURE_DRIFT_S)):
             last_s = float(_SYNC_STALE_WARN_TS.get(bot, 0.0) or 0.0)
             if (now_ts - last_s) >= 20.0:
                 _SYNC_STALE_WARN_TS[bot] = now_ts
-                agregar_evento(f"🧹 LXV_SYNC_COLUMN: ACK con timestamp futuro ignorado para {bot}.")
+                agregar_evento(f"🧹 COLUMN_SYNC: ACK con timestamp futuro ignorado para {bot}.")
             continue
         res = str(ack.get("resultado", "")).upper().strip()
         if res not in ("GANANCIA", "PÉRDIDA"):
@@ -3488,7 +3488,7 @@ def _sync_round_tick_maestro():
     prev_n = int(_SYNC_ROUND_LAST_CLOSED_COUNT.get(round_id, -1))
     if n_closed != prev_n:
         _SYNC_ROUND_LAST_CLOSED_COUNT[round_id] = n_closed
-        agregar_evento(f"🧩 LXV_SYNC_COLUMN cierres ronda #{round_id}: {n_closed}/{len(expected)}.")
+        agregar_evento(f"🧩 COLUMN_SYNC cierres ronda #{round_id}: {n_closed}/{len(expected)}.")
 
     completed_normal = bool(n_closed >= len(expected))
     completed_failsafe = bool(stale_ignored and n_closed >= effective_need)
@@ -3515,9 +3515,9 @@ def _sync_round_tick_maestro():
 
     if completed:
         if completed_failsafe and stale_ignored:
-            agregar_evento(f"🟠 LXV_SYNC_COLUMN failsafe: liberando ronda #{round_id} sin {stale_ignored} por stale/timeout.")
-        agregar_evento(f"✅ LXV_SYNC_COLUMN columna/ronda #{round_id} COMPLETA.")
-        agregar_evento(f"🚀 LXV_SYNC_COLUMN ronda #{next_round} LIBERADA.")
+            agregar_evento(f"🟠 COLUMN_SYNC failsafe: liberando ronda #{round_id} sin {stale_ignored} por stale/timeout.")
+        agregar_evento(f"✅ COLUMN_SYNC columna/ronda #{round_id} COMPLETA.")
+        agregar_evento(f"🚀 COLUMN_SYNC ronda #{next_round} LIBERADA.")
         _lxv_export_round_snapshot(
             round_id=int(round_id),
             ts_round=float(now_ts),
@@ -3628,7 +3628,7 @@ def _sync_round_tick_maestro():
                     _sync_round_write_json_atomic(ack_path, ack_cur)
             except Exception:
                 pass
-# === /LXV_SYNC_COLUMN ===
+# === /COLUMN_SYNC ===
 
 # === PATCH: REAL INMEDIATO EN HUD AL EMITIR ORDEN (sin esperar compra) ===
 # Objetivo:
@@ -16921,26 +16921,55 @@ async def obtener_saldo_real():
         return
     if not WEBSOCKETS_OK:
         return
-    try:
-        async with websockets.connect(DERIV_WS_URL) as ws:
-            auth_msg = json.dumps({"authorize": token_real})
-            await ws.send(auth_msg)
-            resp = json.loads(await ws.recv())
-            if "error" in resp:
-                print(f"⚠️ Error en auth: {resp['error']['message']}")
-                return
-            bal_msg = json.dumps({"balance": 1, "subscribe": 1})
-            await ws.send(bal_msg)
-            resp = json.loads(await ws.recv())
-            if "error" in resp:
-                print(f"⚠️ Error en balance: {resp['error']['message']}")
-                return
-            if "balance" in resp:
-                saldo_real = f"{resp['balance']['balance']:.2f}"
+    def _saldo_ws_transitorio(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError, OSError)):
+            return True
+        try:
+            if WEBSOCKETS_OK and isinstance(exc, websockets.exceptions.ConnectionClosed):
+                return True
+        except Exception:
+            pass
+        return (
+            "connectionclosed" in msg
+            or "timeout" in msg
+            or "timed out" in msg
+            or "winerror 121" in msg
+            or "1006" in msg
+            or "se agotó el tiempo de espera del semáforo" in msg
+        )
+
+    last_err = None
+    for intento in range(1, 4):
+        try:
+            async with websockets.connect(DERIV_WS_URL) as ws:
+                auth_msg = json.dumps({"authorize": token_real})
+                await ws.send(auth_msg)
+                resp_auth = json.loads(await asyncio.wait_for(ws.recv(), timeout=8.0))
+                if "error" in resp_auth:
+                    print(f"⚠️ Error en auth: {resp_auth['error']['message']}")
+                    return
+                bal_msg = json.dumps({"balance": 1, "subscribe": 1})
+                await ws.send(bal_msg)
+                resp_bal = json.loads(await asyncio.wait_for(ws.recv(), timeout=8.0))
+                if "error" in resp_bal:
+                    print(f"⚠️ Error en balance: {resp_bal['error']['message']}")
+                    return
+                bal_raw = (resp_bal.get("balance") or {}).get("balance")
+                if bal_raw is None:
+                    raise ValueError("balance_payload_incompleto")
+                saldo_real = f"{float(bal_raw):.2f}"
                 ULTIMA_ACT_SALDO = time.time()
-                _update_saldo_monitor_feed(float(resp["balance"]["balance"]))
-    except Exception as e:
-        print(f"⚠️ Error obteniendo saldo: {e}")
+                _update_saldo_monitor_feed(float(bal_raw))
+                return
+        except Exception as e:
+            last_err = e
+            if _saldo_ws_transitorio(e):
+                await asyncio.sleep(0.35 * intento)
+                continue
+            break
+    if last_err is not None:
+        print(f"⚠️ Error obteniendo saldo (transitorio): {last_err}")
 
 async def refresh_saldo_real(forzado=False):
     global ULTIMA_ACT_SALDO
