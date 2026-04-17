@@ -265,8 +265,6 @@ MAX_CICLOS = len(MARTINGALA_REAL)
 # === COLUMN_SYNC: sincronización por ronda/columna ===
 SYNC_ROUND_DIR = "sync_round"
 SYNC_ROUND_STATE = os.path.join(SYNC_ROUND_DIR, "state.json")
-SYNC_RELEASE_MAX_WAIT_S = 30.0
-SYNC_RELEASE_NO_PROGRESS_S = 12.0
 
 try:
     os.makedirs(SYNC_ROUND_DIR, exist_ok=True)
@@ -371,8 +369,6 @@ async def _sync_round_wait_release(round_id: int) -> int:
     print(Fore.YELLOW + Style.BRIGHT + f"⏸️ COLUMN_SYNC standby columna: {NOMBRE_BOT} ronda #{rid} esperando liberación #{next_round}...")
     estado_bot["sync_wait"] = True
     last_hb_ts = 0.0
-    wait_start_ts = time.time()
-    last_progress_ts = wait_start_ts
     last_released = None
     first_wait_tick = True
     while not stop_event.is_set():
@@ -382,27 +378,12 @@ async def _sync_round_wait_release(round_id: int) -> int:
         except Exception:
             released = 1
         now_ts = time.time()
-        if (last_released is None) or (released != last_released):
-            last_progress_ts = now_ts
         should_write = first_wait_tick or (released != last_released) or ((now_ts - last_hb_ts) >= 2.0)
         if released >= next_round:
             estado_bot["sync_wait"] = False
             _sync_round_write_release_heartbeat(rid, next_round)
             print(Fore.GREEN + f"🔓 COLUMN_SYNC liberación detectada: ronda #{released} (bot {NOMBRE_BOT})")
             print(Fore.GREEN + Style.BRIGHT + f"▶️ COLUMN_SYNC salida standby: {NOMBRE_BOT} → ronda #{next_round}")
-            return next_round
-        total_wait_s = now_ts - wait_start_ts
-        no_progress_s = now_ts - last_progress_ts
-        if (total_wait_s >= float(SYNC_RELEASE_MAX_WAIT_S)) or (no_progress_s >= float(SYNC_RELEASE_NO_PROGRESS_S)):
-            estado_bot["sync_wait"] = False
-            estado_bot["sync_release_failsafe"] = True
-            _sync_round_write_release_heartbeat(rid, next_round)
-            if _print_once(f"sync-failsafe-{rid}", ttl=30.0):
-                print(
-                    Fore.YELLOW + Style.BRIGHT +
-                    f"⚠️ COLUMN_SYNC timeout/stale en standby | {NOMBRE_BOT} ronda #{rid} | "
-                    f"released_round={released} | salida failsafe"
-                )
             return next_round
         if should_write:
             _sync_round_write_wait_heartbeat(rid, next_round)
@@ -414,7 +395,7 @@ async def _sync_round_wait_release(round_id: int) -> int:
         await asyncio.sleep(0.80)
     estado_bot["sync_wait"] = False
     _sync_round_write_release_heartbeat(rid, next_round)
-    return next_round
+    return rid
 # === /COLUMN_SYNC ===
 
 # ✅ Asegura carpeta de órdenes (evita rarezas si el maestro aún no la creó)
