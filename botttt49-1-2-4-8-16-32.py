@@ -378,6 +378,8 @@ async def _sync_round_wait_release(round_id: int) -> int:
         except Exception:
             released = 1
         now_ts = time.time()
+        if (last_released is None) or (released != last_released):
+            last_progress_ts = now_ts
         should_write = first_wait_tick or (released != last_released) or ((now_ts - last_hb_ts) >= 2.0)
         if released >= next_round:
             estado_bot["sync_wait"] = False
