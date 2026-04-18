@@ -172,8 +172,8 @@ ARCHIVO_CSV = f"registro_enriquecido_{NOMBRE_BOT}.csv"
 ARCHIVO_TOKEN = "token_actual.txt"  # Fuente única de verdad (coincide con 5R6M)
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 ACTIVOS = ["1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"]
-MARTINGALA_DEMO = [1, 2, 4, 8, 16]
-MARTINGALA_REAL = [1, 2, 4, 8, 16]
+MARTINGALA_DEMO = [1, 2, 4]
+MARTINGALA_REAL = [1, 2, 4]
 VELAS = 20
 PAUSA_POST_OPERACION_S = 2  # Pausa uniforme tras cada operación con resultado definido (BLOQUE 1)
 # ==================== VENTANA DE DECISIÓN IA ====================
@@ -262,11 +262,9 @@ def leer_ia_ack(bot: str):
         return None
 
 MAX_CICLOS = len(MARTINGALA_REAL)
-# === COLUMN_SYNC: sincronización por ronda/columna ===
+# === LXV_SYNC_COLUMN: sincronización por ronda/columna ===
 SYNC_ROUND_DIR = "sync_round"
 SYNC_ROUND_STATE = os.path.join(SYNC_ROUND_DIR, "state.json")
-SYNC_RELEASE_MAX_WAIT_S = 30.0
-SYNC_RELEASE_NO_PROGRESS_S = 12.0
 
 try:
     os.makedirs(SYNC_ROUND_DIR, exist_ok=True)
@@ -336,7 +334,7 @@ def _sync_round_emit_close_ack(round_id: int, resultado: str, contract_id=None, 
     }
     ok = _sync_round_write_json_atomic(_sync_round_ack_path(), payload)
     if ok:
-        print(Fore.YELLOW + f"🧷 COLUMN_SYNC ACK cierre | {NOMBRE_BOT} | ronda #{rid} | {res}")
+        print(Fore.YELLOW + f"🧷 LXV_SYNC_COLUMN ACK cierre | {NOMBRE_BOT} | ronda #{rid} | {res}")
     return ok
 
 def _sync_round_write_wait_heartbeat(round_id: int, next_round: int):
@@ -365,19 +363,35 @@ def _sync_round_write_release_heartbeat(round_id: int, next_round: int):
     _sync_round_write_json_atomic(path, payload)
 
 
+SYNC_WAIT_POLL_S = 0.80
+SYNC_WAIT_HEARTBEAT_S = 2.0
+SYNC_WAIT_STALE_S = 90.0
+SYNC_WAIT_MAX_IDLE_S = 240.0
+
+
+def _sync_round_state_ts(st: dict) -> float:
+    if not isinstance(st, dict):
+        return 0.0
+    for key in ("ts", "updated_ts", "updated_at", "last_seen_ts"):
+        try:
+            val = float(st.get(key, 0.0) or 0.0)
+        except Exception:
+            continue
+        if val > 0:
+            return val
+    return 0.0
+
+
 async def _sync_round_wait_release(round_id: int) -> int:
     rid = max(1, int(round_id or 1))
     next_round = rid + 1
-    print(Fore.YELLOW + Style.BRIGHT + f"⏸️ COLUMN_SYNC standby columna: {NOMBRE_BOT} ronda #{rid} esperando liberación #{next_round}...")
+    print(Fore.YELLOW + Style.BRIGHT + f"⏸️ LXV_SYNC_COLUMN standby columna: {NOMBRE_BOT} ronda #{rid} esperando liberación #{next_round}...")
     estado_bot["sync_wait"] = True
-    estado_bot["sync_safe_hold"] = False
-    estado_bot["sync_desync_detected"] = False
-    estado_bot["sync_desync_since_ts"] = 0.0
-    estado_bot["sync_released_lag"] = 0
-    last_hb_ts = 0.0
     wait_start_ts = time.time()
+    last_hb_ts = 0.0
     last_progress_ts = wait_start_ts
     last_released = None
+    last_state_ts = 0.0
     first_wait_tick = True
     while not stop_event.is_set():
         st = _sync_round_safe_read_json(SYNC_ROUND_STATE) or {}
@@ -385,55 +399,39 @@ async def _sync_round_wait_release(round_id: int) -> int:
             released = int(st.get("released_round", 1) or 1)
         except Exception:
             released = 1
+        state_ts = _sync_round_state_ts(st)
         now_ts = time.time()
-        if (last_released is None) or (released != last_released):
+        if first_wait_tick or (released != last_released) or (state_ts > 0 and state_ts != last_state_ts):
             last_progress_ts = now_ts
-        should_write = first_wait_tick or (released != last_released) or ((now_ts - last_hb_ts) >= 2.0)
+        should_write = first_wait_tick or (released != last_released) or ((now_ts - last_hb_ts) >= SYNC_WAIT_HEARTBEAT_S)
         if released >= next_round:
             estado_bot["sync_wait"] = False
-            estado_bot["sync_safe_hold"] = False
-            estado_bot["sync_desync_detected"] = False
-            estado_bot["sync_desync_since_ts"] = 0.0
-            estado_bot["sync_released_lag"] = 0
             _sync_round_write_release_heartbeat(rid, next_round)
-            print(Fore.GREEN + f"🔓 COLUMN_SYNC liberación detectada: ronda #{released} (bot {NOMBRE_BOT})")
-            if _print_once(f"sync-resync-ok-{rid}", ttl=8.0):
-                print(Fore.GREEN + Style.BRIGHT + f"✅ COLUMN_SYNC resync OK | bot={NOMBRE_BOT} | released={released} | next={next_round}")
-            print(Fore.GREEN + Style.BRIGHT + f"▶️ COLUMN_SYNC salida standby: {NOMBRE_BOT} → ronda #{next_round}")
+            print(Fore.GREEN + f"🔓 LXV_SYNC_COLUMN liberación detectada: ronda #{released} (bot {NOMBRE_BOT})")
+            print(Fore.GREEN + Style.BRIGHT + f"▶️ LXV_SYNC_COLUMN salida standby: {NOMBRE_BOT} → ronda #{next_round}")
             return next_round
+        stale_state = (state_ts > 0) and ((now_ts - state_ts) >= SYNC_WAIT_STALE_S)
+        idle_s = now_ts - last_progress_ts
         total_wait_s = now_ts - wait_start_ts
-        no_progress_s = now_ts - last_progress_ts
-        if (total_wait_s >= float(SYNC_RELEASE_MAX_WAIT_S)) or (no_progress_s >= float(SYNC_RELEASE_NO_PROGRESS_S)):
-            estado_bot["sync_release_failsafe"] = True
-            estado_bot["sync_safe_hold"] = True
-            estado_bot["sync_desync_detected"] = True
-            if not estado_bot.get("sync_desync_since_ts"):
-                estado_bot["sync_desync_since_ts"] = now_ts
-            estado_bot["sync_released_lag"] = max(0, int(next_round - released))
-            _sync_round_write_wait_heartbeat(rid, next_round)
-            if _print_once(f"sync-desync-hold-{rid}", ttl=20.0):
-                print(
-                    Fore.YELLOW + Style.BRIGHT +
-                    f"⚠️ COLUMN_SYNC desync hold | bot={NOMBRE_BOT} | round={rid} | next={next_round} | released={released}"
-                )
-            if _print_once(f"sync-desync-hold-long-{rid}", ttl=30.0):
-                print(
-                    Fore.YELLOW + Style.BRIGHT +
-                    f"⚠️ COLUMN_SYNC desync hold | {NOMBRE_BOT} ronda #{rid} | next={next_round} | released={released} | sin operar hasta liberación maestro"
-                )
+        if (idle_s >= SYNC_WAIT_MAX_IDLE_S) and (stale_state or total_wait_s >= (SYNC_WAIT_STALE_S + SYNC_WAIT_MAX_IDLE_S)):
+            estado_bot["sync_wait"] = False
+            _sync_round_write_release_heartbeat(rid, next_round)
+            safe_round = max(rid, _sync_round_resolve_start_round())
+            print(Fore.YELLOW + f"⚠️ LXV_SYNC_COLUMN watchdog recovery: {NOMBRE_BOT} ronda #{rid} sin progreso {idle_s:.0f}s, re-sync -> #{safe_round}")
+            return safe_round
         if should_write:
             _sync_round_write_wait_heartbeat(rid, next_round)
             last_hb_ts = now_ts
             last_released = released
+            last_state_ts = state_ts
             first_wait_tick = False
         if _print_once(f"sync-standby-{rid}", ttl=6.0):
             print(Fore.CYAN + f"… standby columna {NOMBRE_BOT}: ronda #{rid}, released_round={released}")
-        await asyncio.sleep(0.80)
+        await asyncio.sleep(SYNC_WAIT_POLL_S)
     estado_bot["sync_wait"] = False
-    estado_bot["sync_safe_hold"] = False
     _sync_round_write_release_heartbeat(rid, next_round)
-    return next_round
-# === /COLUMN_SYNC ===
+    return rid
+# === /LXV_SYNC_COLUMN ===
 
 # ✅ Asegura carpeta de órdenes (evita rarezas si el maestro aún no la creó)
 try:
@@ -465,7 +463,10 @@ def leer_orden_real(bot: str):
             lim = max(30, min(ttl, 300))  # margen seguro
             if time.time() - ts > lim:
                 return None, None, 0, None
-            return max(1, min(cyc, MAX_CICLOS)), ts, quiet, src
+            ciclo_norm = max(1, min(cyc, MAX_CICLOS))
+            if cyc != ciclo_norm:
+                print(Fore.YELLOW + f"⚠️ ciclo>MAX_CICLOS detectado, normalizado a C{ciclo_norm}")
+            return ciclo_norm, ts, quiet, src
         return None, None, 0, None
     except Exception:
         if os.path.exists(tmp):
@@ -1515,61 +1516,16 @@ ws_reset_needed = asyncio.Event()  # señal para que el loop principal reabra WS
 
 def _es_error_transitorio_ws(exc: Exception) -> bool:
     """Errores de red/WS que deben reintentarse sin tumbar el ciclo."""
-    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, OSError)):
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, websockets.exceptions.ConnectionClosed, OSError)):
         return True
-    try:
-        if isinstance(exc, websockets.exceptions.ConnectionClosed):
-            return True
-    except Exception:
-        pass
-    code = str(getattr(exc, "code", "") or "")
     msg = str(exc).lower()
     return (
         "connectionclosed" in msg
-        or "connection closed" in msg
         or "timeout" in msg
         or "timed out" in msg
         or "se agotó el tiempo" in msg
         or "winerror 121" in msg
-        or code == "1006"
-        or "1006" in msg
     )
-
-def _candles_payload_valido(data: dict | None, min_count: int) -> bool:
-    try:
-        candles = (data or {}).get("candles", [])
-        if not isinstance(candles, list) or len(candles) < int(min_count):
-            return False
-        sample = candles[-1] if candles else {}
-        if not isinstance(sample, dict):
-            return False
-        return any(k in sample for k in ("close", "open", "high", "low"))
-    except Exception:
-        return False
-
-def _candles_payload_valido(data: dict | None, min_count: int) -> bool:
-    try:
-        candles = (data or {}).get("candles", [])
-        if not isinstance(candles, list) or len(candles) < int(min_count):
-            return False
-        sample = candles[-1] if candles else {}
-        if not isinstance(sample, dict):
-            return False
-        return any(k in sample for k in ("close", "open", "high", "low"))
-    except Exception:
-        return False
-
-def _candles_payload_valido(data: dict | None, min_count: int) -> bool:
-    try:
-        candles = (data or {}).get("candles", [])
-        if not isinstance(candles, list) or len(candles) < int(min_count):
-            return False
-        sample = candles[-1] if candles else {}
-        if not isinstance(sample, dict):
-            return False
-        return any(k in sample for k in ("close", "open", "high", "low"))
-    except Exception:
-        return False
 
 async def obtener_velas(ws, symbol, token, reintentos=4):
     global _ws_fail_streak
@@ -1590,10 +1546,9 @@ async def obtener_velas(ws, symbol, token, reintentos=4):
                 "granularity": 60
             }, expect_msg_type="candles", timeout=12.0)
             candles = data.get("candles", [])
-            if not _candles_payload_valido(data, VELAS):
-                raise ValueError("candles_payload_incompleto")
             # Éxito: resetea racha de fallas WS
-            _ws_fail_streak = 0
+            if candles:
+                _ws_fail_streak = 0
             return candles or []
         except websockets.exceptions.ConnectionClosed as e:
             # 1006/close: marca cooldown corto al símbolo y sube racha global
@@ -1601,7 +1556,7 @@ async def obtener_velas(ws, symbol, token, reintentos=4):
             _ws_fail_streak += 1
             if _print_once(f"ws-obt-closed-{symbol}", ttl=8):
                 print(Fore.YELLOW + f"WS cerrado ({getattr(e, 'code', '???')}) en {symbol}. Reintento {intento+1}/{reintentos}...")
-        except (asyncio.TimeoutError, json.JSONDecodeError, ValueError):
+        except (asyncio.TimeoutError, json.JSONDecodeError):
             if _print_once(f"ws-obt-timeout-{symbol}", ttl=8):
                 print(Fore.YELLOW + f"Timeout/JSON en velas {symbol}. Reintentando...")
         except RuntimeError as api_e:
@@ -1632,9 +1587,8 @@ async def obtener_velas(ws, symbol, token, reintentos=4):
                         "granularity": 60
                     }, expect_msg_type="candles", timeout=12.0)
                     candles2 = data2.get("candles", [])
-                    if not _candles_payload_valido(data2, VELAS):
-                        raise ValueError("candles_payload_incompleto")
-                    _ws_fail_streak = 0
+                    if candles2:
+                        _ws_fail_streak = 0
                     return candles2 or []
             except Exception as e2:
                 # si también falla, seguimos con backoff
@@ -1853,7 +1807,6 @@ async def vigilar_token():
 
 async def consultar_saldo_real(ws):
     global saldo_real_last
-    # 1) intento corto sobre ws actual (sin contaminar ciclo si falla transitorio)
     try:
         data = await api_call(ws, {"balance": 1}, expect_msg_type="balance", timeout=6.0)
         b = data.get("balance", {}).get("balance")
@@ -1865,27 +1818,18 @@ async def consultar_saldo_real(ws):
     except Exception as e:
         if _print_once("saldo-real-error-main", ttl=20):
             print(Fore.YELLOW + f"Balance por ws actual falló ({e}). Intento conexión dedicada...")
-    # 2) conexión dedicada con reintento finito y backoff corto
-    last_err = None
-    for intento in range(1, 4):
-        try:
-            async with websockets.connect(DERIV_WS_URL, **WS_KW) as ws2:
-                await authorize_ws(ws2, TOKEN_REAL, tries=2, timeout=6.0)
-                data2 = await api_call(ws2, {"balance": 1}, expect_msg_type="balance", timeout=6.0)
-                b2 = data2.get("balance", {}).get("balance")
-                if b2 is not None:
-                    saldo_real_last = float(b2)
-                    return saldo_real_last
-                raise ValueError("balance_payload_incompleto")
-        except Exception as e2:
-            last_err = e2
-            if _es_error_transitorio_ws(e2):
-                await asyncio.sleep(0.35 * intento)
-                continue
-            break
-
-    if _print_once("saldo-real-error-dedicada", ttl=20):
-        print(Fore.YELLOW + f"[WARN] saldo dedicada inestable ({type(last_err).__name__ if last_err else 'NA'}). Uso último saldo válido.")
+    # Conexión dedicada
+    try:
+        async with websockets.connect(DERIV_WS_URL, **WS_KW) as ws2:
+            await authorize_ws(ws2, TOKEN_REAL, tries=2, timeout=6.0)
+            data2 = await api_call(ws2, {"balance": 1}, expect_msg_type="balance", timeout=6.0)
+            b2 = data2.get("balance", {}).get("balance")
+            if b2 is not None:
+                saldo_real_last = float(b2)
+                return saldo_real_last
+    except Exception as e2:
+        if _print_once("saldo-real-error-dedicada", ttl=20):
+            print(Fore.RED + Style.BRIGHT + f"[ERROR] al consultar saldo REAL (dedicada): {e2}")
     if _print_once("saldo-real-no-disponible-final", ttl=20):
         print(Fore.YELLOW + "Balance REAL no disponible. Uso último valor válido y **no compro** si no alcanza.")
     return saldo_real_last
@@ -2575,7 +2519,9 @@ async def ejecutar_panel():
             except Exception:
                 ciclo_forzado = None
             if ciclo_forzado is not None and not (1 <= ciclo_forzado <= MAX_CICLOS):
-                ciclo_forzado = None
+                ciclo_prev = ciclo_forzado
+                ciclo_forzado = max(1, min(ciclo_forzado, MAX_CICLOS))
+                print(Fore.YELLOW + f"⚠️ ciclo>MAX_CICLOS detectado, normalizado a C{ciclo_forzado} (retenido=C{ciclo_prev})")
 
             ciclo = ciclo_maestro or ciclo_forzado or 1
             if modo_real:
@@ -2976,7 +2922,7 @@ async def ejecutar_panel():
                 await mostrar_saldos()
                 sep_ciclo()
 
-                # COLUMN_SYNC: cierre definido -> ACK -> standby hasta liberación global
+                # LXV_SYNC_COLUMN: cierre definido -> ACK -> standby hasta liberación global
                 round_id_local = int(estado_bot.get("sync_round_id", 1) or 1)
                 _sync_round_emit_close_ack(round_id_local, resultado, contract_id=contract_id, asset=symbol, ciclo=ciclo)
                 estado_bot["sync_round_id"] = await _sync_round_wait_release(round_id_local)
@@ -3032,7 +2978,7 @@ async def ejecutar_panel():
     except Exception as e:
         if _es_error_transitorio_ws(e):
             ciclo_ref = int(estado_bot.get("ciclo_actual", 1) or 1)
-            estado_bot["ciclo_forzado"] = max(1, ciclo_ref)
+            estado_bot["ciclo_forzado"] = max(1, min(MAX_CICLOS, ciclo_ref))
             reinicio_forzado.set()
             print(Fore.YELLOW + Style.BRIGHT + f"[WARN] WS/NET transitorio ({type(e).__name__}). Blindaje activo: reintento en ciclo #{estado_bot['ciclo_forzado']}.")
             await asyncio.sleep(1.2 + random.uniform(0.0, 0.5))

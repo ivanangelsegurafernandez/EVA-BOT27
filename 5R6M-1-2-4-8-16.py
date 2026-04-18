@@ -4,7 +4,7 @@
 #
 # Este script coordina:
 # - Lectura de CSV enriquecidos de los bots fulll45–fulll50
-# - Control de Martingala 1-2-4-8
+# - Control de Martingala 1-2-4
 # - Gestión de tokens DEMO/REAL
 # - IA (XGBoost) para probabilidades de éxito
 # - HUD visual con Prob IA, % éxito, saldo, meta y eventos
@@ -180,7 +180,7 @@ init(autoreset=True)
 
 # === BLOQUE 2 — CONFIGURACIÓN GLOBAL (MARTINGALA, HUD, AUDIO, IA) ===
 # === CONFIGURACIÓN DE MARTINGALA ===
-MARTI_ESCALADO = [1, 2, 4, 8, 16]  # Escalado oficial de 5 pasos
+MARTI_ESCALADO = [1, 2, 4]  # Escalado oficial de 3 pasos
 MONTO_TOL = 0.01  # Tolerancia para redondeos
 SONAR_TAMBIEN_EN_DEMO = False  # Activar sonidos para victorias en DEMO
 SONAR_SOLO_EN_GATEWIN = True   # Solo sonar dentro de la ventana GateWIN
@@ -274,16 +274,10 @@ REAL_CLASSIC_GATE = True
 MODO_PURIFICACION_REAL = True  # Llave maestra: bypassea toda promoción/activación REAL sin apagar IA/HUD.
 LXV_SYNC_REAL_ROUTE_ENABLE = True
 LXV_SYNC_REAL_SOURCE = "LXV_SYNC"
-LXV_5V1X_ONLY_ENABLE = True  # ruta REAL activa exclusiva en 5V1X
+LXV_5V1X_ONLY_ENABLE = True  # modo quirúrgico: solo 5V1X promueve REAL en ruta LXV_SYNC
 LXV_5V1X_REAL_SOURCE = "LXV_5V1X"
 LXV_5V1X_REQUIRE_DATA_QUALITY_OK = True
 LXV_5V1X_REQUIRE_ROUND_COMPLETE = True
-LXV_RXF_ENABLE = False
-LXV_RXF_ONLY_ENABLE = False
-LXV_RXF_REAL_SOURCE = "LXV_RXF"
-LXV_RXF_REQUIRE_ROUND_COMPLETE = True
-LXV_RXF_REQUIRE_DATA_QUALITY_OK = True
-LXV_RXF_MIN_MAX_PROB_ROJOS = 0.50
 
 # ✅ Umbral SOLO para auditoría/calibración (señales CERRADAS en ia_signals_log)
 # Esto es lo que querías: contar cierres desde 60% sin afectar la operativa.
@@ -636,14 +630,10 @@ def _purificacion_real_activa() -> bool:
     try:
         route_src = str(globals().get("_REAL_ROUTE_SOURCE", "") or "").strip().upper()
         allow_sync = str(globals().get("LXV_SYNC_REAL_SOURCE", "LXV_SYNC")).upper()
-        allow_rxf = str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")).upper()
         allow_5v1x = str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")).upper()
+        allowed_sources = {allow_sync}
         if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
-            allowed_sources = {allow_5v1x}
-        elif bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
-            allowed_sources = {allow_rxf}
-        else:
-            allowed_sources = {allow_sync}
+            allowed_sources.add(allow_5v1x)
         if bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False)) and route_src in allowed_sources:
             try:
                 _lxv_5v1x_event_cooldown(
@@ -2553,15 +2543,13 @@ def _update_saldo_monitor_feed(valor_saldo: float):
         return False
 # === /SALDO LIVE FEED ===
 
-# === COLUMN_SYNC: sincronización de ronda/columna maestro↔bots ===
+# === LXV_SYNC_COLUMN: sincronización de ronda/columna maestro↔bots ===
 SYNC_ROUND_DIR = "sync_round"
 SYNC_ROUND_STATE_PATH = os.path.join(SYNC_ROUND_DIR, "state.json")
 TTL_ACK_SYNC_ROUND_S = 300.0
 ACK_SYNC_ROUND_FUTURE_DRIFT_S = 20.0
 LXV_SYNC_ROUND_FAILSAFE_ENABLE = True
 LXV_SYNC_ROUND_MAX_WAIT_S = 240.0
-COLUMN_SYNC_ROUND_TIMEOUT_S = 90.0
-COLUMN_SYNC_RELEASE_INCOMPLETE_ENABLE = True
 LXV_SYNC_BOT_STALE_S = 120.0
 LXV_SYNC_PENDING_MAX_WAIT_S = 240.0
 LXV_SYNC_MIN_CLOSED_FOR_EVAL = 4
@@ -2571,7 +2559,6 @@ _LXV_LAST_EMITTED_ROUND = 0
 _SYNC_PENDING_WARN_TS = {}
 _SYNC_STALE_WARN_TS = {}
 _LXV_5V1X_EVENT_TS = {}
-_LXV_RXF_EVENT_TS = {}
 LXV_MATRIX_EXPORT_ENABLE = True
 LXV_MATRIX_DIR = script_dir
 LXV_MATRIX_EXPORT_LOCK = "lxv_matrix_export.lock"
@@ -2906,7 +2893,7 @@ def _lxv_export_round_snapshot(round_id: int, ts_round: float, closed: dict, exp
         expected = list(BOT_NAMES)
     missing = [b for b in expected if b not in closed]
     round_complete = len(missing) == 0
-    data_quality = "ok" if round_complete else ("timeout_incomplete" if str(released_reason or "").strip().lower() == "timeout_incomplete" else "partial")
+    data_quality = "ok" if round_complete else "partial"
     rows_long = []
     for idx, bot in enumerate(BOT_NAMES, start=1):
         ack = closed.get(bot, {}) if isinstance(closed.get(bot, {}), dict) else {}
@@ -3208,251 +3195,6 @@ def _lxv_5v1x_apply_real_route(candidate: dict | None, ciclo_pick: int) -> bool:
         source=str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")),
     ))
 
-def _lxv_5v1x_try_emit_for_round(round_id: int, ciclo_pick: int | None = None, trigger: str = "sync_release") -> bool:
-    global _LXV_LAST_EMITTED_ROUND
-    try:
-        rid = int(round_id)
-    except Exception:
-        rid = 0
-    if rid <= 0:
-        return False
-    if int(_LXV_LAST_EMITTED_ROUND or 0) == int(rid):
-        return False
-    round_row, feat_row = _lxv_5v1x_get_exported_rows(int(rid))
-    candidate = _lxv_5v1x_candidate_from_round(round_row, feat_row)
-    src = feat_row if isinstance(feat_row, dict) and feat_row else (round_row if isinstance(round_row, dict) else {})
-    patron = str((src.get("patron_lxv", "") or "")).upper().strip()
-    round_complete = bool(src.get("round_complete", False))
-    data_quality = str(src.get("data_quality", "") or "").strip().lower()
-    bot_x = str(src.get("bot_x_fuerte", "") or "").strip()
-    missing_raw = src.get("missing_bots", "")
-    missing_txt = str(missing_raw or "").strip()
-    _lxv_5v1x_event_cooldown(
-        key=f"eval:{rid}",
-        msg=f"🔎 5V1X eval ronda #{rid} | patron={patron or '--'} | complete={round_complete} | quality={data_quality or '--'} | bot_x={bot_x or '--'}",
-        cooldown_s=6.0,
-    )
-    if (not round_complete) or (data_quality != "ok") or bool(missing_txt):
-        _lxv_5v1x_event_cooldown(
-            key=f"blocked:{rid}",
-            msg=f"⛔ 5V1X REAL bloqueado: ronda incompleta/data_quality={data_quality or '--'}/missing={missing_txt or '[]'}",
-            cooldown_s=6.0,
-        )
-        return False
-    gate_ok, gate_reason = _lxv_5v1x_gate_ok(candidate)
-    if not gate_ok:
-        _lxv_5v1x_event_cooldown(
-            key=f"gate_no:{rid}",
-            msg=f"⏸️ 5V1X gate OFF ronda #{rid}: {gate_reason}",
-            cooldown_s=8.0,
-        )
-        return False
-    _lxv_5v1x_event_cooldown(
-        key=f"gate_ok:{rid}",
-        msg=f"✅ 5V1X gate OK ronda #{rid}: candidato REAL válido",
-        cooldown_s=8.0,
-    )
-    if ciclo_pick is None:
-        ciclo_pick = ciclo_martingala_siguiente()
-        saldo_val = obtener_valor_saldo()
-        if reset_martingala_por_saldo(ciclo_pick, saldo_val):
-            ciclo_pick = 1
-    ok_emit = bool(_lxv_5v1x_apply_real_route(candidate, int(ciclo_pick)))
-    bot_pick = str((candidate or {}).get("bot_x_fuerte", "") or "").strip()
-    if ok_emit:
-        _LXV_LAST_EMITTED_ROUND = int(rid)
-        if bot_pick in BOT_NAMES:
-            try:
-                estado_bots[bot_pick]["ciclo_actual"] = int(ciclo_pick)
-            except Exception:
-                pass
-        _lxv_5v1x_event_cooldown(
-            key=f"emit_ok:{rid}",
-            msg=f"🚨 LXV_5V1X REAL emitido: ronda #{rid} -> {bot_pick or '--'} ciclo_global C{int(ciclo_pick)}",
-            cooldown_s=6.0,
-        )
-        return True
-    _lxv_5v1x_event_cooldown(
-        key=f"emit_no:{rid}",
-        msg=f"⚠️ LXV_5V1X REAL no emitido ronda #{rid} | gate OK pero falló emisión owner/token/purificación/lock",
-        cooldown_s=6.0,
-    )
-    return False
-
-def _lxv_rxf_event_cooldown(key: str, msg: str, cooldown_s: float = 10.0) -> None:
-    now = float(time.time())
-    last = float(_LXV_RXF_EVENT_TS.get(key, 0.0) or 0.0)
-    if (now - last) < float(cooldown_s):
-        return
-    _LXV_RXF_EVENT_TS[key] = now
-    agregar_evento(msg)
-
-def _lxv_rxf_get_exported_rows(round_id: int) -> tuple[dict, dict]:
-    return _lxv_5v1x_get_exported_rows(int(round_id))
-
-def _lxv_rxf_candidate_from_round(round_row: dict | None, feat_row: dict | None) -> dict | None:
-    row = round_row if isinstance(round_row, dict) else {}
-    feat = feat_row if isinstance(feat_row, dict) else {}
-    src = feat if feat else row
-    bot = str((src.get("bot_x_fuerte", "") or "")).strip()
-    try:
-        round_id = int((row.get("round_id", feat.get("round_id", 0)) or 0))
-    except Exception:
-        round_id = 0
-    candidate = {
-        "round_id": round_id,
-        "patron_lxv": str(src.get("patron_lxv", row.get("patron_lxv", "")) or ""),
-        "bot_x_fuerte": bot,
-        "round_complete": bool(src.get("round_complete", row.get("round_complete", False))),
-        "data_quality": str(src.get("data_quality", row.get("data_quality", "")) or ""),
-        "max_prob_rojos": src.get("max_prob_rojos", row.get("max_prob_rojos", None)),
-    }
-    return candidate if candidate["round_id"] > 0 else None
-
-def _lxv_rxf_gate_ok(candidate: dict | None) -> tuple[bool, str]:
-    c = candidate if isinstance(candidate, dict) else {}
-    if str(c.get("patron_lxv", "")).upper() != "4V2X":
-        return False, "patron_no_4v2x"
-    bot = str(c.get("bot_x_fuerte", "") or "").strip()
-    if not bot:
-        return False, "bot_x_fuerte_vacio"
-    if bot not in BOT_NAMES:
-        return False, "bot_x_fuerte_fuera_de_lista"
-    if bool(globals().get("LXV_RXF_REQUIRE_ROUND_COMPLETE", True)) and not bool(c.get("round_complete", False)):
-        return False, "round_incomplete"
-    dq = str(c.get("data_quality", "") or "").strip().lower()
-    if bool(globals().get("LXV_RXF_REQUIRE_DATA_QUALITY_OK", True)) and dq != "ok":
-        return False, "data_quality_no_ok"
-    try:
-        max_prob_rojos = float(c.get("max_prob_rojos"))
-    except Exception:
-        return False, "max_prob_rojos_invalido"
-    if not math.isfinite(max_prob_rojos):
-        return False, "max_prob_rojos_invalido"
-    if max_prob_rojos < float(globals().get("LXV_RXF_MIN_MAX_PROB_ROJOS", 0.50)):
-        return False, "max_prob_rojos_bajo"
-    return True, "ok"
-
-def _lxv_rxf_pick_real_bot(candidate: dict | None) -> str | None:
-    ok, _ = _lxv_rxf_gate_ok(candidate)
-    if not ok:
-        return None
-    bot = str((candidate or {}).get("bot_x_fuerte", "") or "").strip()
-    return bot if bot in BOT_NAMES else None
-
-def _lxv_rxf_apply_real_route(candidate: dict | None, ciclo_pick: int) -> bool:
-    bot_pick = _lxv_rxf_pick_real_bot(candidate)
-    rid = int((candidate or {}).get("round_id", 0) or 0)
-    if not bot_pick:
-        _lxv_rxf_event_cooldown(
-            key=f"invalid:{rid}",
-            msg="⏸️ Sin LXV-RXF+ válido | no hay promoción REAL",
-            cooldown_s=8.0,
-        )
-        return False
-    _lxv_rxf_event_cooldown(
-        key=f"route:{rid}",
-        msg=f"🧪 REAL route activa: {str(globals().get('LXV_RXF_REAL_SOURCE', 'LXV_RXF'))}",
-        cooldown_s=8.0,
-    )
-    _lxv_rxf_event_cooldown(
-        key=f"pick:{rid}",
-        msg=f"🎯 LXV-RXF+ gate OK | ronda #{rid} | bot_x_fuerte={bot_pick} | REAL habilitado",
-        cooldown_s=8.0,
-    )
-    return bool(emitir_real_autorizado(
-        bot_pick,
-        int(ciclo_pick),
-        source=str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")),
-    ))
-
-def _lxv_rxf_event_cooldown(key: str, msg: str, cooldown_s: float = 10.0) -> None:
-    now = float(time.time())
-    last = float(_LXV_RXF_EVENT_TS.get(key, 0.0) or 0.0)
-    if (now - last) < float(cooldown_s):
-        return
-    _LXV_RXF_EVENT_TS[key] = now
-    agregar_evento(msg)
-
-def _lxv_rxf_get_exported_rows(round_id: int) -> tuple[dict, dict]:
-    return _lxv_5v1x_get_exported_rows(int(round_id))
-
-def _lxv_rxf_candidate_from_round(round_row: dict | None, feat_row: dict | None) -> dict | None:
-    row = round_row if isinstance(round_row, dict) else {}
-    feat = feat_row if isinstance(feat_row, dict) else {}
-    src = feat if feat else row
-    bot = str((src.get("bot_x_fuerte", "") or "")).strip()
-    try:
-        round_id = int((row.get("round_id", feat.get("round_id", 0)) or 0))
-    except Exception:
-        round_id = 0
-    candidate = {
-        "round_id": round_id,
-        "patron_lxv": str(src.get("patron_lxv", row.get("patron_lxv", "")) or ""),
-        "bot_x_fuerte": bot,
-        "round_complete": bool(src.get("round_complete", row.get("round_complete", False))),
-        "data_quality": str(src.get("data_quality", row.get("data_quality", "")) or ""),
-        "max_prob_rojos": src.get("max_prob_rojos", row.get("max_prob_rojos", None)),
-    }
-    return candidate if candidate["round_id"] > 0 else None
-
-def _lxv_rxf_gate_ok(candidate: dict | None) -> tuple[bool, str]:
-    c = candidate if isinstance(candidate, dict) else {}
-    if str(c.get("patron_lxv", "")).upper() != "4V2X":
-        return False, "patron_no_4v2x"
-    bot = str(c.get("bot_x_fuerte", "") or "").strip()
-    if not bot:
-        return False, "bot_x_fuerte_vacio"
-    if bot not in BOT_NAMES:
-        return False, "bot_x_fuerte_fuera_de_lista"
-    if bool(globals().get("LXV_RXF_REQUIRE_ROUND_COMPLETE", True)) and not bool(c.get("round_complete", False)):
-        return False, "round_incomplete"
-    dq = str(c.get("data_quality", "") or "").strip().lower()
-    if bool(globals().get("LXV_RXF_REQUIRE_DATA_QUALITY_OK", True)) and dq != "ok":
-        return False, "data_quality_no_ok"
-    try:
-        max_prob_rojos = float(c.get("max_prob_rojos"))
-    except Exception:
-        return False, "max_prob_rojos_invalido"
-    if not math.isfinite(max_prob_rojos):
-        return False, "max_prob_rojos_invalido"
-    if max_prob_rojos < float(globals().get("LXV_RXF_MIN_MAX_PROB_ROJOS", 0.50)):
-        return False, "max_prob_rojos_bajo"
-    return True, "ok"
-
-def _lxv_rxf_pick_real_bot(candidate: dict | None) -> str | None:
-    ok, _ = _lxv_rxf_gate_ok(candidate)
-    if not ok:
-        return None
-    bot = str((candidate or {}).get("bot_x_fuerte", "") or "").strip()
-    return bot if bot in BOT_NAMES else None
-
-def _lxv_rxf_apply_real_route(candidate: dict | None, ciclo_pick: int) -> bool:
-    bot_pick = _lxv_rxf_pick_real_bot(candidate)
-    rid = int((candidate or {}).get("round_id", 0) or 0)
-    if not bot_pick:
-        _lxv_rxf_event_cooldown(
-            key=f"invalid:{rid}",
-            msg="⏸️ Sin LXV-RXF+ válido | no hay promoción REAL",
-            cooldown_s=8.0,
-        )
-        return False
-    _lxv_rxf_event_cooldown(
-        key=f"route:{rid}",
-        msg=f"🧪 REAL route activa: {str(globals().get('LXV_RXF_REAL_SOURCE', 'LXV_RXF'))}",
-        cooldown_s=8.0,
-    )
-    _lxv_rxf_event_cooldown(
-        key=f"pick:{rid}",
-        msg=f"🎯 LXV-RXF+ gate OK | ronda #{rid} | bot_x_fuerte={bot_pick} | REAL habilitado",
-        cooldown_s=8.0,
-    )
-    return bool(emitir_real_autorizado(
-        bot_pick,
-        int(ciclo_pick),
-        source=str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")),
-    ))
-
 def _sync_round_tick_maestro():
     global _SYNC_ROUND_LAST_ANNOUNCED, _LXV_LAST_EMITTED_ROUND
     _sync_round_bootstrap_state(force=False)
@@ -3481,7 +3223,7 @@ def _sync_round_tick_maestro():
         expected = list(BOT_NAMES)
 
     if _SYNC_ROUND_LAST_ANNOUNCED != round_id:
-        agregar_evento(f"🧭 COLUMN_SYNC ronda #{round_id} iniciada ({len(expected)} bots esperados).")
+        agregar_evento(f"🧭 LXV_SYNC_COLUMN ronda #{round_id} iniciada ({len(expected)} bots esperados).")
         _SYNC_ROUND_LAST_ANNOUNCED = round_id
 
     closed = {}
@@ -3497,7 +3239,7 @@ def _sync_round_tick_maestro():
             last_p = float(_SYNC_PENDING_WARN_TS.get(bot, 0.0) or 0.0)
             if (now_p - last_p) >= 20.0:
                 _SYNC_PENDING_WARN_TS[bot] = now_p
-                agregar_evento(f"⏳ COLUMN_SYNC: {bot} pendiente por contrato incierto; no cuenta como cierre.")
+                agregar_evento(f"⏳ LXV_SYNC_COLUMN: {bot} pendiente por contrato incierto; no cuenta como cierre.")
             continue
         try:
             ack_round = int(ack.get("round_id", 0) or 0)
@@ -3517,13 +3259,13 @@ def _sync_round_tick_maestro():
             last_s = float(_SYNC_STALE_WARN_TS.get(bot, 0.0) or 0.0)
             if (now_ts - last_s) >= 20.0:
                 _SYNC_STALE_WARN_TS[bot] = now_ts
-                agregar_evento(f"🧹 COLUMN_SYNC: ACK stale ignorado para {bot}.")
+                agregar_evento(f"🧹 LXV_SYNC_COLUMN: ACK stale ignorado para {bot}.")
             continue
         if ack_ts > (now_ts + float(ACK_SYNC_ROUND_FUTURE_DRIFT_S)):
             last_s = float(_SYNC_STALE_WARN_TS.get(bot, 0.0) or 0.0)
             if (now_ts - last_s) >= 20.0:
                 _SYNC_STALE_WARN_TS[bot] = now_ts
-                agregar_evento(f"🧹 COLUMN_SYNC: ACK con timestamp futuro ignorado para {bot}.")
+                agregar_evento(f"🧹 LXV_SYNC_COLUMN: ACK con timestamp futuro ignorado para {bot}.")
             continue
         res = str(ack.get("resultado", "")).upper().strip()
         if res not in ("GANANCIA", "PÉRDIDA"):
@@ -3540,14 +3282,32 @@ def _sync_round_tick_maestro():
     missing = [b for b in expected if b not in closed]
     now_ts = float(time.time())
     wait_s = max(0.0, now_ts - float(started_at))
+    stale_ignored = []
+    if bool(LXV_SYNC_ROUND_FAILSAFE_ENABLE) and missing:
+        for bot in missing:
+            ack_bot = _sync_round_safe_read_json(_sync_round_ack_path(bot)) or {}
+            st_bot = estado_bots.get(bot, {}) if isinstance(estado_bots.get(bot, {}), dict) else {}
+            last_seen = float(ack_bot.get("last_seen_ts", st_bot.get("sync_last_seen_ts", st_bot.get("last_seen_ts", 0.0))) or 0.0)
+            ack_ts_any = float(ack_bot.get("ts", 0.0) or 0.0)
+            pending = bool(st_bot.get("pending_contract_resolution", False) or ack_bot.get("pending_contract_resolution", False))
+            pending_since = float(st_bot.get("pending_since_ts", 0.0) or 0.0)
+            pending_old = bool(pending and pending_since > 0 and (now_ts - pending_since) >= float(LXV_SYNC_PENDING_MAX_WAIT_S))
+            stale_seen = bool(last_seen > 0 and (now_ts - last_seen) >= float(LXV_SYNC_BOT_STALE_S))
+            stale_ack = bool(ack_ts_any > 0 and (now_ts - ack_ts_any) >= float(TTL_ACK_SYNC_ROUND_S))
+            timed_out = bool(wait_s >= float(LXV_SYNC_ROUND_MAX_WAIT_S))
+            if stale_seen or stale_ack or pending_old or timed_out:
+                stale_ignored.append(bot)
+
+    effective_expected = [b for b in expected if b not in stale_ignored] if stale_ignored else list(expected)
+    effective_need = max(1, len(effective_expected))
     prev_n = int(_SYNC_ROUND_LAST_CLOSED_COUNT.get(round_id, -1))
     if n_closed != prev_n:
         _SYNC_ROUND_LAST_CLOSED_COUNT[round_id] = n_closed
-        agregar_evento(f"🧩 COLUMN_SYNC cierres ronda #{round_id}: {n_closed}/{len(expected)}.")
+        agregar_evento(f"🧩 LXV_SYNC_COLUMN cierres ronda #{round_id}: {n_closed}/{len(expected)}.")
 
     completed_normal = bool(n_closed >= len(expected))
-    timeout_incomplete = bool((not completed_normal) and bool(COLUMN_SYNC_RELEASE_INCOMPLETE_ENABLE) and wait_s >= float(COLUMN_SYNC_ROUND_TIMEOUT_S))
-    completed = bool(completed_normal or timeout_incomplete)
+    completed_failsafe = bool(stale_ignored and n_closed >= effective_need)
+    completed = bool(completed_normal or completed_failsafe)
     next_round = round_id + 1 if completed else round_id
     next_released = max(released_round, next_round if completed else released_round)
 
@@ -3555,13 +3315,13 @@ def _sync_round_tick_maestro():
         "round_id": next_round if completed else round_id,
         "released_round": next_released,
         "expected_bots": expected,
-        "expected_bots_effective": list(expected),
+        "expected_bots_effective": effective_expected,
         "closed_bots": closed,
         "completed": completed,
-        "status": "released_timeout_incomplete" if timeout_incomplete else ("released" if completed else "waiting_closures"),
-        "reason": "timeout_incomplete" if timeout_incomplete else ("all_bots_closed" if completed else "waiting_bots"),
+        "status": "released_failsafe" if completed_failsafe else ("released" if completed else "waiting_closures"),
+        "reason": "failsafe_stale_or_timeout" if completed_failsafe else ("all_bots_closed" if completed else "waiting_bots"),
         "bots_missing": missing,
-        "bots_stale_ignored": [],
+        "bots_stale_ignored": stale_ignored,
         "round_wait_s": float(wait_s),
         "started_at": float(time.time()) if completed else float(started_at),
         "ts": time.time(),
@@ -3569,26 +3329,18 @@ def _sync_round_tick_maestro():
     _sync_round_write_json_atomic(SYNC_ROUND_STATE_PATH, payload)
 
     if completed:
-        if timeout_incomplete:
-            agregar_evento(f"⚠️ COLUMN_SYNC release timeout | ronda #{round_id} | missing={missing} | liberada como timeout_incomplete | REAL bloqueado para esta ronda")
-            if _print_once(f"column-sync-release-timeout-{round_id}", ttl=12.0):
-                agregar_evento(f"⚠️ COLUMN_SYNC release timeout_incomplete | ronda #{round_id} | missing={missing}")
-        else:
-            if _print_once(f"column-sync-release-normal-{round_id}", ttl=12.0):
-                agregar_evento(f"✅ COLUMN_SYNC release normal | ronda #{round_id}")
+        if completed_failsafe and stale_ignored:
+            agregar_evento(f"🟠 LXV_SYNC_COLUMN failsafe: liberando ronda #{round_id} sin {stale_ignored} por stale/timeout.")
+        agregar_evento(f"✅ LXV_SYNC_COLUMN columna/ronda #{round_id} COMPLETA.")
+        agregar_evento(f"🚀 LXV_SYNC_COLUMN ronda #{next_round} LIBERADA.")
         _lxv_export_round_snapshot(
             round_id=int(round_id),
             ts_round=float(now_ts),
             closed=dict(closed),
             expected=list(expected),
-            stale_ignored=[],
+            stale_ignored=list(stale_ignored),
             released_reason=str(payload.get("reason", "")),
         )
-        if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
-            _lxv_5v1x_try_emit_for_round(
-                int(round_id),
-                trigger=f"sync_release_{str(payload.get('reason', '') or '').lower()}",
-            )
         snapshot = _lxv_round_snapshot(round_id, closed)
         if len(snapshot) < int(LXV_SYNC_MIN_CLOSED_FOR_EVAL):
             pick, patron, motivo = None, f"{len([x for x in snapshot if x.get('resultado') == 'GANANCIA'])}V/{len([x for x in snapshot if x.get('resultado') == 'PÉRDIDA'])}X", "masa mínima insuficiente para evaluar LXV_REAL"
@@ -3607,9 +3359,28 @@ def _sync_round_tick_maestro():
                 f"🧠 LXV columna #{round_id}: {patron} → candidato REAL {bot_pick} ({motivo}) "
                 f"| snapshot=C{ciclo_snapshot} | global=C{ciclo_pick}"
             )
-            if int(_LXV_LAST_EMITTED_ROUND or 0) != int(round_id) and not bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+            if int(_LXV_LAST_EMITTED_ROUND or 0) != int(round_id):
                 ok_emit = False
-                ok_emit = emitir_real_autorizado(bot_pick, ciclo_pick, source=LXV_SYNC_REAL_SOURCE)
+                if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
+                    round_row, feat_row = _lxv_5v1x_get_exported_rows(int(round_id))
+                    candidate = _lxv_5v1x_candidate_from_round(round_row, feat_row)
+                    gate_ok, gate_reason = _lxv_5v1x_gate_ok(candidate)
+                    if gate_ok:
+                        _lxv_5v1x_event_cooldown(
+                            key=f"gate_ok:{round_id}",
+                            msg=f"✅ 5V1X gate OK ronda #{round_id}: candidato REAL válido",
+                            cooldown_s=8.0,
+                        )
+                        ok_emit = bool(_lxv_5v1x_apply_real_route(candidate, ciclo_pick))
+                    else:
+                        _lxv_5v1x_event_cooldown(
+                            key=f"gate_no:{round_id}",
+                            msg=f"⏸️ 5V1X gate OFF ronda #{round_id}: {gate_reason}",
+                            cooldown_s=8.0,
+                        )
+                        ok_emit = False
+                else:
+                    ok_emit = emitir_real_autorizado(bot_pick, ciclo_pick, source=LXV_SYNC_REAL_SOURCE)
                 _LXV_LAST_EMITTED_ROUND = int(round_id) if ok_emit else int(_LXV_LAST_EMITTED_ROUND or 0)
                 if ok_emit:
                     try:
@@ -3624,6 +3395,12 @@ def _sync_round_tick_maestro():
                         f"⚠️ LXV_SYNC REAL no emitido en ronda #{round_id} (lock/purificación/estado)."
                     )
         else:
+            if str(patron).upper() == "4V/2X":
+                _lxv_5v1x_event_cooldown(
+                    key=f"4v2x_off:{round_id}",
+                    msg=f"🚫 4V2X ignorado en ronda #{round_id}: promoción REAL OFF",
+                    cooldown_s=8.0,
+                )
             agregar_evento(f"ℹ️ LXV columna #{round_id}: {patron} → {motivo}.")
         # Higiene mínima: baja "sync_wait" en bots ya contabilizados
         for bot in closed.keys():
@@ -3636,7 +3413,7 @@ def _sync_round_tick_maestro():
                     _sync_round_write_json_atomic(ack_path, ack_cur)
             except Exception:
                 pass
-# === /COLUMN_SYNC ===
+# === /LXV_SYNC_COLUMN ===
 
 # === PATCH: REAL INMEDIATO EN HUD AL EMITIR ORDEN (sin esperar compra) ===
 # Objetivo:
@@ -3757,24 +3534,8 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
     try:
         if _purificacion_real_activa():
             _emitir_marca_purificacion_real()
-            try:
-                agregar_evento(
-                    f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                    f"ciclo={int(ciclo)} | owner_mem={str(REAL_OWNER_LOCK)} | "
-                    f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
-                )
-            except Exception:
-                pass
             return False
         if bot not in BOT_NAMES:
-            try:
-                agregar_evento(
-                    f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                    f"ciclo={int(ciclo)} | owner_mem={str(REAL_OWNER_LOCK)} | "
-                    f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
-                )
-            except Exception:
-                pass
             return False
 
         now = time.time()
@@ -3788,11 +3549,6 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
         if owner_lock in BOT_NAMES and owner_lock != bot:
             try:
                 agregar_evento(f"🔒 REAL bloqueado: {owner_lock.upper()} sigue activo. Ignorando intento de {bot.upper()}.")
-                agregar_evento(
-                    f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                    f"ciclo={int(ciclo)} | owner_mem={str(owner_lock)} | "
-                    f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
-                )
             except Exception:
                 pass
             try:
@@ -3844,14 +3600,6 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
                 if not got:
                     agregar_evento("⚠️ Token REAL no escrito: lock real.lock ocupado. Se evita activar sin exclusión.")
                     try:
-                        agregar_evento(
-                            f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                            f"ciclo={int(ciclo_obj)} | owner_mem={str(REAL_OWNER_LOCK)} | "
-                            f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
-                        )
-                    except Exception:
-                        pass
-                    try:
                         if origen == "orden_real":
                             limpiar_orden_real(bot)
                     except Exception:
@@ -3860,14 +3608,6 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
                 ok_write = bool(write_token_atomic(TOKEN_FILE, f"REAL:{bot}"))
                 if not ok_write:
                     agregar_evento("⚠️ Token REAL no escrito: fallo de persistencia en token_actual.txt.")
-                    try:
-                        agregar_evento(
-                            f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                            f"ciclo={int(ciclo_obj)} | owner_mem={str(REAL_OWNER_LOCK)} | "
-                            f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
-                        )
-                    except Exception:
-                        pass
                     try:
                         if origen == "orden_real":
                             limpiar_orden_real(bot)
@@ -3968,14 +3708,6 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
 
     if _purificacion_real_activa():
         _emitir_marca_purificacion_real()
-        try:
-            agregar_evento(
-                f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                f"ciclo={int(ciclo)} | owner_mem={str(REAL_OWNER_LOCK)} | "
-                f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
-            )
-        except Exception:
-            pass
         return False
 
     # 🔒 No crear orden si ya hay otro owner REAL activo.
@@ -3987,11 +3719,6 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
     if owner_lock in BOT_NAMES and owner_lock != bot:
         try:
             agregar_evento(f"🔒 Orden REAL bloqueada para {bot.upper()}: {owner_lock.upper()} está activo.")
-            agregar_evento(
-                f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                f"ciclo={int(ciclo)} | owner_mem={str(owner_lock)} | "
-                f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
-            )
         except Exception:
             pass
         return False
@@ -4035,15 +3762,6 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
             _REAL_SHADOW_MICRO_OPEN_TS.append(float(time.time()))
         except Exception:
             pass
-    else:
-        try:
-            agregar_evento(
-                f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                f"ciclo={int(ciclo)} | owner_mem={str(owner_after_mem)} | "
-                f"owner_file={str(owner_after_file)} | ok_activate={str(bool(ok_activate))}"
-            )
-        except Exception:
-            pass
     return ok
 # === FIN PATCH REAL INMEDIATO ===
 
@@ -4054,14 +3772,10 @@ def emitir_real_autorizado(bot: str, ciclo: int, source: str = "LEGACY") -> bool
     """
     src = str(source or "LEGACY").strip().upper()
     allow_sync = str(globals().get("LXV_SYNC_REAL_SOURCE", "LXV_SYNC")).upper()
-    allow_rxf = str(globals().get("LXV_RXF_REAL_SOURCE", "LXV_RXF")).upper()
     allow_5v1x = str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")).upper()
+    allow_sources = {allow_sync}
     if bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)):
-        allow_sources = {allow_5v1x}
-    elif bool(globals().get("LXV_RXF_ONLY_ENABLE", False)):
-        allow_sources = {allow_rxf}
-    else:
-        allow_sources = {allow_sync}
+        allow_sources.add(allow_5v1x)
     if bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False)) and src not in allow_sources:
         agregar_evento(
             f"🧊 REAL source rechazada: {src} (permitidas={','.join(sorted(allow_sources))})."
@@ -4071,19 +3785,14 @@ def emitir_real_autorizado(bot: str, ciclo: int, source: str = "LEGACY") -> bool
     prev_src = globals().get("_REAL_ROUTE_SOURCE", None)
     globals()["_REAL_ROUTE_SOURCE"] = src
     try:
-        ok_emit = bool(escribir_orden_real(bot, int(ciclo)))
-        if not ok_emit:
-            try:
-                owner_after_mem = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else None
-                owner_after_file = leer_token_archivo_raw()
-                agregar_evento(
-                    f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
-                    f"ciclo={int(ciclo)} | owner_mem={str(owner_after_mem)} | "
-                    f"owner_file={str(owner_after_file)} | ok_activate={str(ok_emit)}"
-                )
-            except Exception:
-                pass
-        return ok_emit
+        ciclo_req = int(ciclo)
+    except Exception:
+        ciclo_req = 1
+    ciclo_norm = max(1, min(ciclo_req, MAX_CICLOS))
+    if ciclo_req != ciclo_norm:
+        agregar_evento(f"⚠️ ciclo>MAX_CICLOS detectado, normalizado a C{ciclo_norm} (solicitado=C{ciclo_req}).")
+    try:
+        return bool(escribir_orden_real(bot, ciclo_norm))
     finally:
         globals()["_REAL_ROUTE_SOURCE"] = prev_src
 
@@ -6267,12 +5976,12 @@ def _log_operational_degradation_runtime(ttl_s: float = 60.0):
         if sig != str(cache.get("sig", "")) or (now - float(cache.get("ts", 0.0))) >= float(max(20.0, ttl_s)):
             agregar_evento(
                 "📊 Degradación vivo: "
-                f"WR_C1={np.mean(wr_vals)*100:.1f}% ciclo={np.mean(cyc_vals):.2f} C4+={np.mean(deep_vals)*100:.1f}% "
+                f"WR_C1={np.mean(wr_vals)*100:.1f}% ciclo={np.mean(cyc_vals):.2f} C{int(MAX_CICLOS)}+={np.mean(deep_vals)*100:.1f}% "
                 f"PnL_roll={sum(pnl_vals):+.2f} | peor={worst[0]}/{worst[1]} {worst[2]['pnl']:+.2f} "
                 f"mejor={best[0]}/{best[1]} {best[2]['pnl']:+.2f}"
             )
             if (np.mean(wr_vals) < 0.46) or (np.mean(deep_vals) > 0.50) or (sum(pnl_vals) < 0.0):
-                agregar_evento("🚨 Alerta degradación: calidad operativa en caída (WR_C1/PnL/C4+).")
+                agregar_evento(f"🚨 Alerta degradación: calidad operativa en caída (WR_C1/PnL/C{int(MAX_CICLOS)}+).")
         globals()["_ASSET_RUNTIME_LOG_CACHE"] = {"ts": now, "sig": sig}
     except Exception:
         pass
@@ -13614,7 +13323,7 @@ def mostrar_panel():
     else:
         print(padding + Fore.GREEN + "🟢 MODO OPERACIÓN ACTIVO – Escaneando…")
     if _purificacion_real_activa():
-        print(padding + Fore.YELLOW + "🧪 IA REAL purificada | LXV_5V1X habilitado")
+        print(padding + Fore.YELLOW + "🧪 IA REAL purificada | LXV_SYNC habilitado")
 
     # Etapa activa para depuración de flujo
     try:
@@ -13715,24 +13424,21 @@ def mostrar_panel():
             canary_prog_txt = f"{c_prog}/{c_tgt}" if canary_live else "-"
 
             why_reasons = []
-            if _lxv_5v1x_bypass_aux_activo():
-                why_reasons.append("5v1x_bypass_aux")
-            else:
-                if warmup_live:
-                    why_reasons.append("warmup")
-                if (not reliable) and (not canary_live) and (not auto_adapt_ok):
-                    if not bool(AUTO_REAL_ALLOW_UNRELIABLE_POST_N15):
-                        why_reasons.append("adapt_off")
-                    if not post_n15:
-                        why_reasons.append("n15_pending")
-                    if n_samples_live < int(AUTO_REAL_UNRELIABLE_MIN_N):
-                        why_reasons.append(f"n<{int(AUTO_REAL_UNRELIABLE_MIN_N)}")
-                    if best_prob < float(unrel_thr_live):
-                        why_reasons.append(f"p_best<{float(unrel_thr_live)*100:.1f}%")
-                if confirm_h < confirm_need_h:
-                    why_reasons.append(f"confirm_pending({confirm_txt_h})")
-                if not trigger_ok_h:
-                    why_reasons.append("trigger_no")
+            if warmup_live:
+                why_reasons.append("warmup")
+            if (not reliable) and (not canary_live) and (not auto_adapt_ok):
+                if not bool(AUTO_REAL_ALLOW_UNRELIABLE_POST_N15):
+                    why_reasons.append("adapt_off")
+                if not post_n15:
+                    why_reasons.append("n15_pending")
+                if n_samples_live < int(AUTO_REAL_UNRELIABLE_MIN_N):
+                    why_reasons.append(f"n<{int(AUTO_REAL_UNRELIABLE_MIN_N)}")
+                if best_prob < float(unrel_thr_live):
+                    why_reasons.append(f"p_best<{float(unrel_thr_live)*100:.1f}%")
+            if confirm_h < confirm_need_h:
+                why_reasons.append(f"confirm_pending({confirm_txt_h})")
+            if not trigger_ok_h:
+                why_reasons.append("trigger_no")
             try:
                 ctt_status_h = str(CTT_STATE.get("status", "NEUTRAL") or "NEUTRAL")
                 ctt_gate_h = str(CTT_STATE.get("gate", "NEUTRAL") or "NEUTRAL")
@@ -13909,28 +13615,24 @@ def mostrar_panel():
                 rep_go = auditar_calibracion_seniales_reales(min_prob=float(IA_CALIB_THRESHOLD)) or {}
                 closed_go = int(rep_go.get("n_total_closed", rep_go.get("n", 0)) or 0)
                 hg_go = _estado_guardrail_ia_fuerte(force=False)
-                if _lxv_5v1x_bypass_aux_activo():
-                    go_ok = True
-                    go_reasons = ["5v1x_bypass_aux"]
-                else:
-                    go_ok = bool(
-                        (n_samples_go >= int(REAL_GO_N_MIN))
-                        and (closed_go >= int(REAL_GO_CLOSED_MIN))
-                        and rel_go
-                        and (auc_go >= 0.53)
-                        and (not bool(hg_go.get("hard_block", False)))
-                    )
-                    go_reasons = []
-                    if n_samples_go < int(REAL_GO_N_MIN):
-                        go_reasons.append(f"n_samples<{int(REAL_GO_N_MIN)}")
-                    if closed_go < int(REAL_GO_CLOSED_MIN):
-                        go_reasons.append(f"closed<{int(REAL_GO_CLOSED_MIN)}")
-                    if not rel_go:
-                        go_reasons.append("reliable=false")
-                    if auc_go < 0.53:
-                        go_reasons.append("auc<0.53")
-                    if bool(hg_go.get("hard_block", False)):
-                        go_reasons.append("hard_guard=RED")
+                go_ok = bool(
+                    (n_samples_go >= int(REAL_GO_N_MIN))
+                    and (closed_go >= int(REAL_GO_CLOSED_MIN))
+                    and rel_go
+                    and (auc_go >= 0.53)
+                    and (not bool(hg_go.get("hard_block", False)))
+                )
+                go_reasons = []
+                if n_samples_go < int(REAL_GO_N_MIN):
+                    go_reasons.append(f"n_samples<{int(REAL_GO_N_MIN)}")
+                if closed_go < int(REAL_GO_CLOSED_MIN):
+                    go_reasons.append(f"closed<{int(REAL_GO_CLOSED_MIN)}")
+                if not rel_go:
+                    go_reasons.append("reliable=false")
+                if auc_go < 0.53:
+                    go_reasons.append("auc<0.53")
+                if bool(hg_go.get("hard_block", False)):
+                    go_reasons.append("hard_guard=RED")
                 go_line = (
                     f"🧭 GO/NO-GO REAL: {'GO ✅' if go_ok else 'NO-GO ❌'} "
                     f"(n={n_samples_go}, closed={closed_go}, auc={auc_go:.3f}, rel={'sí' if rel_go else 'no'}, HG={hg_go.get('level','GREEN')})"
@@ -16133,39 +15835,8 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
     return EMBUDO_DECISION_STATE
 
 
-def _lxv_5v1x_bypass_aux_activo() -> bool:
-    """Bypass de candados auxiliares cuando 5V1X gobierna REAL en modo exclusivo."""
-    try:
-        return bool(globals().get("LXV_5V1X_ONLY_ENABLE", False))
-    except Exception:
-        return False
-
-
 def _resolver_embudo_final(candidatos: list, dyn_gate: dict | None, estado_real: str, meta_live: dict | None) -> dict:
     """Embudo unificado: selección -> calidad blanda -> modulación -> estado final."""
-    if _lxv_5v1x_bypass_aux_activo():
-        top1_bot = str(candidatos[0][1]) if candidatos else None
-        top1_prob = float(candidatos[0][2] or 0.0) if candidatos else 0.0
-        top2_bot = str(candidatos[1][1]) if len(candidatos) > 1 else None
-        top2_prob = float(candidatos[1][2] or 0.0) if len(candidatos) > 1 else 0.0
-        gap_value = float(top1_prob - top2_prob) if candidatos else 0.0
-        return _registrar_estado_embudo({
-            "decision_final": "LXV_ONLY",
-            "decision_reason": "5v1x_bypass_aux",
-            "gate_quality": "bypass_aux",
-            "risk_mode": "LXV_ONLY",
-            "hard_block_reason": "",
-            "soft_wait_reason": "",
-            "top1_bot": top1_bot,
-            "top2_bot": top2_bot,
-            "gap_value": gap_value,
-            "top1_prob": top1_prob,
-            "top2_prob": top2_prob,
-            "degrade_from": "5v1x_bypass_aux",
-            "ia_real_backed": 0,
-            "real_source": str(globals().get("LXV_5V1X_REAL_SOURCE", "LXV_5V1X")),
-            "ia_model_mature": 0,
-        })
     if _purificacion_real_activa():
         _emitir_marca_purificacion_real()
         lxv_on = bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False))
@@ -17038,55 +16709,26 @@ async def obtener_saldo_real():
         return
     if not WEBSOCKETS_OK:
         return
-    def _saldo_ws_transitorio(exc: Exception) -> bool:
-        msg = str(exc).lower()
-        if isinstance(exc, (asyncio.TimeoutError, TimeoutError, OSError)):
-            return True
-        try:
-            if WEBSOCKETS_OK and isinstance(exc, websockets.exceptions.ConnectionClosed):
-                return True
-        except Exception:
-            pass
-        return (
-            "connectionclosed" in msg
-            or "timeout" in msg
-            or "timed out" in msg
-            or "winerror 121" in msg
-            or "1006" in msg
-            or "se agotó el tiempo de espera del semáforo" in msg
-        )
-
-    last_err = None
-    for intento in range(1, 4):
-        try:
-            async with websockets.connect(DERIV_WS_URL) as ws:
-                auth_msg = json.dumps({"authorize": token_real})
-                await ws.send(auth_msg)
-                resp_auth = json.loads(await asyncio.wait_for(ws.recv(), timeout=8.0))
-                if "error" in resp_auth:
-                    print(f"⚠️ Error en auth: {resp_auth['error']['message']}")
-                    return
-                bal_msg = json.dumps({"balance": 1, "subscribe": 1})
-                await ws.send(bal_msg)
-                resp_bal = json.loads(await asyncio.wait_for(ws.recv(), timeout=8.0))
-                if "error" in resp_bal:
-                    print(f"⚠️ Error en balance: {resp_bal['error']['message']}")
-                    return
-                bal_raw = (resp_bal.get("balance") or {}).get("balance")
-                if bal_raw is None:
-                    raise ValueError("balance_payload_incompleto")
-                saldo_real = f"{float(bal_raw):.2f}"
-                ULTIMA_ACT_SALDO = time.time()
-                _update_saldo_monitor_feed(float(bal_raw))
+    try:
+        async with websockets.connect(DERIV_WS_URL) as ws:
+            auth_msg = json.dumps({"authorize": token_real})
+            await ws.send(auth_msg)
+            resp = json.loads(await ws.recv())
+            if "error" in resp:
+                print(f"⚠️ Error en auth: {resp['error']['message']}")
                 return
-        except Exception as e:
-            last_err = e
-            if _saldo_ws_transitorio(e):
-                await asyncio.sleep(0.35 * intento)
-                continue
-            break
-    if last_err is not None:
-        print(f"⚠️ Error obteniendo saldo (transitorio): {last_err}")
+            bal_msg = json.dumps({"balance": 1, "subscribe": 1})
+            await ws.send(bal_msg)
+            resp = json.loads(await ws.recv())
+            if "error" in resp:
+                print(f"⚠️ Error en balance: {resp['error']['message']}")
+                return
+            if "balance" in resp:
+                saldo_real = f"{resp['balance']['balance']:.2f}"
+                ULTIMA_ACT_SALDO = time.time()
+                _update_saldo_monitor_feed(float(resp["balance"]["balance"]))
+    except Exception as e:
+        print(f"⚠️ Error obteniendo saldo: {e}")
 
 async def refresh_saldo_real(forzado=False):
     global ULTIMA_ACT_SALDO
@@ -17981,13 +17623,13 @@ async def main():
                         elif decision_final == EMBUDO_FINAL_REAL_MICRO:
                             candidatos = candidatos[:1]
                         elif decision_final == "LXV_ONLY":
-                            agregar_evento("🧪 5V1X bypass activo en embudo; emisión REAL se decide solo por COLUMN_SYNC.")
+                            agregar_evento("🧪 IA REAL purificada | LXV_SYNC habilitado (embudo en telemetría).")
                             candidatos = []
 
                         # LXV como ruta única de decisión REAL: el embudo legacy queda en telemetría.
                         if bool(LXV_SYNC_REAL_ROUTE_ENABLE):
                             if candidatos and _print_once("lxv-route-only", ttl=20.0):
-                                agregar_evento("🧊 Modo LXV_5V1X_REAL: legado REAL en telemetría (sin emisión).")
+                                agregar_evento("🧊 Modo LXV_SYNC_REAL: legado REAL en telemetría (sin emisión).")
                             candidatos = []
 
                         # ==================== AUTO-PRESELECCIÓN (MODO MANUAL) ====================
@@ -18150,7 +17792,7 @@ if __name__ == "__main__":
 # === BLOQUE 99 — RESUMEN FINAL DE LO QUE SE LOGRA ===
 #
 # - Bot maestro 5R6M-1-2-4-8-16 con:
-#   * Martingala 1-2-4-8 intacta.
+#   * Martingala 1-2-4 intacta.
 #   * Tokens DEMO/REAL y handshake maestro→bots intactos.
 #   * CSV enriquecidos, dataset_incremental.csv, IA XGBoost, reentrenos intactos.
 #   * HUD visual con Prob IA, % éxito, saldo, meta, eventos
