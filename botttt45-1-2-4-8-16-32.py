@@ -1541,6 +1541,18 @@ def _candles_payload_valido(data: dict | None, min_count: int) -> bool:
     except Exception:
         return False
 
+def _candles_payload_valido(data: dict | None, min_count: int) -> bool:
+    try:
+        candles = (data or {}).get("candles", [])
+        if not isinstance(candles, list) or len(candles) < int(min_count):
+            return False
+        sample = candles[-1] if candles else {}
+        if not isinstance(sample, dict):
+            return False
+        return any(k in sample for k in ("close", "open", "high", "low"))
+    except Exception:
+        return False
+
 async def obtener_velas(ws, symbol, token, reintentos=4):
     global _ws_fail_streak
     # respeta cooldown por símbolo

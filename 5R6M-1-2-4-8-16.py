@@ -3749,8 +3749,24 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
     try:
         if _purificacion_real_activa():
             _emitir_marca_purificacion_real()
+            try:
+                agregar_evento(
+                    f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                    f"ciclo={int(ciclo)} | owner_mem={str(REAL_OWNER_LOCK)} | "
+                    f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
+                )
+            except Exception:
+                pass
             return False
         if bot not in BOT_NAMES:
+            try:
+                agregar_evento(
+                    f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                    f"ciclo={int(ciclo)} | owner_mem={str(REAL_OWNER_LOCK)} | "
+                    f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
+                )
+            except Exception:
+                pass
             return False
 
         now = time.time()
@@ -3764,6 +3780,11 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
         if owner_lock in BOT_NAMES and owner_lock != bot:
             try:
                 agregar_evento(f"🔒 REAL bloqueado: {owner_lock.upper()} sigue activo. Ignorando intento de {bot.upper()}.")
+                agregar_evento(
+                    f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                    f"ciclo={int(ciclo)} | owner_mem={str(owner_lock)} | "
+                    f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
+                )
             except Exception:
                 pass
             try:
@@ -3815,6 +3836,14 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
                 if not got:
                     agregar_evento("⚠️ Token REAL no escrito: lock real.lock ocupado. Se evita activar sin exclusión.")
                     try:
+                        agregar_evento(
+                            f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                            f"ciclo={int(ciclo_obj)} | owner_mem={str(REAL_OWNER_LOCK)} | "
+                            f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
+                        )
+                    except Exception:
+                        pass
+                    try:
                         if origen == "orden_real":
                             limpiar_orden_real(bot)
                     except Exception:
@@ -3823,6 +3852,14 @@ def activar_real_inmediato(bot: str, ciclo: int, origen: str = "orden_real") -> 
                 ok_write = bool(write_token_atomic(TOKEN_FILE, f"REAL:{bot}"))
                 if not ok_write:
                     agregar_evento("⚠️ Token REAL no escrito: fallo de persistencia en token_actual.txt.")
+                    try:
+                        agregar_evento(
+                            f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                            f"ciclo={int(ciclo_obj)} | owner_mem={str(REAL_OWNER_LOCK)} | "
+                            f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
+                        )
+                    except Exception:
+                        pass
                     try:
                         if origen == "orden_real":
                             limpiar_orden_real(bot)
@@ -3923,6 +3960,14 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
 
     if _purificacion_real_activa():
         _emitir_marca_purificacion_real()
+        try:
+            agregar_evento(
+                f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                f"ciclo={int(ciclo)} | owner_mem={str(REAL_OWNER_LOCK)} | "
+                f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
+            )
+        except Exception:
+            pass
         return False
 
     # 🔒 No crear orden si ya hay otro owner REAL activo.
@@ -3934,6 +3979,11 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
     if owner_lock in BOT_NAMES and owner_lock != bot:
         try:
             agregar_evento(f"🔒 Orden REAL bloqueada para {bot.upper()}: {owner_lock.upper()} está activo.")
+            agregar_evento(
+                f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                f"ciclo={int(ciclo)} | owner_mem={str(owner_lock)} | "
+                f"owner_file={str(leer_token_archivo_raw())} | ok_activate=False"
+            )
         except Exception:
             pass
         return False
@@ -3977,6 +4027,15 @@ def escribir_orden_real(bot: str, ciclo: int) -> bool:
             _REAL_SHADOW_MICRO_OPEN_TS.append(float(time.time()))
         except Exception:
             pass
+    else:
+        try:
+            agregar_evento(
+                f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                f"ciclo={int(ciclo)} | owner_mem={str(owner_after_mem)} | "
+                f"owner_file={str(owner_after_file)} | ok_activate={str(bool(ok_activate))}"
+            )
+        except Exception:
+            pass
     return ok
 # === FIN PATCH REAL INMEDIATO ===
 
@@ -4004,7 +4063,19 @@ def emitir_real_autorizado(bot: str, ciclo: int, source: str = "LEGACY") -> bool
     prev_src = globals().get("_REAL_ROUTE_SOURCE", None)
     globals()["_REAL_ROUTE_SOURCE"] = src
     try:
-        return bool(escribir_orden_real(bot, int(ciclo)))
+        ok_emit = bool(escribir_orden_real(bot, int(ciclo)))
+        if not ok_emit:
+            try:
+                owner_after_mem = REAL_OWNER_LOCK if REAL_OWNER_LOCK in BOT_NAMES else None
+                owner_after_file = leer_token_archivo_raw()
+                agregar_evento(
+                    f"🔒 REAL no activado: owner/token/purificación | bot={str(bot).upper()} | "
+                    f"ciclo={int(ciclo)} | owner_mem={str(owner_after_mem)} | "
+                    f"owner_file={str(owner_after_file)} | ok_activate={str(ok_emit)}"
+                )
+            except Exception:
+                pass
+        return ok_emit
     finally:
         globals()["_REAL_ROUTE_SOURCE"] = prev_src
 
@@ -16057,7 +16128,7 @@ def _registrar_estado_embudo(data: dict | None = None) -> dict:
 def _lxv_5v1x_bypass_aux_activo() -> bool:
     """Bypass de candados auxiliares cuando 5V1X gobierna REAL en modo exclusivo."""
     try:
-        return bool(globals().get("LXV_5V1X_ONLY_ENABLE", False)) and bool(globals().get("LXV_SYNC_REAL_ROUTE_ENABLE", False))
+        return bool(globals().get("LXV_5V1X_ONLY_ENABLE", False))
     except Exception:
         return False
 
