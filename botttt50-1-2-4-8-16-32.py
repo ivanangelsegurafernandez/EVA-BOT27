@@ -370,6 +370,10 @@ async def _sync_round_wait_release(round_id: int) -> int:
     next_round = rid + 1
     print(Fore.YELLOW + Style.BRIGHT + f"⏸️ COLUMN_SYNC standby columna: {NOMBRE_BOT} ronda #{rid} esperando liberación #{next_round}...")
     estado_bot["sync_wait"] = True
+    estado_bot["sync_safe_hold"] = False
+    estado_bot["sync_desync_detected"] = False
+    estado_bot["sync_desync_since_ts"] = 0.0
+    estado_bot["sync_released_lag"] = 0
     last_hb_ts = 0.0
     wait_start_ts = time.time()
     last_progress_ts = wait_start_ts
@@ -387,23 +391,36 @@ async def _sync_round_wait_release(round_id: int) -> int:
         should_write = first_wait_tick or (released != last_released) or ((now_ts - last_hb_ts) >= 2.0)
         if released >= next_round:
             estado_bot["sync_wait"] = False
+            estado_bot["sync_safe_hold"] = False
+            estado_bot["sync_desync_detected"] = False
+            estado_bot["sync_desync_since_ts"] = 0.0
+            estado_bot["sync_released_lag"] = 0
             _sync_round_write_release_heartbeat(rid, next_round)
             print(Fore.GREEN + f"🔓 COLUMN_SYNC liberación detectada: ronda #{released} (bot {NOMBRE_BOT})")
+            if _print_once(f"sync-resync-ok-{rid}", ttl=8.0):
+                print(Fore.GREEN + Style.BRIGHT + f"✅ COLUMN_SYNC resync OK | bot={NOMBRE_BOT} | released={released} | next={next_round}")
             print(Fore.GREEN + Style.BRIGHT + f"▶️ COLUMN_SYNC salida standby: {NOMBRE_BOT} → ronda #{next_round}")
             return next_round
         total_wait_s = now_ts - wait_start_ts
         no_progress_s = now_ts - last_progress_ts
         if (total_wait_s >= float(SYNC_RELEASE_MAX_WAIT_S)) or (no_progress_s >= float(SYNC_RELEASE_NO_PROGRESS_S)):
-            estado_bot["sync_wait"] = False
             estado_bot["sync_release_failsafe"] = True
-            _sync_round_write_release_heartbeat(rid, next_round)
-            if _print_once(f"sync-failsafe-{rid}", ttl=30.0):
+            estado_bot["sync_safe_hold"] = True
+            estado_bot["sync_desync_detected"] = True
+            if not estado_bot.get("sync_desync_since_ts"):
+                estado_bot["sync_desync_since_ts"] = now_ts
+            estado_bot["sync_released_lag"] = max(0, int(next_round - released))
+            _sync_round_write_wait_heartbeat(rid, next_round)
+            if _print_once(f"sync-desync-hold-{rid}", ttl=20.0):
                 print(
                     Fore.YELLOW + Style.BRIGHT +
-                    f"⚠️ COLUMN_SYNC timeout/stale en standby | {NOMBRE_BOT} ronda #{rid} | "
-                    f"released_round={released} | salida failsafe"
+                    f"⚠️ COLUMN_SYNC desync hold | bot={NOMBRE_BOT} | round={rid} | next={next_round} | released={released}"
                 )
-            return next_round
+            if _print_once(f"sync-desync-hold-long-{rid}", ttl=30.0):
+                print(
+                    Fore.YELLOW + Style.BRIGHT +
+                    f"⚠️ COLUMN_SYNC desync hold | {NOMBRE_BOT} ronda #{rid} | next={next_round} | released={released} | sin operar hasta liberación maestro"
+                )
         if should_write:
             _sync_round_write_wait_heartbeat(rid, next_round)
             last_hb_ts = now_ts
@@ -413,6 +430,7 @@ async def _sync_round_wait_release(round_id: int) -> int:
             print(Fore.CYAN + f"… standby columna {NOMBRE_BOT}: ronda #{rid}, released_round={released}")
         await asyncio.sleep(0.80)
     estado_bot["sync_wait"] = False
+    estado_bot["sync_safe_hold"] = False
     _sync_round_write_release_heartbeat(rid, next_round)
     return next_round
 # === /COLUMN_SYNC ===
