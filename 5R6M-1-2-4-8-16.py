@@ -1086,11 +1086,12 @@ reinicio_forzado = asyncio.Event()
 # ==================== LXV: ruta única de decisión REAL ====================
 # Mayor valor = mayor prioridad histórica (legado de compatibilidad).
 LXV_PRIORIDAD_HISTORICA = {bot: int(len(BOT_NAMES) - i) for i, bot in enumerate(BOT_NAMES)}
-LXV_RUNTIME_PATTERN = "5V1X"  # patrón único válido para promoción REAL automática
-LXV_FRESH_X_ENABLE = True
+LXV_RUNTIME_PATTERNS = {"5V1X", "4V2X"}
+LXV_RUNTIME_PATTERN = "5V1X+4V2X"  # patrones válidos para promoción REAL automática
+LXV_FRESH_X_ENABLE = False
 LXV_INTERVAL_S = 60.0
-LXV_FRESH_X_RATIO = 0.40
-LXV_FRESH_X_MAX_AGE_S = LXV_INTERVAL_S * LXV_FRESH_X_RATIO
+LXV_FRESH_X_RATIO = 1.0
+LXV_FRESH_X_MAX_AGE_S = 999999.0
 LXV_FRESH_EVENT_COOLDOWN_S = 8.0
 
 
@@ -1202,8 +1203,79 @@ def elegir_x_mayor_peso(candidatas_x: list[str], estado: dict, columnas: list[di
         return None, {"motivo": "error_elegir_x"}
 
 
+def _prob_ia_lxv_bot(bot: str, estado: dict) -> float:
+    """
+    Devuelve Prob IA normalizada en rango 0..1 para desempate 4V2X.
+    No funciona como gate.
+    Solo sirve para elegir la X de menor Prob IA.
+    """
+    try:
+        st = estado.get(bot, {}) if isinstance(estado, dict) else {}
+        if not isinstance(st, dict):
+            return 1.0
+
+        for key in ("prob_ia", "ia_prob_senal"):
+            v = st.get(key, None)
+            if v is None:
+                continue
+            try:
+                if isinstance(v, str):
+                    v = v.strip().replace("%", "")
+                    if not v or v.lower() in ("nan", "none", "null", "--"):
+                        continue
+                p = float(v)
+                if not math.isfinite(p):
+                    continue
+                if p > 1.0 and p <= 100.0:
+                    p = p / 100.0
+                if 0.0 <= p <= 1.0:
+                    return float(p)
+            except Exception:
+                continue
+
+        return 1.0
+    except Exception:
+        return 1.0
+
+
+def elegir_x_menor_prob_ia_lxv(candidatas_x: list[str], estado: dict) -> tuple[str | None, dict]:
+    """
+    Para 4V2X:
+    Elige la X con menor Prob IA.
+    Si hay empate, desempata por orden BOT_NAMES para resultado determinista.
+    """
+    try:
+        xs = [str(x) for x in (candidatas_x or []) if str(x) in BOT_NAMES]
+        if not xs:
+            return None, {"motivo": "sin_x_validas_4v2x"}
+
+        idx = {b: i for i, b in enumerate(BOT_NAMES)}
+        filas = []
+        for bot in xs:
+            p = _prob_ia_lxv_bot(bot, estado)
+            filas.append({
+                "bot": bot,
+                "prob_ia": float(p),
+                "idx": int(idx.get(bot, 999)),
+            })
+
+        filas.sort(key=lambda r: (r["prob_ia"], r["idx"]))
+        win = filas[0]
+
+        return str(win["bot"]), {
+            "motivo": "x_menor_prob_ia_4v2x",
+            "criterio": "menor_prob_ia",
+            "probs_x": {f["bot"]: float(f["prob_ia"]) for f in filas},
+            "orden": [f["bot"] for f in filas],
+            "elegido": str(win["bot"]),
+            "prob_elegida": float(win["prob_ia"]),
+        }
+    except Exception as e:
+        return None, {"motivo": "error_x_menor_prob_ia", "error": repr(e)[:180]}
+
+
 def detectar_lxv(columnas: list[dict], estado: dict, contexto: dict | None = None) -> dict | None:
-    """Detecta patrón LXV válido (SOLO 5V1X) en la última columna visible (runtime)."""
+    """Detecta patrones LXV válidos: 5V1X o 4V2X en la última columna visible."""
     try:
         cols = list(columnas or [])
         if not cols:
@@ -1233,16 +1305,48 @@ def detectar_lxv(columnas: list[dict], estado: dict, contexto: dict | None = Non
                 "motivo": "x_unica_en_lastcol",
                 "columna_id": columna_id,
                 "col_visible": col_visible,
+                "verdes_count": len(verdes),
+                "xs_count": len(xs),
                 "xs_consideradas": list(xs),
                 "x_ganadora": x,
+                "criterio_x": "x_unica",
             }
+
+        if len(verdes) == 4 and len(xs) == 2:
+            x, diag = elegir_x_menor_prob_ia_lxv(xs, estado)
+            if x not in BOT_NAMES:
+                return {
+                    "motivo": "4v2x_sin_x_valida",
+                    "col_visible": col_visible,
+                    "columna_id": columna_id,
+                    "xs_consideradas": list(xs),
+                    "diag_4v2x": diag,
+                }
+
+            return {
+                "pattern": "4V2X",
+                "bot_objetivo": x,
+                "motivo": "x_menor_prob_ia_en_4v2x",
+                "columna_id": columna_id,
+                "col_visible": col_visible,
+                "verdes_count": len(verdes),
+                "xs_count": len(xs),
+                "xs_consideradas": list(xs),
+                "x_ganadora": x,
+                "criterio_x": "menor_prob_ia",
+                "diag_4v2x": diag,
+                "probs_x": diag.get("probs_x", {}) if isinstance(diag, dict) else {},
+            }
+
         return {
-            "motivo": "lastcol_no_pattern",
+            "motivo": "lastcol_no_pattern_5v1x_4v2x",
             "col_visible": col_visible,
             "columna_id": columna_id,
+            "verdes_count": len(verdes),
+            "xs_count": len(xs),
         }
-    except Exception:
-        return None
+    except Exception as e:
+        return {"motivo": "detectar_lxv_exception", "error": repr(e)[:180]}
 
 
 def _parse_ts_lxv(value):
@@ -1361,12 +1465,17 @@ def validar_frescura_x_lxv(lxv_decision, columnas):
     """
     try:
         if not bool(LXV_FRESH_X_ENABLE):
-            return True, "fresh_disabled", {}
+            return True, "fresh_disabled", {
+                "fresh_mode": "disabled",
+                "edad_x": 0.0,
+                "max_age": float(LXV_FRESH_X_MAX_AGE_S),
+                "col_visible": (lxv_decision or {}).get("col_visible", None) if isinstance(lxv_decision, dict) else None,
+            }
 
         if not isinstance(lxv_decision, dict):
             return False, "decision_invalida", {}
 
-        if str(lxv_decision.get("pattern", "")) != "5V1X":
+        if str(lxv_decision.get("pattern", "")) not in ("5V1X", "4V2X"):
             return False, "pattern_invalido", {}
 
         bot_x = str(lxv_decision.get("bot_objetivo", "") or "").strip()
@@ -1399,21 +1508,21 @@ def validar_frescura_x_lxv(lxv_decision, columnas):
 
         col_visible = int(col_actual.get("col_visible", lxv_decision.get("col_visible", -1)) or -1)
 
-        # La última columna debe estar completa y debe ser exactamente 5V1X.
+        # La última columna debe estar completa y debe ser 5V1X o 4V2X.
         if not all(marcas_actuales.get(b) in ("V", "X") for b in BOT_NAMES):
             return False, "lastcol_incompleta", {"col_visible": col_visible}
 
         verdes = [b for b in BOT_NAMES if marcas_actuales.get(b) == "V"]
         xs = [b for b in BOT_NAMES if marcas_actuales.get(b) == "X"]
 
-        if len(verdes) != 5 or len(xs) != 1:
+        if not ((len(verdes) == 5 and len(xs) == 1) or (len(verdes) == 4 and len(xs) == 2)):
             return False, "pattern_ya_no_valido", {
                 "verdes": len(verdes),
                 "xs": len(xs),
                 "col_visible": col_visible,
             }
 
-        if xs[0] != bot_x or marcas_actuales.get(bot_x) != "X":
+        if bot_x not in xs or marcas_actuales.get(bot_x) != "X":
             return False, "bot_x_no_es_x_actual", {
                 "bot_x": bot_x,
                 "xs": xs,
@@ -1465,11 +1574,11 @@ def validar_frescura_x_lxv(lxv_decision, columnas):
 
 
 def resolver_candidato_real_lxv(estado: dict, contexto: dict | None = None) -> dict | None:
-    """Ruta única de selección REAL: solo LXV desde columna visible HUD + LXV_FRESH_X."""
+    """Ruta única de selección REAL: LXV desde columna visible HUD, patrones 5V1X + 4V2X."""
     cols = construir_columnas_lxv(estado)
     out = detectar_lxv(cols, estado, contexto=contexto)
 
-    if isinstance(out, dict) and str(out.get("bot_objetivo")) in BOT_NAMES and str(out.get("pattern")) == "5V1X":
+    if isinstance(out, dict) and str(out.get("bot_objetivo")) in BOT_NAMES and str(out.get("pattern")) in ("5V1X", "4V2X"):
         fresh_ok, fresh_motivo, fresh_info = validar_frescura_x_lxv(out, cols)
         if not fresh_ok:
             return None
@@ -12440,7 +12549,7 @@ def evaluar_semaforo():
 
     if top1:
         return "🟢", "SEÑAL LXV", f"{top1} • patrón={pattern}"
-    return "🟡", "EN ESPERA", "Sin patrón LXV (5V1X)."
+    return "🟡", "EN ESPERA", "Sin patrón LXV (5V1X/4V2X)."
 
 # NUEVAS FUNCIONES PARA RESET
 RESET_ON_START = False  # Cambiado a False para mantener historial entre sesiones
@@ -14563,7 +14672,11 @@ async def main():
                             estado_bots,
                             contexto={"prioridad_historica": LXV_PRIORIDAD_HISTORICA},
                         )
-                        lxv_decision = lxv_eval if isinstance(lxv_eval, dict) and str(lxv_eval.get("pattern")) == "5V1X" and str(lxv_eval.get("bot_objetivo", "")) in BOT_NAMES else None
+                        lxv_decision = lxv_eval if (
+                            isinstance(lxv_eval, dict)
+                            and str(lxv_eval.get("pattern")) in ("5V1X", "4V2X")
+                            and str(lxv_eval.get("bot_objetivo", "")) in BOT_NAMES
+                        ) else None
                         candidatos = []
                         if isinstance(lxv_decision, dict):
                             bot_lxv = str(lxv_decision.get("bot_objetivo", "") or "").strip()
@@ -14580,7 +14693,7 @@ async def main():
                                                 edad_txt += f" max={float(fresh_info.get('max_age')):.1f}s"
                                     except Exception:
                                         edad_txt = ""
-                                    msg_fresh = f"🧭 LXV 5V1X descartado: {fresh_motivo}{edad_txt}"
+                                    msg_fresh = f"🧭 LXV descartado: pattern={lxv_decision.get('pattern', '--')} motivo={fresh_motivo}{edad_txt}"
                                     if (msg_fresh != _LXV_FRESH_LAST_MSG) or ((now_fresh - float(_LXV_FRESH_LAST_TS or 0.0)) >= float(LXV_FRESH_EVENT_COOLDOWN_S)):
                                         agregar_evento(msg_fresh)
                                         globals()["_LXV_FRESH_LAST_MSG"] = msg_fresh
@@ -14604,29 +14717,35 @@ async def main():
                                             globals()["_LXV_ROT_LAST_TS"] = float(now_rot)
                                     else:
                                         candidatos = [(1.0, bot_lxv, 0.0, 0.0, 0.0, 0, 0.0, 0.0)]
-                                        edad_ok = float((fresh_info or {}).get("edad_x", 0.0) or 0.0)
-                                        max_ok = float((fresh_info or {}).get("max_age", LXV_FRESH_X_MAX_AGE_S) or LXV_FRESH_X_MAX_AGE_S)
+                                        pattern_lxv = str(lxv_decision.get("pattern", "--"))
                                         col_ok = (fresh_info or {}).get("col_visible", lxv_decision.get("col_visible", "--"))
-                                        fresh_mode = "time_only_40pct"
-                                        try:
-                                            if isinstance(fresh_info, dict):
-                                                fresh_mode = str(fresh_info.get("fresh_mode", "time_only_40pct"))
-                                        except Exception:
-                                            pass
+                                        if pattern_lxv == "5V1X":
+                                            agregar_evento(f"🧭 LXV LASTCOL 5V1X → {bot_lxv} | X única | col={col_ok}")
+                                        elif pattern_lxv == "4V2X":
+                                            probs_x = (lxv_decision or {}).get("probs_x", {})
+                                            xs_cons = [x for x in (lxv_decision or {}).get("xs_consideradas", []) if str(x) in BOT_NAMES]
+                                            xs_det = []
+                                            for xbot in xs_cons:
+                                                p = 1.0
+                                                try:
+                                                    if isinstance(probs_x, dict):
+                                                        p = float(probs_x.get(xbot, 1.0))
+                                                except Exception:
+                                                    p = 1.0
+                                                xs_det.append(f"{xbot}:{p:.2f}")
+                                            agregar_evento(f"🧭 LXV LASTCOL 4V2X → {bot_lxv} | X menor Prob IA | Xs={' '.join(xs_det)} | col={col_ok}")
                                         agregar_evento(
-                                            f"🧭 LXV LASTCOL {lxv_decision.get('pattern','--')} → {bot_lxv} "
-                                            f"(col_visible={lxv_decision.get('col_visible','--')}, xs={lxv_decision.get('xs_consideradas',[])}, "
-                                            f"xg={lxv_decision.get('x_ganadora','--')}, fresh=OK edad={edad_ok:.2f}s max={max_ok:.2f}s mode={fresh_mode})"
+                                            f"🧭 LXV FRESH_X desactivado: entrada por alineación visual | pattern={pattern_lxv} "
+                                            f"| criterio_x={lxv_decision.get('criterio_x', '--')} | col={col_ok}"
                                         )
-                                        agregar_evento(f"🧭 LXV FRESH_X OK → {bot_lxv} edad={edad_ok:.2f}s max={max_ok:.2f}s mode={fresh_mode} col={col_ok}")
                         else:
                             try:
                                 now_lxv = time.time()
                                 diag_reason = str((lxv_eval or {}).get("motivo", "sin_senal")) if isinstance(lxv_eval, dict) else "sin_senal"
                                 if diag_reason == "lastcol_incompleta":
                                     diag_msg = "🧭 LXV sin señal en lastcol: lastcol incompleta."
-                                elif diag_reason == "lastcol_no_pattern":
-                                    diag_msg = "🧭 LXV sin señal en lastcol: lastcol no es 5V1X."
+                                elif diag_reason in ("lastcol_no_pattern", "lastcol_no_pattern_5v1x_4v2x"):
+                                    diag_msg = "🧭 LXV sin señal en lastcol: lastcol no es 5V1X ni 4V2X."
                                 else:
                                     diag_msg = "🧭 LXV sin señal en lastcol."
                                 if (diag_msg != _LXV_LASTCOL_DIAG_MSG) or ((now_lxv - float(_LXV_LASTCOL_DIAG_TS or 0.0)) >= 12.0):
