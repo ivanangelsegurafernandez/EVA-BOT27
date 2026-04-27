@@ -38,6 +38,7 @@ from unicodedata import normalize
 import threading
 from datetime import datetime, timedelta
 from contextlib import contextmanager
+from pathlib import Path
 import sys
 import shutil
 import joblib
